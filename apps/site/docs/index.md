@@ -15,6 +15,73 @@ This site is the project's home. Below are dated notes tracking the initiative's
 
 ## Notes
 
+### 2026-03-23 — Observe-mode runtime ships
+
+The runtime is real. Four packages, 103 tests, one process.
+
+RaiFlow now has a working observe-mode payment runtime that you can point at a Nano node and start accepting payments through. No private keys required. The runtime watches accounts you control, matches incoming confirmed sends to open invoices, and emits typed events to your application via webhooks.
+
+#### What shipped
+
+**`@openrai/watcher`** — Chain observation. Connects to a Nano node via WebSocket (real-time confirmations) or RPC polling (fallback). Subscribes per-account, reconnects with backoff, and feeds typed `ConfirmedBlock` observations to the runtime. No block-lattice knowledge leaks into the rest of the system.
+
+**`@openrai/runtime`** — The core. Manages the invoice lifecycle (`open` → `completed` | `expired` | `canceled`), matches confirmed blocks to open invoices using FIFO ordering, accumulates partial payments with BigInt arithmetic, and emits events. Exposes a REST API over web standard `Request`/`Response` — works with Node, Bun, Deno, or anything that speaks HTTP.
+
+**`@openrai/webhook`** — Delivery infrastructure. HMAC-SHA256 signing (Stripe-style `t=<timestamp>,v1=<hmac>` format), signature verification for consumers, at-least-once delivery with exponential backoff and jitter, endpoint registration.
+
+**HTTP API** — Ten endpoints, no framework dependency:
+
+```
+POST   /invoices              Create (Idempotency-Key header)
+GET    /invoices              List (?status=open)
+GET    /invoices/:id          Get
+POST   /invoices/:id/cancel   Cancel
+GET    /invoices/:id/payments List payments
+GET    /invoices/:id/events   List events
+POST   /webhooks              Register endpoint
+GET    /webhooks              List endpoints
+DELETE /webhooks/:id          Remove endpoint
+GET    /health                Liveness check
+```
+
+#### Design choices that matter
+
+**Idempotency is structural, not optional.** Invoice creation accepts an `Idempotency-Key` header. Block processing deduplicates by send block hash. These aren't features — they're invariants. A developer who retries a request or a watcher that replays a block cannot produce duplicate state. This is what separates payment infrastructure from a demo.
+
+**The runtime does not depend on the watcher.** They share a contract type (`ConfirmedBlock` and `WatcherSink` in `@openrai/model`) and are wired together at the application level. Today they run in one process. Tomorrow the watcher could push observations over a queue, and the runtime wouldn't change. The seam is there.
+
+**No framework lock-in.** The HTTP handler is a pure `(Request) => Promise<Response>` function. Mount it in Express, Fastify, Hono, Bun.serve, Deno.serve, or a raw Node `http.createServer`. The entry point (`main.ts`) includes a Node adapter, but the handler itself is portable.
+
+**Observe mode means no keys, no custody, no receive blocks.** The runtime watches for confirmed *send* blocks to your accounts. It never holds seeds, never signs blocks, never moves funds. This is the right first mode for most integrations — you don't need custody to accept payments.
+
+**Web standard `Request`/`Response` over framework abstractions.** The runtime doesn't import Express, Hono, or any router. Ten routes don't need a routing library. The handler is ~220 lines of URL parsing and JSON serialization. This is a deliberate choice: dependencies you don't add can't break.
+
+#### What this means
+
+You can now:
+
+1. Start the runtime pointed at your Nano node
+2. `POST /invoices` with a recipient address, expected amount, and optional metadata
+3. When someone sends Nano to that address, receive a `payment.confirmed` webhook
+4. When the invoice threshold is met, receive an `invoice.completed` webhook
+5. If the invoice expires, receive an `invoice.expired` webhook
+
+Your application never touches RPC. It never interprets blocks. It gets clean, typed JSON events and acts on them.
+
+#### Who should look at this
+
+If you're building Nano payment infrastructure — CLI tools, wallet backends, merchant integrations, payment gateways — the model and event vocabulary here are designed to be adopted or forked. The `Invoice` / `Payment` / `EventEnvelope` types are intentionally minimal and Nano-native. They might be useful even if you don't use the runtime.
+
+If you're experimenting with HTTP payment negotiation for agents or machines — protocols where a service responds with payment-required and a client settles programmatically — RaiFlow's headless, API-first approach is built for exactly that flow. No QR codes, no browser, no wallet UI. `POST /invoices`, get an address, pay, receive confirmation via webhook. That's the loop.
+
+If you think the Nano ecosystem needs a credible answer to the "nanopayments for AI agents and machine commerce" narrative that stablecoin infrastructure is currently claiming, this is an attempt at that answer. Nano's settlement characteristics — truly feeless, sub-second, no gas, no batching, no intermediary — are most differentiable in server-to-server and agent-to-service flows. Not in QR-code retail. Not in generic merchant handwaving.
+
+The runtime is in-memory only right now. Persistent stores, the typed SDK, and reference integrations are next. But the model is stable, the API is real, and the test suite covers the critical paths: matching, idempotency, state machines, signing.
+
+Source is on [GitHub](https://github.com/openrai/raiflow). The [roadmap](/roadmap) is a living checklist.
+
+---
+
 ### 2026-03-23 — Canonical event model simplified
 
 We rewrote the canonical event model to be much smaller and more Nano-native. The key principle: for the mainline payment-proof story, a **confirmed matching send block** is the first event that should matter to application logic.
