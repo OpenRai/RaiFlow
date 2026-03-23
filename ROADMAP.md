@@ -16,10 +16,7 @@ A living checklist. Updated as work progresses.
 
 ## Phase 1 — Freeze the model
 
-- [x] Canonical `Invoice` shape defined
-- [x] Canonical `Payment` shape defined
-- [x] Typed `EventEnvelope` defined
-- [x] `WebhookEndpoint` defined
+- [x] Canonical `Invoice`, `Payment`, `EventEnvelope`, `WebhookEndpoint` shapes defined
 - [x] Event vocabulary frozen: `invoice.created`, `payment.confirmed`, `invoice.completed`, `invoice.expired`, `invoice.canceled`
 - [x] RFC 0001 — Project framing
 - [x] RFC 0002 — Observe mode architecture
@@ -29,23 +26,21 @@ A living checklist. Updated as work progresses.
 
 ## Phase 2 — Observe-mode MVP
 
-- [ ] Watch configured Nano accounts/addresses
-- [ ] Detect incoming confirmed send blocks
-- [ ] Match confirmed sends to open invoices
-- [ ] Emit `payment.confirmed` events
-- [ ] Emit `invoice.completed` events
-- [ ] Handle invoice expiry (`invoice.expired`)
-- [ ] Attach off-chain metadata to invoices
-- [ ] Persist invoice and payment state
-- [ ] Basic webhook delivery with HMAC-SHA256 signing
-- [ ] At-least-once delivery with retry
+- [x] `@openrai/watcher` — chain observation (WebSocket + RPC polling fallback)
+- [x] `@openrai/runtime` — invoice lifecycle, payment matching, expiry, idempotency
+- [x] `@openrai/webhook` — HMAC-SHA256 signing, verification, at-least-once delivery
+- [x] Framework-agnostic REST API (web standard Request/Response)
+- [x] Standalone server entry point
+- [x] Store interfaces and in-memory implementations
+- [x] Watcher/runtime decoupled via contract types in model
+- [x] Test suite (103 tests across runtime, stores, HTTP handler, signing)
 
 ---
 
 ## Phase 3 — SDK and demos
 
+- [x] Webhook signature verification helper (shipped in `@openrai/webhook`)
 - [ ] `@openrai/sdk-js` typed client
-- [ ] Webhook verification helper
 - [ ] Reference Express integration
 - [ ] Reference Next.js checkout demo
 - [ ] Example webhook consumer
@@ -54,12 +49,10 @@ A living checklist. Updated as work progresses.
 
 ## Phase 4 — Hardening and pilot integrations
 
-- [ ] Retry-safe event delivery
-- [ ] Idempotency enforcement
-- [ ] Persistence adapters
+- [ ] Persistent store adapters (SQLite, Postgres)
 - [ ] Observability and structured logs
-- [ ] Test coverage for matching and confirmation flows
-- [ ] Deployment documentation
+- [ ] Integration tests against Nano test network
+- [ ] Deployment documentation (Docker, standalone)
 - [ ] At least one pilot integration
 
 ---
@@ -67,8 +60,7 @@ A living checklist. Updated as work progresses.
 ## Phase 5 — Optional custodial mode
 
 - [ ] Treasury wallet operation
-- [ ] Payouts
-- [ ] Refunds
+- [ ] Payouts and refunds
 - [ ] Automated receive flows
 - [ ] Explicit hot-wallet mode
 
