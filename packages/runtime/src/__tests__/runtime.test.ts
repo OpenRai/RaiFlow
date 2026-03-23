@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { RaiFlowEvent, ConfirmedBlock } from '@openrai/model';
 import type { WebhookDelivery } from '@openrai/webhook';
-import { Runtime } from '../runtime.js';
+import { Runtime, xnoToRaw } from '../runtime.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -583,5 +583,192 @@ describe('listInvoices and query methods', () => {
       'payment.confirmed',
       'invoice.completed',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// xnoToRaw conversion tests
+// ---------------------------------------------------------------------------
+
+describe('xnoToRaw', () => {
+  it('converts 1 XNO to raw', () => {
+    expect(xnoToRaw('1')).toBe('1000000000000000000000000000000');
+  });
+
+  it('converts fractional XNO', () => {
+    expect(xnoToRaw('0.001')).toBe('1000000000000000000000000000');
+  });
+
+  it('converts a tiny amount', () => {
+    expect(xnoToRaw('0.00042')).toBe('420000000000000000000000000');
+  });
+
+  it('converts a large amount', () => {
+    expect(xnoToRaw('133248')).toBe('133248000000000000000000000000000000');
+  });
+
+  it('converts amount with full 30-digit precision', () => {
+    // 1 raw
+    expect(xnoToRaw('0.000000000000000000000000000001')).toBe('1');
+  });
+
+  it('rejects empty string', () => {
+    expect(() => xnoToRaw('')).toThrow('Invalid XNO amount');
+  });
+
+  it('rejects negative amounts', () => {
+    expect(() => xnoToRaw('-1')).toThrow('Invalid XNO amount');
+  });
+
+  it('rejects zero', () => {
+    expect(() => xnoToRaw('0')).toThrow('must be greater than zero');
+  });
+
+  it('rejects more than 30 decimal places', () => {
+    expect(() => xnoToRaw('0.0000000000000000000000000000001')).toThrow('more than 30 decimal places');
+  });
+
+  it('trims whitespace', () => {
+    expect(xnoToRaw('  1  ')).toBe('1000000000000000000000000000000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// expectedAmount convenience parameter tests
+// ---------------------------------------------------------------------------
+
+describe('createInvoice with expectedAmount (XNO)', () => {
+  it('creates an invoice using XNO amount', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmount: '0.001',
+    });
+
+    expect(invoice.expectedAmountRaw).toBe('1000000000000000000000000000');
+    expect(invoice.status).toBe('open');
+  });
+
+  it('expectedAmountRaw takes precedence if both provided', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+      expectedAmount: '999',
+    });
+
+    expect(invoice.expectedAmountRaw).toBe(ONE_XNO);
+  });
+
+  it('throws if neither expectedAmountRaw nor expectedAmount provided', async () => {
+    const { runtime } = createTestRuntime();
+    await expect(
+      runtime.createInvoice({ recipientAccount: TEST_ACCOUNT_1 }),
+    ).rejects.toThrow('Either expectedAmountRaw or expectedAmount is required');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Event listener (on/off) tests
+// ---------------------------------------------------------------------------
+
+describe('runtime.on / runtime.off', () => {
+  it('listener receives events of the subscribed type', async () => {
+    const { runtime } = createTestRuntime();
+    const received: RaiFlowEvent[] = [];
+    runtime.on('invoice.created', (ev) => { received.push(ev); });
+
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    // Listener is fire-and-forget — give microtasks a tick
+    await new Promise((r) => setTimeout(r, 10));
+    expect(received).toHaveLength(1);
+    expect(received[0]!.type).toBe('invoice.created');
+  });
+
+  it('wildcard listener receives all event types', async () => {
+    const { runtime } = createTestRuntime();
+    const received: RaiFlowEvent[] = [];
+    runtime.on('*', (ev) => { received.push(ev); });
+
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: ONE_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    // invoice.created + payment.confirmed + invoice.completed
+    expect(received).toHaveLength(3);
+    expect(received.map((e) => e.type)).toEqual([
+      'invoice.created',
+      'payment.confirmed',
+      'invoice.completed',
+    ]);
+  });
+
+  it('off removes a listener', async () => {
+    const { runtime } = createTestRuntime();
+    const received: RaiFlowEvent[] = [];
+    const listener = (ev: RaiFlowEvent) => { received.push(ev); };
+    runtime.on('invoice.created', listener);
+    runtime.off('invoice.created', listener);
+
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(received).toHaveLength(0);
+  });
+
+  it('listener that throws does not crash the runtime', async () => {
+    const { runtime } = createTestRuntime();
+    runtime.on('invoice.created', () => { throw new Error('boom'); });
+
+    // Should not reject
+    const invoice = await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    expect(invoice.status).toBe('open');
+  });
+
+  it('async listener that rejects does not crash the runtime', async () => {
+    const { runtime } = createTestRuntime();
+    runtime.on('invoice.created', async () => { throw new Error('async boom'); });
+
+    const invoice = await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    expect(invoice.status).toBe('open');
+  });
+
+  it('multiple listeners on the same event type all fire', async () => {
+    const { runtime } = createTestRuntime();
+    const a: string[] = [];
+    const b: string[] = [];
+    runtime.on('invoice.created', () => { a.push('a'); });
+    runtime.on('invoice.created', () => { b.push('b'); });
+
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(a).toEqual(['a']);
+    expect(b).toEqual(['b']);
   });
 });
