@@ -1,15 +1,3 @@
-node_modules
-dist
-build
-.cache
-.turbo
-.DS_Store
-.env
-.env.*
-coverage
-apps/site/docs/.vitepress/cache
-apps/site/docs/.vitepress/dist
-
 # Logs
 logs
 *.log
