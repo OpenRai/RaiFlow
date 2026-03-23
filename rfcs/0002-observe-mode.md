@@ -77,8 +77,8 @@ The runtime is responsible for:
 - storing invoices and their expected payment parameters
 - receiving `PaymentObservation` events from the watcher
 - matching observations to open invoices (by address, amount, and status)
-- producing `PaymentProof` objects for matched, confirmed payments
-- emitting normalized `Event` objects
+- producing `Payment` records for matched, confirmed payments
+- emitting normalized events via typed `EventEnvelope` objects
 - delivering events to registered `WebhookEndpoint` targets
 
 ### Matching logic
@@ -86,24 +86,24 @@ The runtime is responsible for:
 An observation matches an invoice when:
 - the receiving address matches the invoice address
 - the received amount meets or exceeds the expected amount
-- the invoice is in `pending` status
-- the confirmation threshold is met
+- the invoice is in `open` status
+- the send block is confirmed
 
 On a match:
-- the invoice status transitions to `completed`
-- a `PaymentProof` is created
+- a `Payment` record is created
+- the invoice's `confirmedAmountRaw` is updated
 - a `payment.confirmed` event is emitted
-- a `invoice.completed` event is emitted
+- if the invoice's completion rule is now satisfied, the invoice transitions to `completed` and an `invoice.completed` event is emitted
 
 ### Confirmation threshold
 
-The initial observe mode will use the Nano node's native confirmation signaling (confirmation subscription via WebSocket) as the default confirmation signal.
+The initial observe mode uses the Nano node's native confirmation signaling (confirmation subscription via WebSocket) as the default confirmation signal.
 
-A configurable `confirmationThreshold` parameter will be supported for future use.
+A confirmed send block is the first event that matters to application logic. Additional confirmation threshold parameters may be supported for future use.
 
 ### Invoice expiry
 
-If a configured `expiresAt` timestamp is reached on a pending invoice with no matching payment, the runtime emits an `invoice.expired` event and transitions the invoice to `expired` status.
+If a configured `expiresAt` timestamp is reached on an open invoice that has not been completed, the runtime emits an `invoice.expired` event and transitions the invoice to `expired` status.
 
 ---
 

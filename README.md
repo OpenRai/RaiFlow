@@ -38,21 +38,21 @@ RaiFlow begins with the smallest useful payment runtime for Nano.
 The first mode is keyless observation of incoming payments.  
 RaiFlow should be useful before it holds or spends funds.
 
-### 2. Payment proof first
-A confirmed incoming payment should become a first-class application object:
+### 2. Confirmed payment first
+A confirmed matching Nano transfer should become a first-class application object:
 - who paid
 - how much
 - for what invoice / expectation
-- with what confirmation status
+- with what send block hash
 - with what timestamp and chain context
 
 ### 3. Events first
 Applications should consume:
 - `invoice.created`
-- `payment.detected`
 - `payment.confirmed`
 - `invoice.completed`
-- `webhook.delivery_failed`
+- `invoice.expired`
+- `invoice.canceled`
 
 Not raw node/block mechanics.
 
@@ -75,8 +75,8 @@ The first public surface should stay small.
 
 Initial primitives:
 - `Invoice`
-- `PaymentProof`
-- `Event`
+- `Payment`
+- `EventEnvelope`
 - `WebhookEndpoint`
 
 ### 7. Custody later

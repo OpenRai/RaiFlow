@@ -61,18 +61,17 @@ This is intentional. RaiFlow should prove its value as a payment runtime before 
 The initial public API surface is:
 
 - `Invoice` — a payment expectation with associated metadata
-- `PaymentProof` — a confirmed incoming payment, normalized into a stable application object
-- `Event` — a normalized application event (e.g. `payment.confirmed`)
+- `Payment` — a confirmed matching Nano transfer, normalized into a stable application object
+- `EventEnvelope` — a typed, normalized application event (e.g. `payment.confirmed`)
 - `WebhookEndpoint` — a registered delivery target for events
 
 ### Initial event vocabulary
 
 - `invoice.created`
-- `payment.detected`
 - `payment.confirmed`
 - `invoice.completed`
 - `invoice.expired`
-- `webhook.delivery_failed`
+- `invoice.canceled`
 
 ---
 
