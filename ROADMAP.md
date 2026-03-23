@@ -67,17 +67,16 @@ Define the smallest useful public contract.
 ## Deliverables
 Canonical model for:
 - `Invoice`
-- `PaymentProof`
-- `Event`
+- `Payment`
+- `EventEnvelope`
 - `WebhookEndpoint`
 
 Initial event vocabulary:
 - `invoice.created`
-- `payment.detected`
 - `payment.confirmed`
 - `invoice.completed`
 - `invoice.expired`
-- `webhook.delivery_failed`
+- `invoice.canceled`
 
 RFCs:
 - project framing
@@ -228,6 +227,6 @@ The first responsibility is narrow:
 1. create the public repo
 2. publish doctrine and roadmap
 3. write the first three RFCs
-4. define the canonical `Invoice`, `PaymentProof`, and `Event` schemas
+4. define the canonical `Invoice`, `Payment`, and `EventEnvelope` schemas
 5. implement observe-mode chain watching
 6. prove the flow in one reference app

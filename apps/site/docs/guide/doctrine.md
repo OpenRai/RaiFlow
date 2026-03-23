@@ -7,8 +7,8 @@ RaiFlow begins with the smallest useful payment runtime for Nano.
 1. **Observe first**  
    Keyless incoming payment detection before wallet operation.
 
-2. **Payment proof first**  
-   Confirmed incoming payments become stable application objects.
+2. **Confirmed payment first**  
+   Confirmed matching Nano transfers become stable application objects.
 
 3. **Events first**  
    Applications should consume normalized events, not raw block mechanics.
@@ -20,7 +20,7 @@ RaiFlow begins with the smallest useful payment runtime for Nano.
    Retries and partial failure are normal, not exceptional.
 
 6. **Tiny public API**  
-   Start with `Invoice`, `PaymentProof`, `Event`, and `WebhookEndpoint`.
+   Start with `Invoice`, `Payment`, `EventEnvelope`, and `WebhookEndpoint`.
 
 7. **Custody later**  
    Payouts, refunds, and treasury movement are a later operating mode.
