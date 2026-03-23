@@ -12,16 +12,30 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "bin": {
+    "raiflow": "./dist/main.js"
+  },
   "scripts": {
     "build": "tsc",
-    "test": "echo \"No tests yet\"",
+    "start": "node dist/main.js",
+    "test": "vitest run",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@openrai/model": "workspace:*",
+    "@openrai/webhook": "workspace:*"
+  },
+  "peerDependencies": {
     "@openrai/watcher": "workspace:*"
   },
+  "peerDependenciesMeta": {
+    "@openrai/watcher": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "typescript": "^5.8.2"
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
   }
 }
