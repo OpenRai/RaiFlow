@@ -1,0 +1,12 @@
+/* Devlog entry styling */
+.vp-doc h3 {
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 1.5rem;
+  margin-top: 2rem;
+}
+
+/* First h3 after an hr doesn't need the extra top border */
+.vp-doc hr + h3 {
+  border-top: none;
+  padding-top: 0;
+}
