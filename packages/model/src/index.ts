@@ -40,6 +40,8 @@ export interface Invoice {
   expectedAmountRaw: string;
   confirmedAmountRaw: string;
 
+  recipientAccount: string;
+
   createdAt: string;
   expiresAt?: string;
   completedAt?: string;
@@ -116,6 +118,58 @@ export type RaiFlowEvent =
   | InvoiceCompletedEvent
   | InvoiceExpiredEvent
   | InvoiceCanceledEvent;
+
+// ---------------------------------------------------------------------------
+// Watcher → Runtime contract
+// ---------------------------------------------------------------------------
+
+/** A confirmed send block observed by the watcher. */
+export interface ConfirmedBlock {
+  /** The block hash of the confirmed send. */
+  blockHash: string;
+  /** The sender's Nano account. */
+  senderAccount: string;
+  /** The recipient's Nano account. */
+  recipientAccount: string;
+  /** Amount transferred in raw. */
+  amountRaw: string;
+  /** ISO-8601 timestamp of confirmation. */
+  confirmedAt: string;
+}
+
+/** Sink interface that the runtime implements to receive watcher observations. */
+export interface WatcherSink {
+  handleConfirmedBlock(block: ConfirmedBlock): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Store interfaces
+// ---------------------------------------------------------------------------
+
+export interface InvoiceStore {
+  create(invoice: Invoice, idempotencyKey?: string): Promise<Invoice>;
+  get(id: string): Promise<Invoice | undefined>;
+  list(filter?: { status?: InvoiceStatus }): Promise<Invoice[]>;
+  update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
+  getByRecipientAccount(
+    account: string,
+    status?: InvoiceStatus,
+  ): Promise<Invoice[]>;
+  /** Resolve an idempotency key to an existing invoice id, if any. */
+  getByIdempotencyKey(key: string): Promise<string | undefined>;
+}
+
+export interface PaymentStore {
+  create(payment: Payment): Promise<Payment>;
+  get(id: string): Promise<Payment | undefined>;
+  getByBlockHash(hash: string): Promise<Payment | undefined>;
+  listByInvoice(invoiceId: string): Promise<Payment[]>;
+}
+
+export interface EventStore {
+  append(event: RaiFlowEvent): Promise<void>;
+  listByInvoice(invoiceId: string): Promise<RaiFlowEvent[]>;
+}
 
 // ---------------------------------------------------------------------------
 // Webhook
