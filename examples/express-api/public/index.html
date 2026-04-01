@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RaiFlow — Express Demo</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 540px;
+      margin: 5rem auto;
+      padding: 0 1rem;
+      background: #0f0f0f;
+      color: #e0e0e0;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    p { color: #888; margin-bottom: 2rem; }
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 2rem;
+    }
+    label {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #888;
+      margin-bottom: 0.5rem;
+    }
+    input[type="text"], select {
+      width: 100%;
+      padding: 0.75rem;
+      font-size: 1rem;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e0e0e0;
+      box-sizing: border-box;
+      margin-bottom: 1rem;
+    }
+    input[type="text"]:focus, select:focus {
+      outline: none;
+      border-color: #60a5fa;
+    }
+    .row { display: flex; gap: 1rem; }
+    .row .flex-1 { flex: 1; }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #1d4ed8;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { background: #1e40af; }
+    .hint { font-size: 0.75rem; color: #666; margin-top: -0.5rem; }
+    .policy-note {
+      font-size: 0.8rem;
+      color: #888;
+      margin-top: 1rem;
+      padding: 0.75rem;
+      background: #111;
+      border-radius: 6px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>RaiFlow Express Demo</h1>
+  <p>Create a Nano invoice and watch payment events arrive in real time.</p>
+
+  <div class="card">
+    <form method="POST" action="/invoices">
+      <label for="amount">Amount (XNO)</label>
+      <input
+        type="text"
+        id="amount"
+        name="amount"
+        placeholder="0.50"
+        required
+        pattern="[0-9]+(\.[0-9]+)?"
+      >
+      <p class="hint">Human-readable amount, e.g. "1.5" or "0.001"</p>
+
+      <label for="policy">Completion Policy</label>
+      <select id="policy" name="policy">
+        <option value="at_least">At least — completes when received ≥ expected (default)</option>
+        <option value="exact">Exact — completes only when received = expected exactly</option>
+      </select>
+
+      <label for="order_id">Order ID (optional metadata)</label>
+      <input type="text" id="order_id" name="order_id" placeholder="order-12345">
+
+      <div class="policy-note">
+        <strong>At least:</strong> invoice completes on the first payment that meets the expected amount.<br>
+        <strong>Exact:</strong> waits until the confirmed amount equals the expected amount exactly — useful for exact-change payments.
+      </div>
+
+      <div class="row" style="margin-top: 1.5rem;">
+        <button type="submit">Create Invoice</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

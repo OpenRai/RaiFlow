@@ -772,3 +772,119 @@ describe('runtime.on / runtime.off', () => {
     expect(b).toEqual(['b']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Completion policy tests
+// ---------------------------------------------------------------------------
+
+describe('completion policy', () => {
+  it('at_least (default) completes when confirmed >= expected', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: ONE_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
+    expect(completed).toBeDefined();
+  });
+
+  it('at_least (default) completes when confirmed > expected (overpay)', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: TWO_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
+    expect(completed).toBeDefined();
+  });
+
+  it('exact policy completes only when confirmed === expected', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+      completionPolicy: { type: 'exact' },
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: HALF_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
+    expect(completed).toBeUndefined();
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: HALF_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    const completedNow = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
+    expect(completedNow).toBeDefined();
+  });
+
+  it('exact policy does NOT complete on overpay', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+      completionPolicy: { type: 'exact' },
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: TWO_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
+    expect(completed).toBeUndefined();
+
+    const invoice = await runtime.getInvoice(
+      (await runtime.listInvoices())[0]!.id,
+    );
+    expect(invoice!.status).toBe('open');
+    expect(invoice!.confirmedAmountRaw).toBe(TWO_XNO);
+  });
+
+  it('exact policy completes when exact match received across multiple payments', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT_1,
+      expectedAmountRaw: ONE_XNO,
+      completionPolicy: { type: 'exact' },
+    });
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: HALF_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(deliveredEvents.find((e) => e.event.type === 'invoice.completed')).toBeUndefined();
+
+    await runtime.handleConfirmedBlock(makeBlock({
+      recipientAccount: TEST_ACCOUNT_1,
+      amountRaw: HALF_XNO,
+    }));
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(deliveredEvents.find((e) => e.event.type === 'invoice.completed')).toBeDefined();
+  });
+});

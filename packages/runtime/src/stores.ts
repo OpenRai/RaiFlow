@@ -151,8 +151,17 @@ export function createEventStore(): EventStore {
       }
     },
 
-    async listByInvoice(invoiceId) {
-      return eventsByInvoice.get(invoiceId) ?? [];
+    async listByInvoice(invoiceId, options) {
+      const events = eventsByInvoice.get(invoiceId) ?? [];
+      if (options?.after === undefined) {
+        return events;
+      }
+      // Find the event with the given id and return events after it
+      const idx = events.findIndex((e) => e.id === options.after);
+      if (idx === -1) {
+        return events; // cursor not found, return all
+      }
+      return events.slice(idx + 1);
     },
   };
 }

@@ -11,6 +11,7 @@ import type {
   RaiFlowEventType,
   WatcherSink,
   ConfirmedBlock,
+  CompletionPolicy,
 } from '@openrai/model';
 import {
   createWebhookDelivery,
@@ -158,6 +159,7 @@ export class Runtime implements WatcherSink {
       expectedAmount?: string;
       expiresAt?: string;
       metadata?: Record<string, unknown>;
+      completionPolicy?: CompletionPolicy;
     },
     idempotencyKey?: string,
   ): Promise<Invoice> {
@@ -179,6 +181,7 @@ export class Runtime implements WatcherSink {
       createdAt: new Date().toISOString(),
       expiresAt: params.expiresAt,
       metadata: params.metadata,
+      completionPolicy: params.completionPolicy ?? { type: 'at_least' },
     };
 
     const stored = await this.invoiceStore.create(invoice, idempotencyKey);
@@ -242,8 +245,8 @@ export class Runtime implements WatcherSink {
     return this.paymentStore.listByInvoice(invoiceId);
   }
 
-  async getEventsByInvoice(invoiceId: string) {
-    return this.eventStore.listByInvoice(invoiceId);
+  async getEventsByInvoice(invoiceId: string, options?: { after?: string }) {
+    return this.eventStore.listByInvoice(invoiceId, options);
   }
 
   // -------------------------------------------------------------------------
@@ -318,7 +321,11 @@ export class Runtime implements WatcherSink {
     });
 
     // Check if invoice is now fully paid.
-    if (BigInt(newConfirmedRaw) >= BigInt(invoice.expectedAmountRaw)) {
+    const isComplete =
+      invoice.completionPolicy?.type === 'exact'
+        ? BigInt(newConfirmedRaw) === BigInt(invoice.expectedAmountRaw)
+        : BigInt(newConfirmedRaw) >= BigInt(invoice.expectedAmountRaw);
+    if (isComplete) {
       const completedInvoice = await this.invoiceStore.update(invoice.id, {
         status: 'completed',
         completedAt: new Date().toISOString(),

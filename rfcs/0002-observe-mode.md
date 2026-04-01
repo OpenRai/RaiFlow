@@ -1,6 +1,6 @@
 # RFC 0002 — Observe Mode Architecture
 
-**Status:** Draft  
+**Status:** Accepted
 **Created:** 2024  
 **Authors:** OpenRai contributors
 

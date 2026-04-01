@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RaiFlow HTMX Demo</title>
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <!-- QR Code generation library -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="dark-theme">
+    <div class="background-effects">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+    </div>
+
+    <main class="app-container glass-panel">
+        <header class="app-header">
+            <div class="header-titles">
+                <h1>RaiFlow <span>Wallet Demo</span></h1>
+                <p>Event-driven runtime test</p>
+            </div>
+            <div 
+                id="status-indicator" 
+                hx-get="/api/status" 
+                hx-trigger="load, every 5s" 
+                hx-swap="innerHTML"
+            >
+                <div class="status connecting">Connecting...</div>
+            </div>
+        </header>
+
+        <section class="wallet-overview">
+            <div class="balance-card">
+                <h3>Current Balance</h3>
+                <div 
+                    class="balance-amount" 
+                    hx-get="/api/balance" 
+                    hx-trigger="load, every 4s"
+                >
+                    <span class="skeleton-text">Loading...</span>
+                </div>
+            </div>
+
+            <div class="qr-card">
+                <h3>Deposit Address</h3>
+                <div 
+                    id="address-container" 
+                    hx-get="/api/address" 
+                    hx-trigger="load" 
+                    hx-swap="innerHTML"
+                >
+                    <span class="skeleton-text">Loading...</span>
+                </div>
+                <div id="qrcode" class="qr-canvas"></div>
+            </div>
+        </section>
+
+        <section class="transactions-panel">
+            <h3>Recent Fundings</h3>
+            <div class="table-container">
+                <table class="tx-table">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Sender</th>
+                            <th>Amount</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody 
+                        id="tx-table-body" 
+                        hx-get="/api/events" 
+                        hx-trigger="load, every 3s" 
+                        hx-swap="innerHTML"
+                    >
+                        <tr>
+                            <td colspan="4" class="empty-state">Loading transactions...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        document.body.addEventListener('htmx:afterSwap', function(event) {
+            if (event.detail.target.id === 'address-container') {
+                const uri = document.getElementById('nano-uri')?.value;
+                if (uri) {
+                    document.getElementById('qrcode').innerHTML = "";
+                    new QRCode(document.getElementById("qrcode"), {
+                        text: uri,
+                        width: 128,
+                        height: 128,
+                        colorDark : "#ffffff",
+                        colorLight : "transparent",
+                        correctLevel : QRCode.CorrectLevel.M
+                    });
+                }
+            }
+        });
+    </script>
+</body>
+</html>

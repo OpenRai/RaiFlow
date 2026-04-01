@@ -104,25 +104,42 @@ That is the initial wedge.
 ## Monorepo structure
 
 ```text
-apps/site          - documentation and public site
-packages/model     - shared types and canonical schemas
-packages/watcher   - chain observation and confirmation tracking
-packages/runtime   - payment expectation + event runtime
-packages/sdk-js    - JS/TS SDK
-packages/webhook   - webhook signing and delivery helpers
-examples/          - reference integrations
-rfcs/              - design discussion and decision trail
+apps/site            - documentation and public site
+packages/model       - shared types and canonical schemas
+packages/watcher     - chain observation and confirmation tracking
+packages/runtime     - payment expectation + event runtime
+packages/raiflow-sdk - JS/TS SDK for the RaiFlow runtime API
+packages/webhook     - webhook signing and delivery helpers
+examples/            - reference integrations
+rfcs/                - design discussion and decision trail
 ```
 
 ## Status
 
-RaiFlow is currently in early public formation.
+RaiFlow is actively developed. The core runtime and SDK are functional.
 
-The immediate goals are:
-- freeze the core model
-- publish doctrine and roadmap
-- ship an observe-mode MVP
-- prove that Nano payment integrations can feel product-shaped rather than protocol-shaped
+**What's shipped:**
+- Observe-mode runtime (Phase 2) — chain watching, invoice lifecycle, payment matching, webhook delivery
+- `@openrai/raiflow-sdk` (Phase 3) — typed JS/TS client for the runtime API
+- Reference examples (Phase 3) — Express API, Next.js checkout, webhook consumer, HTMX wallet
+
+**Next up:**
+- Persistent store adapters (SQLite, Postgres)
+- Observability and structured logs
+- Integration tests against Nano test network
+
+## Examples
+
+Runnable integrations demonstrating how to use RaiFlow in real applications.
+
+| Example | Stack | Description |
+|---------|-------|-------------|
+| [`examples/express-api/`](./examples/express-api) | Express + SDK | Create invoices, stream live events via SSE |
+| [`examples/next-checkout/`](./examples/next-checkout) | Next.js + SDK | Nano checkout flow with real-time status |
+| [`examples/webhook-consumer/`](./examples/webhook-consumer) | Express + SDK | Receive and verify RaiFlow webhooks |
+| [`examples/htmx-wallet/`](./examples/htmx-wallet) | Express + SDK + nano-core | Full HTMX wallet demo (requires seeded wallet) |
+
+All examples use the `@openrai/raiflow-sdk` exclusively — no raw HTTP to the runtime.
 
 ## What RaiFlow is not
 

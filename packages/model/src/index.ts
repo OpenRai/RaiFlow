@@ -28,6 +28,10 @@ export type InvoiceStatus =
 export type PaymentStatus =
   | 'confirmed';
 
+export type CompletionPolicy =
+  | { type: 'at_least' }    // default — >= expectedAmountRaw
+  | { type: 'exact' };       // === expectedAmountRaw
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -49,6 +53,8 @@ export interface Invoice {
   canceledAt?: string;
 
   metadata?: Record<string, unknown>;
+
+  completionPolicy?: CompletionPolicy; // default: { type: 'at_least' }
 }
 
 export interface Payment {
@@ -168,7 +174,7 @@ export interface PaymentStore {
 
 export interface EventStore {
   append(event: RaiFlowEvent): Promise<void>;
-  listByInvoice(invoiceId: string): Promise<RaiFlowEvent[]>;
+  listByInvoice(invoiceId: string, options?: { after?: string }): Promise<RaiFlowEvent[]>;
 }
 
 // ---------------------------------------------------------------------------

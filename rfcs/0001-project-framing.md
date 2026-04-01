@@ -1,6 +1,6 @@
 # RFC 0001 — Project Framing
 
-**Status:** Draft  
+**Status:** Accepted
 **Created:** 2024  
 **Authors:** OpenRai contributors
 

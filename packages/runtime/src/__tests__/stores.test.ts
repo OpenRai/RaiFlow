@@ -318,4 +318,44 @@ describe('EventStore', () => {
     expect(events1).toHaveLength(1);
     expect(events2).toHaveLength(1);
   });
+
+  it('listByInvoice respects after cursor', async () => {
+    const store = createEventStore();
+    const invoiceId = randomUUID();
+    const inv = makeInvoice({ id: invoiceId });
+
+    const id1 = randomUUID();
+    const id2 = randomUUID();
+    const id3 = randomUUID();
+
+    await store.append({ id: id1, type: 'invoice.created', createdAt: new Date().toISOString(), data: { invoice: inv } });
+    await store.append({ id: id2, type: 'payment.confirmed', createdAt: new Date().toISOString(), data: { payment: makePayment({ invoiceId }), invoice: inv } });
+    await store.append({ id: id3, type: 'invoice.completed', createdAt: new Date().toISOString(), data: { invoice: inv } });
+
+    const all = await store.listByInvoice(invoiceId);
+    expect(all).toHaveLength(3);
+
+    const after1 = await store.listByInvoice(invoiceId, { after: id1 });
+    expect(after1).toHaveLength(2);
+    expect(after1[0]!.id).toBe(id2);
+    expect(after1[1]!.id).toBe(id3);
+
+    const after2 = await store.listByInvoice(invoiceId, { after: id2 });
+    expect(after2).toHaveLength(1);
+    expect(after2[0]!.id).toBe(id3);
+
+    const after3 = await store.listByInvoice(invoiceId, { after: id3 });
+    expect(after3).toHaveLength(0);
+  });
+
+  it('listByInvoice returns all when cursor not found', async () => {
+    const store = createEventStore();
+    const invoiceId = randomUUID();
+    const inv = makeInvoice({ id: invoiceId });
+
+    await store.append({ id: randomUUID(), type: 'invoice.created', createdAt: new Date().toISOString(), data: { invoice: inv } });
+
+    const result = await store.listByInvoice(invoiceId, { after: 'non-existent-id' });
+    expect(result).toHaveLength(1);
+  });
 });

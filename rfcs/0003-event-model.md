@@ -1,6 +1,6 @@
 # RFC 0003 — Event Model and Delivery Semantics
 
-**Status:** Draft  
+**Status:** Accepted
 **Created:** 2024  
 **Authors:** OpenRai contributors
 

@@ -112,6 +112,36 @@ describe('POST /invoices', () => {
 
     expect(inv1.id).toBe(inv2.id);
   });
+
+  it('accepts completionPolicy in request body', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const res = await handler(req('POST', '/invoices', {
+      body: {
+        recipientAccount: TEST_ACCOUNT,
+        expectedAmountRaw: ONE_XNO,
+        completionPolicy: { type: 'exact' },
+      },
+    }));
+
+    expect(res.status).toBe(201);
+    const body = await parseJson(res) as { completionPolicy: { type: string } };
+    expect(body.completionPolicy).toEqual({ type: 'exact' });
+  });
+
+  it('defaults completionPolicy to at_least when not provided', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const res = await handler(req('POST', '/invoices', {
+      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+    }));
+
+    expect(res.status).toBe(201);
+    const body = await parseJson(res) as { completionPolicy: { type: string } };
+    expect(body.completionPolicy).toEqual({ type: 'at_least' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -277,6 +307,26 @@ describe('GET /invoices/:id/events', () => {
     const body = await parseJson(res) as { data: unknown[] };
     // At least the invoice.created event
     expect(body.data.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('supports after cursor parameter', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const invoice = await runtime.createInvoice({
+      recipientAccount: TEST_ACCOUNT,
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    const eventsRes = await handler(req('GET', `/invoices/${invoice.id}/events`));
+    const eventsBody = await parseJson(eventsRes) as { data: { id: string }[] };
+    const firstEventId = eventsBody.data[0]!.id;
+
+    const res = await handler(req('GET', `/invoices/${invoice.id}/events?after=${firstEventId}`));
+
+    expect(res.status).toBe(200);
+    const body = await parseJson(res) as { data: unknown[] };
+    expect(body.data.length).toBe(0);
   });
 });
 

@@ -79,7 +79,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
     // POST /invoices
     if (method === 'POST' && parts.length === 1) {
       const body = await req.json() as Record<string, unknown>;
-      const { recipientAccount, expectedAmountRaw, expiresAt, metadata } = body;
+      const { recipientAccount, expectedAmountRaw, expiresAt, metadata, completionPolicy } = body;
 
       if (typeof recipientAccount !== 'string' || typeof expectedAmountRaw !== 'string') {
         return errorResponse(
@@ -98,6 +98,9 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
           expiresAt: typeof expiresAt === 'string' ? expiresAt : undefined,
           metadata: typeof metadata === 'object' && metadata !== null
             ? (metadata as Record<string, unknown>)
+            : undefined,
+          completionPolicy: typeof completionPolicy === 'object' && completionPolicy !== null
+            ? (completionPolicy as { type: 'exact' | 'at_least' })
             : undefined,
         },
         idempotencyKey,
@@ -163,7 +166,8 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         if (invoice === undefined) {
           return errorResponse(`Invoice not found: ${invoiceId}`, 'not_found', 404);
         }
-        const events = await runtime.getEventsByInvoice(invoiceId);
+        const after = url.searchParams.get('after') ?? undefined;
+        const events = await runtime.getEventsByInvoice(invoiceId, { after });
         return json({ data: events });
       }
     }
