@@ -7,6 +7,9 @@
 // Configuration via YAML file (default: ./raiflow.yaml) or RAIFLOW_CONFIG_PATH env var.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { resolve, dirname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
 import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
@@ -17,7 +20,21 @@ import { Runtime } from './runtime.js';
 // Config
 // ---------------------------------------------------------------------------
 
-const CONFIG_PATH = process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yaml';
+function findWorkspaceRoot(): string {
+  // Walk up from this file (packages/runtime/dist/main.js) to find pnpm-workspace.yaml
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    if (existsSync(resolve(dir, 'pnpm-workspace.yaml'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback: current working directory
+  return process.cwd();
+}
+
+const WORKSPACE_ROOT = findWorkspaceRoot();
+const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yaml');
 
 let config: RaiFlowConfig;
 try {
@@ -69,8 +86,9 @@ const logger = {
 
 let db: Database;
 try {
-  db = createDatabase(config.storage.path);
-  logger.info('sqlite open', config.storage.path);
+  const dbPath = resolve(WORKSPACE_ROOT, config.storage.path);
+  db = createDatabase(dbPath);
+  logger.info('sqlite open', dbPath);
 } catch (err) {
   logger.error('failed to open database:', err instanceof Error ? err.message : err);
   process.exit(1);
