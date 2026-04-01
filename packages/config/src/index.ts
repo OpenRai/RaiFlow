@@ -6,7 +6,7 @@ import { parse as parseYaml } from 'yaml';
 export interface DaemonConfig {
   host: string;
   port: number;
-  apiKey: string;
+  apiKey?: string;
 }
 
 export interface NanoNodeConfig {
@@ -27,7 +27,7 @@ export interface CustodyConfig {
 export interface InvoicesConfig {
   defaultExpirySeconds: number;
   autoSweep: boolean;
-  sweepDestination: string;
+  sweepDestination: string | null;
 }
 
 export interface StorageConfig {
@@ -49,7 +49,7 @@ export interface LoggingConfig {
 export interface RaiFlowConfig {
   daemon: DaemonConfig;
   nano: NanoConfig;
-  custody: CustodyConfig;
+  custody: CustodyConfig | null;
   invoices: InvoicesConfig;
   storage: StorageConfig;
   webhooks: WebhookConfig[];
@@ -104,6 +104,27 @@ function requireBoolean(obj: Record<string, unknown>, key: string): boolean {
   return val;
 }
 
+function optionalString(obj: Record<string, unknown>, key: string): string | undefined {
+  const val = obj[key];
+  if (val === undefined) return undefined;
+  if (!isString(val)) throw new Error(`config.${key} must be a string`);
+  return val;
+}
+
+function optionalNumber(obj: Record<string, unknown>, key: string): number | undefined {
+  const val = obj[key];
+  if (val === undefined) return undefined;
+  if (!isNumber(val)) throw new Error(`config.${key} must be a number`);
+  return val;
+}
+
+function optionalBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
+  const val = obj[key];
+  if (val === undefined) return undefined;
+  if (!isBoolean(val)) throw new Error(`config.${key} must be a boolean`);
+  return val;
+}
+
 function requireObject(obj: Record<string, unknown>, key: string): Record<string, unknown> {
   const val = obj[key];
   if (!isObject(val)) throw new Error(`config.${key} must be an object`);
@@ -137,19 +158,17 @@ function resolveEnvValue(val: unknown): unknown {
 
 function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
   const daemon = isObject(obj.daemon) ? obj.daemon : {};
+  const apiKey = optionalString(daemon, 'apiKey');
   return {
-    host: requireString(daemon, 'host'),
-    port: requireNumber(daemon, 'port'),
-    apiKey: resolveEnv(requireString(daemon, 'apiKey')),
+    host: optionalString(daemon, 'host') ?? '0.0.0.0',
+    port: optionalNumber(daemon, 'port') ?? 3100,
+    apiKey: apiKey ? resolveEnv(apiKey) : undefined,
   };
 }
 
 function parseNano(obj: Record<string, unknown>): NanoConfig {
   const nano = isObject(obj.nano) ? obj.nano : {};
   const nodes = Array.isArray(nano.nodes) ? nano.nodes : [];
-  if (nodes.length === 0) {
-    throw new Error('config.nano.nodes must have at least one entry');
-  }
   return {
     nodes: nodes.map((n, i) => {
       if (!isObject(n)) throw new Error(`config.nano.nodes[${i}] must be an object`);
@@ -162,8 +181,14 @@ function parseNano(obj: Record<string, unknown>): NanoConfig {
   };
 }
 
-function parseCustody(obj: Record<string, unknown>): CustodyConfig {
-  const custody = isObject(obj.custody) ? obj.custody : {};
+function parseCustody(obj: Record<string, unknown>): CustodyConfig | null {
+  if (obj.custody === undefined || obj.custody === null) {
+    return null;
+  }
+  if (!isObject(obj.custody)) {
+    throw new Error('config.custody must be an object');
+  }
+  const custody = obj.custody;
   return {
     seed: resolveEnv(requireString(custody, 'seed')),
     representative: resolveEnv(requireString(custody, 'representative')),
@@ -172,22 +197,27 @@ function parseCustody(obj: Record<string, unknown>): CustodyConfig {
 
 function parseInvoices(obj: Record<string, unknown>): InvoicesConfig {
   const invoices = isObject(obj.invoices) ? obj.invoices : {};
+  const autoSweep = optionalBoolean(invoices, 'autoSweep') ?? false;
+  const sweepDestination = optionalString(invoices, 'sweepDestination');
+  if (autoSweep && !sweepDestination) {
+    throw new Error('config.invoices.sweepDestination is required when autoSweep is true');
+  }
   return {
-    defaultExpirySeconds: requireNumber(invoices, 'defaultExpirySeconds'),
-    autoSweep: requireBoolean(invoices, 'autoSweep'),
-    sweepDestination: resolveEnv(requireString(invoices, 'sweepDestination')),
+    defaultExpirySeconds: optionalNumber(invoices, 'defaultExpirySeconds') ?? 3600,
+    autoSweep,
+    sweepDestination: sweepDestination ? resolveEnv(sweepDestination) : null,
   };
 }
 
 function parseStorage(obj: Record<string, unknown>): StorageConfig {
   const storage = isObject(obj.storage) ? obj.storage : {};
-  const driver = requireString(storage, 'driver');
+  const driver = optionalString(storage, 'driver') ?? 'sqlite';
   if (driver !== 'sqlite') {
     throw new Error(`config.storage.driver must be 'sqlite' for now`);
   }
   return {
     driver: 'sqlite',
-    path: resolveEnv(requireString(storage, 'path')),
+    path: resolveEnv(optionalString(storage, 'path') ?? './raiflow.db'),
   };
 }
 
@@ -206,11 +236,11 @@ function parseWebhooks(obj: Record<string, unknown>): WebhookConfig[] {
 
 function parseLogging(obj: Record<string, unknown>): LoggingConfig {
   const logging = isObject(obj.logging) ? obj.logging : {};
-  const level = requireString(logging, 'level');
+  const level = optionalString(logging, 'level') ?? 'info';
   if (!['debug', 'info', 'warn', 'error'].includes(level)) {
     throw new Error(`config.logging.level must be one of debug, info, warn, error`);
   }
-  const format = requireString(logging, 'format');
+  const format = optionalString(logging, 'format') ?? 'pretty';
   if (!['json', 'pretty'].includes(format)) {
     throw new Error(`config.logging.format must be one of json, pretty`);
   }

@@ -15,6 +15,11 @@ import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, create
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
+import {
+  createLegacySqliteEventStore,
+  createLegacySqliteInvoiceStore,
+  createLegacySqlitePaymentStore,
+} from './sqlite-legacy-adapters.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -104,15 +109,18 @@ logger.info('migrations applied', migrationRunner.getApplied().join(', '));
 // ---------------------------------------------------------------------------
 
 const eventBus = createEventBus();
+const sqliteInvoiceStore = createSqliteInvoiceStore(db);
+const sqlitePaymentStore = createSqlitePaymentStore(db);
 const eventStore = createPersistentEventStore(
   createSqliteEventStore(db),
   eventBus,
 );
-const invoiceStore = createSqliteInvoiceStore(db);
-const paymentStore = createSqlitePaymentStore(db);
+const invoiceStore = createLegacySqliteInvoiceStore(sqliteInvoiceStore);
+const paymentStore = createLegacySqlitePaymentStore(sqlitePaymentStore, sqliteInvoiceStore);
 const accountStore = createSqliteAccountStore(db);
 const sendStore = createSqliteSendStore(db);
 const webhookStore = createSqliteWebhookStore(db);
+const legacyEventStore = createLegacySqliteEventStore(eventStore);
 
 // ---------------------------------------------------------------------------
 // Runtime (prototype — still uses legacy model, being replaced in later slices)
@@ -121,7 +129,7 @@ const webhookStore = createSqliteWebhookStore(db);
 const runtime = new Runtime({
   invoiceStore: invoiceStore as any,
   paymentStore: paymentStore as any,
-  eventStore: eventStore as any,
+  eventStore: legacyEventStore as any,
   webhookEndpointStore: webhookStore as any,
   expiryIntervalMs: 10_000,
 });

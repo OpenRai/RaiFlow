@@ -19,7 +19,7 @@ import type {
   WebhookEndpointStore,
   EventQueryOptions,
 } from '@openrai/model';
-import type BetterSqlite3 from 'better-sqlite3';
+import BetterSqlite3 from 'better-sqlite3';
 
 export type Database = BetterSqlite3.Database;
 
@@ -40,9 +40,7 @@ export interface MigrationRunner {
 }
 
 export function createDatabase(path: string): Database {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const DB = require('better-sqlite3') as typeof BetterSqlite3;
-  const db = new DB(path);
+  const db = new BetterSqlite3(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   return db;
@@ -273,6 +271,14 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
 
   return {
     async create(invoice: Invoice, idempotencyKey?: string): Promise<Invoice> {
+      if (idempotencyKey) {
+        const existingId = db.prepare('SELECT resource_id FROM idempotency_keys WHERE key = ?').get(idempotencyKey) as { resource_id: string } | undefined;
+        if (existingId) {
+          const existing = await this.get(existingId.resource_id);
+          if (existing) return existing;
+        }
+      }
+
       const row = invoiceToRow(invoice);
       insert.run(row);
       if (idempotencyKey) {

@@ -1,44 +1,37 @@
 # RaiFlow Configuration
 #
-# Copy this file to raiflow.yaml and fill in your values.
-# All values support env: references to inject from environment variables.
-#
-# Example:
-#   daemon:
-#     host: "0.0.0.0"
-#     port: 3100
-#     apiKey: "env:RAIFLOW_API_KEY"
+# This file is intentionally minimal and should boot locally as-is.
+# Optional subsystems like custody, webhooks, and auto-sweep can be added later.
+# All string values may use env:VARIABLE_NAME references.
 
 daemon:
   host: "0.0.0.0"
   port: 3100
-  apiKey: "env:RAIFLOW_API_KEY"
+  # apiKey: "env:RAIFLOW_API_KEY"
 
 nano:
-  nodes:
-    - rpc: "env:NANO_RPC_URL"
-      ws: "env:NANO_WS_URL"
-      priority: 1
-
-custody:
-  seed: "env:RAIFLOW_SEED"
-  representative: "env:RAIFLOW_REPRESENTATIVE"
+  nodes: []
+  # nodes:
+  #   - rpc: "env:NANO_RPC_URL"
+  #     ws: "env:NANO_WS_URL"
+  #     priority: 1
 
 invoices:
   defaultExpirySeconds: 3600
-  autoSweep: true
-  sweepDestination: "env:RAIFLOW_SWEEP_DESTINATION"
+  autoSweep: false
+  # sweepDestination: "env:RAIFLOW_SWEEP_DESTINATION"
 
 storage:
   driver: "sqlite"
   path: "./raiflow.db"
 
-webhooks:
-  - url: "env:WEBHOOK_URL"
-    secret: "env:WEBHOOK_SECRET"
-    events:
-      - "*"
+webhooks: []
 
 logging:
   level: "info"
   format: "pretty"
+
+# Optional custody config for managed-account features:
+# custody:
+#   seed: "env:RAIFLOW_SEED"
+#   representative: "env:RAIFLOW_REPRESENTATIVE"
