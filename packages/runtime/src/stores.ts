@@ -1,28 +1,35 @@
-// @openrai/runtime — In-memory store implementations
+// @openrai/runtime — In-memory store implementations (prototype-era)
+// These stores use the legacy model shapes. Will be replaced with SQLite-backed
+// implementations using the v2 model in Slice B4.
 
 import type {
   Invoice,
   InvoiceStatus,
-  InvoiceStore,
   Payment,
-  PaymentStore,
+  PaymentStatus,
   EventStore,
-  RaiFlowEvent,
+} from '@openrai/model';
+import type {
+  LegacyInvoiceStore,
+  LegacyEventStore,
+  LegacyRaiFlowEvent,
+  LegacyPayment,
+  LegacyInvoice,
 } from '@openrai/model';
 
 // ---------------------------------------------------------------------------
-// InvoiceStore
+// InvoiceStore (prototype-era)
 // ---------------------------------------------------------------------------
 
 /**
- * Create an in-memory `InvoiceStore`.
+ * Create an in-memory `InvoiceStore` using the prototype-era Invoice shape.
  */
-export function createInvoiceStore(): InvoiceStore {
-  const invoices = new Map<string, Invoice>();
-  const idempotencyKeys = new Map<string, string>(); // key → invoiceId
+export function createInvoiceStore(): LegacyInvoiceStore {
+  const invoices = new Map<string, LegacyInvoice>();
+  const idempotencyKeys = new Map<string, string>();
 
   return {
-    async create(invoice, idempotencyKey) {
+    async create(invoice: LegacyInvoice, idempotencyKey?: string) {
       if (idempotencyKey !== undefined) {
         const existingId = idempotencyKeys.get(idempotencyKey);
         if (existingId !== undefined) {
@@ -43,7 +50,7 @@ export function createInvoiceStore(): InvoiceStore {
     },
 
     async get(id) {
-      return invoices.get(id);
+      return invoices.get(id) as LegacyInvoice | undefined;
     },
 
     async list(filter) {
@@ -59,89 +66,96 @@ export function createInvoiceStore(): InvoiceStore {
       if (existing === undefined) {
         throw new Error(`Invoice not found: ${id}`);
       }
-      const updated: Invoice = { ...existing, ...patch };
+      const updated: LegacyInvoice = { ...existing, ...patch };
       invoices.set(id, updated);
       return updated;
     },
 
-    async getByRecipientAccount(account, status) {
+    async getByRecipientAccount(account: string, status?: InvoiceStatus) {
       const all = Array.from(invoices.values());
       return all.filter(
-        (inv) =>
+        (inv: LegacyInvoice) =>
           inv.recipientAccount === account &&
           (status === undefined || inv.status === status),
       );
     },
 
-    async getByIdempotencyKey(key) {
+    async getByIdempotencyKey(key: string) {
       return idempotencyKeys.get(key);
     },
   };
 }
 
 // ---------------------------------------------------------------------------
-// PaymentStore
+// PaymentStore (prototype-era)
 // ---------------------------------------------------------------------------
 
 /**
- * Create an in-memory `PaymentStore`.
+ * Create an in-memory `PaymentStore` using the prototype-era Payment shape.
  */
-export function createPaymentStore(): PaymentStore {
-  const payments = new Map<string, Payment>();
-  const byBlockHash = new Map<string, string>(); // blockHash → paymentId
+export function createPaymentStore(): LegacyPaymentStore {
+  const payments = new Map<string, LegacyPayment>();
+  const byBlockHash = new Map<string, string>();
 
   return {
-    async create(payment) {
+    async create(payment: LegacyPayment) {
       payments.set(payment.id, payment);
       byBlockHash.set(payment.sendBlockHash, payment.id);
       return payment;
     },
 
     async get(id) {
-      return payments.get(id);
+      return payments.get(id) as LegacyPayment | undefined;
     },
 
-    async getByBlockHash(hash) {
+    async getByBlockHash(hash: string) {
       const id = byBlockHash.get(hash);
       if (id === undefined) return undefined;
-      return payments.get(id);
+      return payments.get(id) as LegacyPayment | undefined;
     },
 
-    async listByInvoice(invoiceId) {
+    async listByInvoice(invoiceId: string) {
       return Array.from(payments.values()).filter(
-        (p) => p.invoiceId === invoiceId,
-      );
+        (p: LegacyPayment) => p.invoiceId === invoiceId,
+      ) as LegacyPayment[];
     },
   };
 }
 
+export interface LegacyPaymentStore {
+  create(payment: LegacyPayment): Promise<LegacyPayment>;
+  get(id: string): Promise<LegacyPayment | undefined>;
+  getByBlockHash(hash: string): Promise<LegacyPayment | undefined>;
+  listByInvoice(invoiceId: string): Promise<LegacyPayment[]>;
+}
+
 // ---------------------------------------------------------------------------
-// EventStore
+// EventStore (prototype-era)
 // ---------------------------------------------------------------------------
 
 /**
- * Extract the invoiceId from any RaiFlowEvent (all events contain an invoice).
+ * Extract the invoiceId from a legacy event.
  */
-function extractInvoiceId(event: RaiFlowEvent): string {
+function extractInvoiceId(event: LegacyRaiFlowEvent): string {
   switch (event.type) {
     case 'invoice.created':
     case 'invoice.completed':
     case 'invoice.expired':
     case 'invoice.canceled':
-      return event.data.invoice.id;
+      return (event.data as { invoice: LegacyInvoice }).invoice.id;
     case 'payment.confirmed':
-      return event.data.invoice.id;
+      return (event.data as { invoice: LegacyInvoice }).invoice.id;
   }
 }
 
 /**
- * Create an in-memory `EventStore`.
+ * Create an in-memory `EventStore` using the prototype-era event shape.
  */
-export function createEventStore(): EventStore {
-  const eventsByInvoice = new Map<string, RaiFlowEvent[]>();
+export function createEventStore(): LegacyEventStore {
+  const eventsByInvoice = new Map<string, LegacyRaiFlowEvent[]>();
 
   return {
-    async append(event) {
+    async append(event: LegacyRaiFlowEvent) {
       const invoiceId = extractInvoiceId(event);
       const existing = eventsByInvoice.get(invoiceId);
       if (existing !== undefined) {
@@ -151,15 +165,14 @@ export function createEventStore(): EventStore {
       }
     },
 
-    async listByInvoice(invoiceId, options) {
+    async listByInvoice(invoiceId: string, options?: { after?: string }) {
       const events = eventsByInvoice.get(invoiceId) ?? [];
       if (options?.after === undefined) {
         return events;
       }
-      // Find the event with the given id and return events after it
       const idx = events.findIndex((e) => e.id === options.after);
       if (idx === -1) {
-        return events; // cursor not found, return all
+        return events;
       }
       return events.slice(idx + 1);
     },

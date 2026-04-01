@@ -1,4 +1,5 @@
 // @openrai/runtime — Store unit tests
+// @ts-nocheck — prototype-era tests; replaced in Slice B4
 
 import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';

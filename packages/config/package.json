@@ -1,0 +1,27 @@
+{
+  "name": "@openrai/config",
+  "version": "0.0.1",
+  "private": false,
+  "description": "YAML config loader, env resolution, and typed config for RaiFlow",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"No tests yet\"",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.2"
+  }
+}

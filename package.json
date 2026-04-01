@@ -2,6 +2,9 @@
   "name": "raiflow",
   "private": true,
   "packageManager": "pnpm@10.0.0",
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3"]
+  },
   "scripts": {
     "dev": "pnpm --filter @openrai/site docs:dev",
     "site:dev": "pnpm --filter @openrai/site docs:dev",

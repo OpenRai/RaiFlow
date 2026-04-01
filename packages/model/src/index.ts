@@ -1,19 +1,4 @@
-// @openrai/model
-// Canonical shared types and schemas for RaiFlow
-
-/**
- * Canonical RaiFlow event model (minimal, Nano-native).
- *
- * This model is intentionally small.
- *
- * For the mainline Nano payment-proof story, a confirmed matching send block
- * is the first business-significant payment event. We therefore avoid
- * canonizing extra intermediate payment states unless they are proven necessary.
- *
- * The model may be extended later for advanced observability or custodial modes,
- * but doing so too early risks introducing distinctions that Nano itself does
- * not really require for normal invoice collection flows.
- */
+// @openrai/model — Canonical shared types and schemas for RaiFlow v2
 
 // ---------------------------------------------------------------------------
 // Statuses
@@ -26,11 +11,23 @@ export type InvoiceStatus =
   | 'canceled';
 
 export type PaymentStatus =
-  | 'confirmed';
+  | 'pending'
+  | 'confirmed'
+  | 'failed';
+
+export type AccountType =
+  | 'managed'
+  | 'watched';
+
+export type SendStatus =
+  | 'queued'
+  | 'published'
+  | 'confirmed'
+  | 'failed';
 
 export type CompletionPolicy =
-  | { type: 'at_least' }    // default — >= expectedAmountRaw
-  | { type: 'exact' };       // === expectedAmountRaw
+  | { type: 'at_least' }
+  | { type: 'exact' };
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -39,117 +36,316 @@ export type CompletionPolicy =
 export interface Invoice {
   id: string;
   status: InvoiceStatus;
-
-  currency: 'XNO';
+  payAddress: string;
   expectedAmountRaw: string;
-  confirmedAmountRaw: string;
-
-  recipientAccount: string;
-
+  receivedAmountRaw: string;
+  memo: string | null;
+  metadata: Record<string, string> | null;
+  idempotencyKey: string | null;
+  expiresAt: string | null;
+  completedAt: string | null;
+  canceledAt: string | null;
   createdAt: string;
-  expiresAt?: string;
-  completedAt?: string;
-  expiredAt?: string;
-  canceledAt?: string;
-
-  metadata?: Record<string, unknown>;
-
-  completionPolicy?: CompletionPolicy; // default: { type: 'at_least' }
+  updatedAt: string;
+  completionPolicy: CompletionPolicy;
 }
 
 export interface Payment {
   id: string;
   invoiceId: string;
-
   status: PaymentStatus;
-
-  currency: 'XNO';
+  blockHash: string;
+  senderAddress: string | null;
   amountRaw: string;
+  confirmedAt: string | null;
+  detectedAt: string;
+}
 
-  recipientAccount: string;
-  senderAccount?: string;
+export interface Account {
+  id: string;
+  type: AccountType;
+  address: string;
+  label: string | null;
+  balanceRaw: string;
+  pendingRaw: string;
+  frontier: string | null;
+  representative: string | null;
+  derivationIndex: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
-  sendBlockHash: string;
-  confirmedAt: string;
+export interface Send {
+  id: string;
+  accountId: string;
+  destination: string;
+  amountRaw: string;
+  status: SendStatus;
+  blockHash: string | null;
+  idempotencyKey: string;
+  createdAt: string;
+  publishedAt: string | null;
+  confirmedAt: string | null;
+}
 
-  metadata?: Record<string, unknown>;
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  secret: string;
+  eventTypes: string[];
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------
-// Events
+// Event System
 // ---------------------------------------------------------------------------
 
 export type RaiFlowEventType =
   | 'invoice.created'
-  | 'payment.confirmed'
+  | 'invoice.payment_received'
+  | 'invoice.payment_confirmed'
   | 'invoice.completed'
   | 'invoice.expired'
-  | 'invoice.canceled';
+  | 'invoice.canceled'
+  | 'invoice.swept'
+  | 'account.created'
+  | 'account.received'
+  | 'account.balance_updated'
+  | 'account.removed'
+  | 'send.queued'
+  | 'send.published'
+  | 'send.confirmed'
+  | 'send.failed'
+  | 'block.published'
+  | 'block.confirmed'
+  | 'block.failed'
+  | 'rpc.connected'
+  | 'rpc.disconnected'
+  | 'rpc.failover';
 
-export interface EventEnvelope<TType extends RaiFlowEventType, TData> {
+export interface RaiFlowEvent {
   id: string;
-  type: TType;
-  createdAt: string;
-  data: TData;
+  type: string;
+  timestamp: string;
+  data: Record<string, unknown>;
+  resourceId: string;
+  resourceType: 'invoice' | 'payment' | 'account' | 'send' | 'block' | 'rpc';
 }
 
-export type InvoiceCreatedEvent = EventEnvelope<
-  'invoice.created',
-  { invoice: Invoice }
->;
+export interface InvoiceCreatedEvent extends RaiFlowEvent {
+  type: 'invoice.created';
+  data: { invoice: Invoice };
+  resourceId: string;
+  resourceType: 'invoice';
+}
 
-export type PaymentConfirmedEvent = EventEnvelope<
-  'payment.confirmed',
-  { payment: Payment; invoice: Invoice }
->;
+export interface InvoicePaymentReceivedEvent extends RaiFlowEvent {
+  type: 'invoice.payment_received';
+  data: { payment: Payment; invoice: Invoice };
+  resourceId: string;
+  resourceType: 'payment';
+}
 
-export type InvoiceCompletedEvent = EventEnvelope<
-  'invoice.completed',
-  { invoice: Invoice }
->;
+export interface InvoicePaymentConfirmedEvent extends RaiFlowEvent {
+  type: 'invoice.payment_confirmed';
+  data: { payment: Payment; invoice: Invoice };
+  resourceId: string;
+  resourceType: 'payment';
+}
 
-export type InvoiceExpiredEvent = EventEnvelope<
-  'invoice.expired',
-  { invoice: Invoice }
->;
+export interface InvoiceCompletedEvent extends RaiFlowEvent {
+  type: 'invoice.completed';
+  data: { invoice: Invoice };
+  resourceId: string;
+  resourceType: 'invoice';
+}
 
-export type InvoiceCanceledEvent = EventEnvelope<
-  'invoice.canceled',
-  { invoice: Invoice }
->;
+export interface InvoiceExpiredEvent extends RaiFlowEvent {
+  type: 'invoice.expired';
+  data: { invoice: Invoice };
+  resourceId: string;
+  resourceType: 'invoice';
+}
 
-export type RaiFlowEvent =
-  | InvoiceCreatedEvent
-  | PaymentConfirmedEvent
-  | InvoiceCompletedEvent
-  | InvoiceExpiredEvent
-  | InvoiceCanceledEvent;
+export interface InvoiceCanceledEvent extends RaiFlowEvent {
+  type: 'invoice.canceled';
+  data: { invoice: Invoice };
+  resourceId: string;
+  resourceType: 'invoice';
+}
+
+export interface InvoiceSweptEvent extends RaiFlowEvent {
+  type: 'invoice.swept';
+  data: { invoice: Invoice; send: Send };
+  resourceId: string;
+  resourceType: 'invoice';
+}
+
+export interface AccountCreatedEvent extends RaiFlowEvent {
+  type: 'account.created';
+  data: { account: Account };
+  resourceId: string;
+  resourceType: 'account';
+}
+
+export interface AccountReceivedEvent extends RaiFlowEvent {
+  type: 'account.received';
+  data: { account: Account; payment: Payment };
+  resourceId: string;
+  resourceType: 'account';
+}
+
+export interface AccountBalanceUpdatedEvent extends RaiFlowEvent {
+  type: 'account.balance_updated';
+  data: { account: Account; previousBalanceRaw: string };
+  resourceId: string;
+  resourceType: 'account';
+}
+
+export interface AccountRemovedEvent extends RaiFlowEvent {
+  type: 'account.removed';
+  data: { account: Account };
+  resourceId: string;
+  resourceType: 'account';
+}
+
+export interface SendQueuedEvent extends RaiFlowEvent {
+  type: 'send.queued';
+  data: { send: Send };
+  resourceId: string;
+  resourceType: 'send';
+}
+
+export interface SendPublishedEvent extends RaiFlowEvent {
+  type: 'send.published';
+  data: { send: Send };
+  resourceId: string;
+  resourceType: 'send';
+}
+
+export interface SendConfirmedEvent extends RaiFlowEvent {
+  type: 'send.confirmed';
+  data: { send: Send };
+  resourceId: string;
+  resourceType: 'send';
+}
+
+export interface SendFailedEvent extends RaiFlowEvent {
+  type: 'send.failed';
+  data: { send: Send; reason: string };
+  resourceId: string;
+  resourceType: 'send';
+}
+
+export interface BlockPublishedEvent extends RaiFlowEvent {
+  type: 'block.published';
+  data: { blockHash: string };
+  resourceId: string;
+  resourceType: 'block';
+}
+
+export interface BlockConfirmedEvent extends RaiFlowEvent {
+  type: 'block.confirmed';
+  data: { blockHash: string };
+  resourceId: string;
+  resourceType: 'block';
+}
+
+export interface BlockFailedEvent extends RaiFlowEvent {
+  type: 'block.failed';
+  data: { blockHash: string; reason: string };
+  resourceId: string;
+  resourceType: 'block';
+}
+
+export interface RpcConnectedEvent extends RaiFlowEvent {
+  type: 'rpc.connected';
+  data: { nodeUrl: string };
+  resourceId: string;
+  resourceType: 'rpc';
+}
+
+export interface RpcDisconnectedEvent extends RaiFlowEvent {
+  type: 'rpc.disconnected';
+  data: { nodeUrl: string };
+  resourceId: string;
+  resourceType: 'rpc';
+}
+
+export interface RpcFailoverEvent extends RaiFlowEvent {
+  type: 'rpc.failover';
+  data: { fromUrl: string; toUrl: string };
+  resourceId: string;
+  resourceType: 'rpc';
+}
 
 // ---------------------------------------------------------------------------
-// Watcher → Runtime contract
+// Request / Response DTOs
 // ---------------------------------------------------------------------------
 
-/** A confirmed send block observed by the watcher. */
-export interface ConfirmedBlock {
-  /** The block hash of the confirmed send. */
-  blockHash: string;
-  /** The sender's Nano account. */
-  senderAccount: string;
-  /** The recipient's Nano account. */
-  recipientAccount: string;
-  /** Amount transferred in raw. */
+export interface CreateInvoiceRequest {
+  expectedAmountRaw: string;
+  memo?: string;
+  metadata?: Record<string, string>;
+  idempotencyKey?: string;
+  expiresIn?: number;
+  expiresAt?: string;
+  completionPolicy?: CompletionPolicy;
+}
+
+export interface CreateAccountRequest {
+  label?: string;
+  representative?: string;
+  idempotencyKey?: string;
+}
+
+export interface WatchAccountRequest {
+  account: string;
+  label?: string;
+}
+
+export interface UpdateAccountRequest {
+  label?: string;
+  representative?: string;
+}
+
+export interface SendRequest {
+  destination: string;
   amountRaw: string;
-  /** ISO-8601 timestamp of confirmation. */
-  confirmedAt: string;
+  idempotencyKey: string;
 }
 
-/** Sink interface that the runtime implements to receive watcher observations. */
-export interface WatcherSink {
-  handleConfirmedBlock(block: ConfirmedBlock): Promise<void>;
+export interface PublishBlockRequest {
+  block: string;
+  watchConfirmation?: boolean;
+}
+
+export interface WorkGenerateRequest {
+  hash: string;
+  difficulty?: string;
+}
+
+export interface CreateWebhookRequest {
+  url: string;
+  eventTypes: string[];
+  secret?: string;
+}
+
+export interface EventQueryOptions {
+  after?: string;
+  type?: string;
+  resourceType?: string;
+  resourceId?: string;
+  limit?: number;
+}
+
+export interface PaginatedEventsResponse {
+  data: RaiFlowEvent[];
+  nextCursor: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// Store interfaces
+// Store Interfaces
 // ---------------------------------------------------------------------------
 
 export interface InvoiceStore {
@@ -157,11 +353,7 @@ export interface InvoiceStore {
   get(id: string): Promise<Invoice | undefined>;
   list(filter?: { status?: InvoiceStatus }): Promise<Invoice[]>;
   update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
-  getByRecipientAccount(
-    account: string,
-    status?: InvoiceStatus,
-  ): Promise<Invoice[]>;
-  /** Resolve an idempotency key to an existing invoice id, if any. */
+  getByPayAddress(address: string, status?: InvoiceStatus): Promise<Invoice[]>;
   getByIdempotencyKey(key: string): Promise<string | undefined>;
 }
 
@@ -172,19 +364,149 @@ export interface PaymentStore {
   listByInvoice(invoiceId: string): Promise<Payment[]>;
 }
 
+export interface AccountStore {
+  create(account: Account): Promise<Account>;
+  get(id: string): Promise<Account | undefined>;
+  getByAddress(address: string): Promise<Account | undefined>;
+  list(filter?: { type?: AccountType }): Promise<Account[]>;
+  update(id: string, patch: Partial<Account>): Promise<Account>;
+}
+
+export interface SendStore {
+  create(send: Send): Promise<Send>;
+  get(id: string): Promise<Send | undefined>;
+  listByAccount(accountId: string): Promise<Send[]>;
+  getByIdempotencyKey(key: string): Promise<Send | undefined>;
+  update(id: string, patch: Partial<Send>): Promise<Send>;
+}
+
 export interface EventStore {
   append(event: RaiFlowEvent): Promise<void>;
-  listByInvoice(invoiceId: string, options?: { after?: string }): Promise<RaiFlowEvent[]>;
+  list(options?: EventQueryOptions): Promise<RaiFlowEvent[]>;
+}
+
+export interface WebhookEndpointStore {
+  create(endpoint: Omit<WebhookEndpoint, 'id' | 'createdAt'> & { secret?: string }): Promise<WebhookEndpoint>;
+  get(id: string): Promise<WebhookEndpoint | undefined>;
+  list(): Promise<WebhookEndpoint[]>;
+  delete(id: string): Promise<boolean>;
+  getByEventType(eventType: string): Promise<WebhookEndpoint[]>;
 }
 
 // ---------------------------------------------------------------------------
-// Webhook
+// ConfirmedBlock (from watcher)
 // ---------------------------------------------------------------------------
 
-export interface WebhookEndpoint {
+export interface ConfirmedBlock {
+  blockHash: string;
+  senderAccount: string;
+  recipientAccount: string;
+  amountRaw: string;
+  confirmedAt: string;
+}
+
+export interface WatcherSink {
+  handleConfirmedBlock(block: ConfirmedBlock): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Error Model
+// ---------------------------------------------------------------------------
+
+export interface RaiFlowError {
+  error: {
+    message: string;
+    code: string;
+  };
+}
+
+export type ErrorCode =
+  | 'unauthorized'
+  | 'not_found'
+  | 'conflict'
+  | 'bad_request'
+  | 'internal_error';
+
+// ---------------------------------------------------------------------------
+// Backward compatibility aliases (prototype-era)
+// These allow the old runtime to keep building while being rewritten.
+// Remove when runtime is fully rewritten.
+// ---------------------------------------------------------------------------
+
+export type LegacyInvoiceStatus = InvoiceStatus;
+export type LegacyPaymentStatus = PaymentStatus;
+
+/** Prototype-era Invoice shape. Remove when runtime is rewritten. */
+export interface LegacyInvoice {
   id: string;
-  url: string;
-  secret: string;
-  eventTypes: RaiFlowEventType[];
+  status: InvoiceStatus;
+  currency: 'XNO';
+  expectedAmountRaw: string;
+  confirmedAmountRaw: string;
+  recipientAccount: string;
   createdAt: string;
+  expiresAt?: string;
+  completedAt?: string;
+  expiredAt?: string;
+  canceledAt?: string;
+  metadata?: Record<string, unknown>;
+  completionPolicy?: CompletionPolicy;
 }
+
+/** Prototype-era Payment shape. Remove when runtime is rewritten. */
+export interface LegacyPayment {
+  id: string;
+  invoiceId: string;
+  status: PaymentStatus;
+  currency: 'XNO';
+  amountRaw: string;
+  recipientAccount: string;
+  senderAccount?: string;
+  sendBlockHash: string;
+  confirmedAt: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** Prototype-era EventEnvelope. Remove when runtime is rewritten. */
+export interface LegacyEventEnvelope<TType extends string, TData> {
+  id: string;
+  type: TType;
+  createdAt: string;
+  data: TData;
+}
+
+/** Prototype-era store interface. Remove when runtime is rewritten. */
+export interface LegacyInvoiceStore {
+  create(invoice: LegacyInvoice, idempotencyKey?: string): Promise<LegacyInvoice>;
+  get(id: string): Promise<LegacyInvoice | undefined>;
+  list(filter?: { status?: InvoiceStatus }): Promise<LegacyInvoice[]>;
+  update(id: string, patch: Partial<LegacyInvoice>): Promise<LegacyInvoice>;
+  getByRecipientAccount(account: string, status?: InvoiceStatus): Promise<LegacyInvoice[]>;
+  getByIdempotencyKey(key: string): Promise<string | undefined>;
+}
+
+/** Prototype-era EventStore. Remove when runtime is rewritten. */
+export interface LegacyEventStore {
+  append(event: LegacyRaiFlowEvent): Promise<void>;
+  listByInvoice(invoiceId: string, options?: { after?: string }): Promise<LegacyRaiFlowEvent[]>;
+}
+
+export type LegacyRaiFlowEventType =
+  | 'invoice.created'
+  | 'payment.confirmed'
+  | 'invoice.completed'
+  | 'invoice.expired'
+  | 'invoice.canceled';
+
+export type LegacyRaiFlowEvent =
+  | LegacyInvoiceCreatedEvent
+  | LegacyPaymentConfirmedEvent
+  | LegacyInvoiceCompletedEvent
+  | LegacyInvoiceExpiredEvent
+  | LegacyInvoiceCanceledEvent;
+
+export interface LegacyInvoiceCreatedEvent extends LegacyEventEnvelope<'invoice.created', { invoice: LegacyInvoice }> {}
+export interface LegacyPaymentConfirmedEvent extends LegacyEventEnvelope<'payment.confirmed', { payment: LegacyPayment; invoice: LegacyInvoice }> {}
+export interface LegacyInvoiceCompletedEvent extends LegacyEventEnvelope<'invoice.completed', { invoice: LegacyInvoice }> {}
+export interface LegacyInvoiceExpiredEvent extends LegacyEventEnvelope<'invoice.expired', { invoice: LegacyInvoice }> {}
+export interface LegacyInvoiceCanceledEvent extends LegacyEventEnvelope<'invoice.canceled', { invoice: LegacyInvoice }> {}

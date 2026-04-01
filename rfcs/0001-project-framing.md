@@ -1,95 +1,169 @@
 # RFC 0001 — Project Framing
 
-**Status:** Accepted
-**Created:** 2024  
-**Authors:** OpenRai contributors
+This RFC establishes the foundational framing for RaiFlow v2: what it is, what it is not, and the scope fence that separates RaiFlow from the application layer.
 
 ---
 
 ## Summary
 
-This RFC establishes the foundational framing for the RaiFlow project: what it is, what it is not, and what it will build first.
+RaiFlow is a self-hostable Nano payment runtime. It runs on your infrastructure, connects to one or more Nano nodes, and exposes a clean, idempotent, event-driven API for two directions of value movement: getting paid and operating a wallet.
 
 ---
 
 ## Motivation
 
-Nano has strong settlement properties: feeless transfer, fast finality, permissionless access, and no mining overhead.
+Nano has strong settlement properties: feeless transfer, fast finality, permissionless access, no mining overhead.
 
-Despite this, developers who want to accept Nano in real applications face a significant integration gap. The tools available today require direct interaction with low-level node RPC, manual block/account monitoring, custom confirmation tracking, ad-hoc payment matching, and bespoke webhook or event delivery logic.
+What developers lack is a runtime that absorbs every low-level Nano operation — block construction, signing, PoW, receivable management, frontier tracking, confirmation monitoring, representative configuration — and exposes a clean application API.
 
-This integration friction prevents Nano from being used in many application contexts where it would otherwise be an excellent fit: micropayments, pay-per-use APIs, usage-based billing, agent-to-agent payments, and machine-scale commerce.
-
-RaiFlow exists to close this gap.
+RaiFlow fills that gap.
 
 ---
 
-## Design
+## What RaiFlow Is
 
-### What RaiFlow is
+An application-facing payment runtime for Nano.
 
-RaiFlow is an application-facing payment runtime for Nano.
+It talks to Nano nodes. Your application talks to RaiFlow. Your application never touches raw RPC.
 
-It abstracts node RPC and block-lattice mechanics to expose a simpler integration surface:
-
-- create payment expectations (invoices)
-- detect and normalize incoming payments
-- produce confirmed payment proofs
-- emit reliable application events and webhooks
-- join off-chain business metadata to payment state
-
-### What RaiFlow is not
-
-RaiFlow is not:
-
-- a Nano protocol fork or modification
-- a consensus-layer change
-- a new base ledger or token
-- a generalized wallet product
-- a custodial treasury platform (initially)
-- an exchange integration
-- a rebrand of Nano
-
-### First operating mode: observe
-
-The first version of RaiFlow operates in **observe mode**: it watches Nano accounts for incoming payments, matches them to expectations, and emits events. It does not hold or spend funds.
-
-This is intentional. RaiFlow should prove its value as a payment runtime before it operates as a custodial system.
-
-### Core primitives
-
-The initial public API surface is:
-
-- `Invoice` — a payment expectation with associated metadata
-- `Payment` — a confirmed matching Nano transfer, normalized into a stable application object
-- `EventEnvelope` — a typed, normalized application event (e.g. `payment.confirmed`)
-- `WebhookEndpoint` — a registered delivery target for events
-
-### Initial event vocabulary
-
-- `invoice.created`
-- `payment.confirmed`
-- `invoice.completed`
-- `invoice.expired`
-- `invoice.canceled`
+RaiFlow is a **thin runtime** — it adds orchestration, state management, event routing, and reliability guarantees. It does not add business logic. Pricing, customer management, product catalogs, order management — all belong in the application layer.
 
 ---
 
-## Alternatives considered
+## What RaiFlow Is Not
 
-### Build a full custodial wallet first
-Rejected. Custody increases complexity and risk substantially. Starting with observation allows RaiFlow to prove its core value — normalizing and routing payment events — without the liability of holding funds.
-
-### Build on top of an existing payment gateway abstraction
-Rejected. Nano's block-lattice model is different enough from account-balance models that a generic abstraction would either leak too much complexity or hide too much of what makes Nano useful.
-
-### Target only one framework or language
-Rejected. The core runtime should be framework-neutral. SDK packages can provide framework-specific conveniences.
+| RaiFlow is NOT | Why |
+|---|---|
+| A consumer wallet | No contact book, no transaction history UI |
+| A hosted SaaS / payment gateway | You run it. It's yours. |
+| An e-commerce platform | No carts, products, or customer accounts |
+| A block explorer | No global chain indexing |
+| A Nano node | Depends on one or more nodes via RPC/WS |
+| A fiat on/off ramp | XNO only |
 
 ---
 
-## Open questions
+## Operational Domains
 
-- What persistence adapter(s) should the runtime support first?
-- Should invoice IDs be opaque or structured?
-- What confirmation threshold should the observe-mode use by default?
+RaiFlow operates two co-equal domains simultaneously in the same instance:
+
+**Invoice Domain** — "Get paid"
+
+Create payment expectations, derive addresses, detect and match incoming confirmed payments, manage lifecycle (complete/expire/cancel), optionally sweep collected funds to treasury.
+
+**Wallet Domain** — "Operate a wallet"
+
+Manage derived accounts from a seed, watch external accounts without holding keys, send XNO, publish pre-signed blocks, generate work on demand, track balances and frontiers, auto-receive pending blocks.
+
+Both domains share: custody engine, RPC layer, event system, and persistent storage.
+
+---
+
+## Custody Modes
+
+Three custody modes coexist in the same instance:
+
+**Managed custody** — RaiFlow holds the seed. Derives accounts, signs blocks, generates PoW, auto-receives, executes sends. You issue commands.
+
+**Watched accounts** — You hold the keys. RaiFlow monitors the account, delivers events, but cannot sign for it.
+
+**Pre-signed publish** — You sign blocks in an air-gapped environment. RaiFlow publishes them through its reliable RPC layer with failover and confirmation tracking.
+
+A single application might use managed accounts for treasury, watched accounts for monitoring customer wallets, and pre-signed publishing for an advanced air-gapped flow. All at the same time. All through the same SDK. All producing events into the same unified stream.
+
+---
+
+## Core Primitives
+
+The initial public API surface:
+
+- `Invoice` — a payment expectation
+- `Payment` — a confirmed matching Nano transfer
+- `Account` — a managed or watched Nano account
+- `Send` — an outbound send operation
+- `Event` — a typed, persisted application event
+- `WebhookEndpoint` — a registered delivery target
+
+---
+
+## Event Vocabulary
+
+```
+Invoice Domain:
+  invoice.created    — new payment expectation
+  invoice.payment_received  — pending block detected
+  invoice.payment_confirmed — matching block confirmed
+  invoice.completed  — fully paid
+  invoice.expired    — validity window ended
+  invoice.canceled   — intentionally closed
+  invoice.swept      — funds swept to treasury
+
+Wallet Domain — Account:
+  account.created    — managed or watched account added
+  account.received   — inbound block detected
+  account.balance_updated — confirmed balance changed
+  account.removed    — account deleted or watch stopped
+
+Wallet Domain — Send:
+  send.queued        — send operation accepted
+  send.published     — block published to network
+  send.confirmed     — block confirmed
+  send.failed        — rejected, timeout, or fork
+
+Wallet Domain — Block:
+  block.published    — pre-signed block published
+  block.confirmed    — pre-signed block confirmed
+  block.failed       — pre-signed block rejected
+
+Infrastructure:
+  rpc.connected      — WebSocket connection established
+  rpc.disconnected   — WebSocket connection lost
+  rpc.failover       — switched to backup node
+```
+
+---
+
+## Idempotency
+
+Every mutating operation accepts an idempotency key.
+
+**Sends require an idempotency key — rejection is correct behavior if missing.** This is a non-negotiable safety rail. Sending XNO is irreversible; accidental double-sends are catastrophic.
+
+---
+
+## Doctrine Summary
+
+> You run RaiFlow. It talks to Nano. Your app talks to RaiFlow.
+
+1. Both domains, one runtime
+2. Confirmed payment first
+3. Events first
+4. Idempotency everywhere
+5. Custody modes coexist
+6. Self-hostable always
+
+---
+
+## Out of Scope (Permanently)
+
+- Consumer wallet UI
+- Fiat conversion
+- Multi-currency support
+- User account system beyond API key
+- Product catalog / cart / checkout UI
+- Mobile or desktop GUI
+- Consensus participation
+- Global chain indexing
+
+---
+
+## Out of Scope (For Now)
+
+- PostgreSQL driver (SQLite first)
+- Clustering / HA
+- Rate limiting
+- Prometheus metrics
+- gRPC API
+- Plugin system
+- Hardware security module integration
+- Scheduled / recurring payments

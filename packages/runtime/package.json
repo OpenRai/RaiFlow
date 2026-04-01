@@ -22,7 +22,10 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@openrai/config": "workspace:*",
+    "@openrai/events": "workspace:*",
     "@openrai/model": "workspace:*",
+    "@openrai/storage": "workspace:*",
     "@openrai/webhook": "workspace:*"
   },
   "peerDependencies": {

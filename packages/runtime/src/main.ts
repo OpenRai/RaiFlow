@@ -1,84 +1,129 @@
 #!/usr/bin/env node
 // @openrai/runtime — Standalone server entry point
 //
-// Wires together: Watcher → Runtime → Webhook delivery → HTTP server
+// Boots from raiflow.yaml config, initializes SQLite via the storage package,
+// and exposes the HTTP handler on the configured daemon host:port.
 //
-// Configuration via environment variables:
-//   RAIFLOW_PORT          — HTTP port (default: 3100)
-//   RAIFLOW_HOST          — HTTP host (default: 0.0.0.0)
-//   NANO_RPC_URL          — Nano node RPC URL (required)
-//   NANO_WS_URL           — Nano node WebSocket URL (optional; enables real-time mode)
-//   RAIFLOW_ACCOUNTS      — Comma-separated Nano accounts to watch (optional at startup)
-//   RAIFLOW_EXPIRY_MS     — Invoice expiry check interval in ms (default: 10000)
-//   RAIFLOW_POLL_MS       — RPC poll interval in ms for polling mode (default: 5000)
+// Configuration via YAML file (default: ./raiflow.yaml) or RAIFLOW_CONFIG_PATH env var.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { Runtime } from './runtime.js';
+import { loadConfig, type RaiFlowConfig } from '@openrai/config';
+import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, type Database } from '@openrai/storage';
+import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { createHandler } from './handler.js';
+import { Runtime } from './runtime.js';
 
 // ---------------------------------------------------------------------------
-// Config from environment
+// Config
 // ---------------------------------------------------------------------------
 
-const PORT = parseInt(process.env['RAIFLOW_PORT'] ?? '3100', 10);
-const HOST = process.env['RAIFLOW_HOST'] ?? '0.0.0.0';
-const NANO_RPC_URL = process.env['NANO_RPC_URL'];
-const NANO_WS_URL = process.env['NANO_WS_URL'];
-const ACCOUNTS = (process.env['RAIFLOW_ACCOUNTS'] ?? '')
-  .split(',')
-  .map((a) => a.trim())
-  .filter(Boolean);
-const EXPIRY_MS = parseInt(process.env['RAIFLOW_EXPIRY_MS'] ?? '10000', 10);
-const POLL_MS = parseInt(process.env['RAIFLOW_POLL_MS'] ?? '5000', 10);
+const CONFIG_PATH = process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yaml';
+
+let config: RaiFlowConfig;
+try {
+  config = loadConfig(CONFIG_PATH);
+} catch (err) {
+  console.error(`[raiflow] failed to load config from ${CONFIG_PATH}:`, err instanceof Error ? err.message : err);
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
-// Runtime setup
+// Logging
 // ---------------------------------------------------------------------------
 
-const runtime = new Runtime({ expiryIntervalMs: EXPIRY_MS });
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const LOG_PRIORITY: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+const currentLevel: LogLevel = config.logging.level;
+
+function shouldLog(level: LogLevel): boolean {
+  return LOG_PRIORITY[level] >= LOG_PRIORITY[currentLevel];
+}
+
+function log(level: LogLevel, prefix: string, message: string, ...args: unknown[]): void {
+  if (!shouldLog(level)) return;
+  const timestamp = new Date().toISOString();
+  const formatted = args.length > 0 ? `${message} ${args.map(String).join(' ')}` : message;
+  const output = `[${timestamp}] [${level.toUpperCase()}] [${prefix}] ${formatted}`;
+  if (level === 'error') console.error(output);
+  else if (level === 'warn') console.warn(output);
+  else console.log(output);
+}
+
+const logger = {
+  debug: (msg: string, ...args: unknown[]) => log('debug', 'raiflow', msg, ...args),
+  info: (msg: string, ...args: unknown[]) => log('info', 'raiflow', msg, ...args),
+  warn: (msg: string, ...args: unknown[]) => log('warn', 'raiflow', msg, ...args),
+  error: (msg: string, ...args: unknown[]) => log('error', 'raiflow', msg, ...args),
+};
+
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
+let db: Database;
+try {
+  db = createDatabase(config.storage.path);
+  logger.info('sqlite open', config.storage.path);
+} catch (err) {
+  logger.error('failed to open database:', err instanceof Error ? err.message : err);
+  process.exit(1);
+}
+
+// Run migrations
+const migrationRunner = createMigrationRunner(db);
+await migrationRunner.up();
+logger.info('migrations applied', migrationRunner.getApplied().join(', '));
+
+// ---------------------------------------------------------------------------
+// Stores (wire through events system)
+// ---------------------------------------------------------------------------
+
+const eventBus = createEventBus();
+const eventStore = createPersistentEventStore(
+  createSqliteEventStore(db),
+  eventBus,
+);
+const invoiceStore = createSqliteInvoiceStore(db);
+const paymentStore = createSqlitePaymentStore(db);
+const accountStore = createSqliteAccountStore(db);
+const sendStore = createSqliteSendStore(db);
+const webhookStore = createSqliteWebhookStore(db);
+
+// ---------------------------------------------------------------------------
+// Runtime (prototype — still uses legacy model, being replaced in later slices)
+// ---------------------------------------------------------------------------
+
+const runtime = new Runtime({
+  invoiceStore: invoiceStore as any,
+  paymentStore: paymentStore as any,
+  eventStore: eventStore as any,
+  webhookEndpointStore: webhookStore as any,
+  expiryIntervalMs: 10_000,
+});
 runtime.start();
+logger.info('runtime started');
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
 
 const handle = createHandler(runtime);
 
 // ---------------------------------------------------------------------------
-// Watcher setup (lazy — only if NANO_RPC_URL is configured)
-// ---------------------------------------------------------------------------
-
-let watcher: { start(): void; stop(): void } | undefined;
-
-async function setupWatcher() {
-  if (!NANO_RPC_URL) {
-    console.log('[raiflow] NANO_RPC_URL not set — watcher disabled (HTTP API only)');
-    return;
-  }
-
-  // Dynamic import to avoid hard dependency in library usage
-  const { Watcher } = await import('@openrai/watcher');
-
-  const w = new Watcher({
-    rpcUrl: NANO_RPC_URL,
-    wsUrl: NANO_WS_URL,
-    accounts: ACCOUNTS,
-    sink: runtime,
-    pollIntervalMs: POLL_MS,
-  });
-
-  w.start();
-  watcher = w;
-
-  const mode = NANO_WS_URL ? 'websocket' : 'polling';
-  console.log(`[raiflow] watcher started (${mode}) — watching ${ACCOUNTS.length} account(s)`);
-}
-
-// ---------------------------------------------------------------------------
-// HTTP server (Node built-in, adapts IncomingMessage → Request → Response)
+// HTTP server
 // ---------------------------------------------------------------------------
 
 async function toWebRequest(req: IncomingMessage): Promise<Request> {
   const url = `http://${req.headers.host ?? 'localhost'}${req.url ?? '/'}`;
   const method = req.method ?? 'GET';
 
-  // Read body for methods that may have one
   let body: string | undefined;
   if (method !== 'GET' && method !== 'HEAD' && method !== 'DELETE') {
     const chunks: Buffer[] = [];
@@ -114,6 +159,7 @@ const server = createServer(async (req, res) => {
     await sendWebResponse(webRes, res);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Internal server error';
+    logger.error('unhandled request error:', message);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message, code: 'internal_error' } }));
   }
@@ -123,40 +169,21 @@ const server = createServer(async (req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
-async function main() {
-  await setupWatcher();
-
-  server.listen(PORT, HOST, () => {
-    console.log(`[raiflow] runtime listening on http://${HOST}:${PORT}`);
-    console.log('[raiflow] endpoints:');
-    console.log('  GET    /health');
-    console.log('  POST   /invoices');
-    console.log('  GET    /invoices');
-    console.log('  GET    /invoices/:id');
-    console.log('  POST   /invoices/:id/cancel');
-    console.log('  GET    /invoices/:id/payments');
-    console.log('  GET    /invoices/:id/events');
-    console.log('  POST   /webhooks');
-    console.log('  GET    /webhooks');
-    console.log('  DELETE /webhooks/:id');
-  });
-}
+const { host, port } = config.daemon;
+server.listen(port, host, () => {
+  logger.info(`listening on http://${host}:${port}`);
+});
 
 // Graceful shutdown
-function shutdown() {
-  console.log('\n[raiflow] shutting down...');
-  watcher?.stop();
+function shutdown(): void {
+  logger.info('shutting down...');
   runtime.stop();
+  db.close();
   server.close(() => {
-    console.log('[raiflow] goodbye');
+    logger.info('goodbye');
     process.exit(0);
   });
 }
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
-
-main().catch((err) => {
-  console.error('[raiflow] failed to start:', err);
-  process.exit(1);
-});

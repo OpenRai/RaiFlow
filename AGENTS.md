@@ -1,4 +1,4 @@
-# AGENTS
+# AI Coding Agent Instructions
 
 Instructions for AI coding agents working on the RaiFlow project.
 
@@ -6,49 +6,74 @@ Instructions for AI coding agents working on the RaiFlow project.
 
 ## Context Bootstrap
 
-On session start, read these files to understand the project:
+On session start, read these files to you understand the project:
 
-1. **`docs/progress.md`** — Current phase status, architecture overview, dependency graph, action items. This is where we track progress and plan next steps. Update it as phases complete or priorities shift. The plan is not set in stone — it evolves as the project progresses.
+1. **`docs/progress.md`** — Current implementation frontier, active milestone, dependency graph, and settled architecture decisions. Start here every time.
 2. **`README.md`** — Project doctrine and high-level overview.
-3. **`ROADMAP.md`** — Original roadmap (Phases 0–6). Cross-reference with `docs/progress.md` for current status.
-4. **`rfcs/`** — Design decisions. RFCs 0001–0003 are Accepted. Draft RFCs 0004–0006 are planned.
+3. **`ROADMAP.md`** — Long-horizon milestone map. Reference for what's next.
+4. **`rfcs/`** — Architecture decisions. Read the relevant RFC before making design choices in that area.
 
-## Project Structure
+## Package Map
 
 ```
 packages/
-  model/       — Canonical types (Invoice, Payment, EventEnvelope, store interfaces)
-  watcher/     — Chain observation (WebSocket + RPC polling)
-  runtime/     — Invoice lifecycle, payment matching, HTTP API
-  webhook/     — HMAC-SHA256 signing, delivery with retry
-  raiflow-sdk/ — Business client SDK (HTTP wrapper for runtime API)
-apps/
-  site/        — Documentation site (VitePress)
-examples/
-  express-api/       — Reference Express integration (planned)
-  next-checkout/     — Reference Next.js demo (planned)
-  webhook-consumer/  — Reference webhook handler (planned)
-  htmx-wallet/       — HTMX wallet demo
-rfcs/          — Design RFCs
-docs/          — Architecture review, progress tracking
+  model/       — canonical types, schemas, shared contracts (DO NOT add app logic here)
+  config/      — YAML loader, env resolution, typed config
+  storage/     — store contracts, SQLite driver, migrations
+  rpc/         — multi-node RPC, WebSocket, failover, confirmation tracking
+  events/      — event bus, persistence, querying
+  custody/     — seed, derivation, signing, PoW, frontier ops
+  runtime/     — HTTP API, services, orchestration
+  webhook/     — HMAC signing, delivery engine
+  raiflow-sdk/ — typed JS/TS client for the runtime API
 ```
+
+**Module system:** ESM (`"type": "module"`). All packages use `.js` extensions in imports.
+
+**nano-core boundary:** `@openrai/nano-core` (separate repo, published to npm) provides `NanoAmount`, `NanoAddress`, `NanoClient`, `WorkProvider`. RaiFlow owns orchestration, storage, event routing, and application semantics. Do not duplicate Nano protocol logic in RaiFlow packages.
 
 ## Key Conventions
 
-- **Workspace:** pnpm monorepo. Use `workspace:*` for internal deps. Use `pnpm -r build/test/lint`.
-- **Module system:** ESM (`"type": "module"`). All packages use `.js` extensions in imports.
+- **Type-first:** Canonical types live in `@openrai/model`. Other packages import from model. Never duplicate types.
+- **Idempotency everywhere:** Every mutating operation accepts an idempotency key. Sends **require** an idempotency key — rejection is the correct behavior if missing.
+- **Persist-first events:** Events are written before delivery is attempted. Delivery failure does not lose the event.
+- **Derivation namespaces:** Invoice addresses and managed wallet accounts use non-overlapping index ranges from the same seed.
+- **Workspace deps:** Use `workspace:*` for internal packages.
 - **Framework-agnostic HTTP:** Runtime uses web-standard `Request`/`Response`. Works on Node, Deno, Bun, Workers.
-- **Type-first:** Canonical types live in `@openrai/model`. Other packages import from model, never duplicate types.
-- **Idempotency:** Payment systems are retry-heavy. Treat idempotency as default, not afterthought.
-- **nano-core is external:** Published to npm as `@openrai/nano-core`. Not in this monorepo. raiflow-sdk depends on `^1.0.0`.
+- **YAML config with `env:`:** No hardcoded values. Use `raiflow.yaml` with `env:VARIABLE_NAME` references.
 
 ## When Making Changes
 
-- Update `docs/progress.md` when completing tasks or shifting priorities.
-- If a change affects the architecture, check whether an RFC needs updating or drafting.
+- Update `docs/progress.md` when completing tasks or shifting priorities. Keep only the active milestone and next steps.
+- If a change affects architecture, check whether an RFC needs updating.
 - Run `pnpm -r build` and `pnpm -r test` before considering work complete.
 - The `@openrai/model` package is the contract layer. Changes here affect all packages.
 
 ## Progress Document Policy
 
-`docs/progress.md` tracks **what's next and what's in progress** — not what's done. Git log already records history; duplicating it here adds noise. When a task is completed, remove it from the checklist. When a phase is fully done, remove the phase section entirely. Keep the document lean and forward-looking.
+`docs/progress.md` tracks **what's next and what's in progress** — not what's done. Git log records history. Keep the document lean and forward-looking. Remove items when completed. Remove milestone sections when fully done.
+
+## Build and Test
+
+```bash
+# Build all packages
+pnpm -r build
+
+# Run all tests
+pnpm -r test
+
+# Run tests in one package
+pnpm --filter @openrai/runtime test
+
+# Lint
+pnpm -r lint
+```
+
+## Commit Policy
+
+Commit only when:
+- `pnpm -r build` passes
+- `pnpm -r test` passes
+- The change is coherent and the commit message accurately reflects the purpose
+
+Do not commit broken work. Do not commit with failing tests.

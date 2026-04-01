@@ -1,57 +1,106 @@
-# RaiFlow Runtime
+# Runtime
 
-RaiFlow's runtime is the main output of the initiative — a thin settlement and integration layer for Nano.
+This page describes the runtime as it exists today, not only as it is intended to look later.
 
-It turns raw node RPC and block-lattice mechanics into a small set of application primitives:
+## Current State
 
-- **`Invoice`** — a payment expectation with associated metadata
-- **`Payment`** — a confirmed matching Nano transfer
-- **`EventEnvelope`** — a typed application event
-- **`WebhookEndpoint`** — a registered delivery target for events
+The runtime currently does these things reliably:
 
-## How it works
+- boots from `raiflow.yaml`
+- opens SQLite storage and runs migrations
+- wires the event store and event bus
+- exposes a small HTTP surface inherited from the earlier invoice prototype
 
-A developer creates an invoice. RaiFlow watches the Nano network for confirmed send blocks matching that invoice. When a match is found, a `payment.confirmed` event fires. When enough confirmed payments satisfy the invoice, an `invoice.completed` event fires.
+The runtime does not yet expose the full v2 wallet and invoice API described in the RFCs.
 
-That's the whole flow for the mainline use case.
+## Available Now
 
+Current HTTP routes:
+
+```text
+GET    /health
+POST   /invoices
+GET    /invoices
+GET    /invoices/:id
+POST   /invoices/:id/cancel
+GET    /invoices/:id/payments
+GET    /invoices/:id/events
+POST   /webhooks
+GET    /webhooks
+DELETE /webhooks/:id
 ```
-create invoice → watch for payments → payment.confirmed → invoice.completed
+
+These routes should be treated as transitional. They do not represent the finished v2 surface.
+
+## Planned Runtime Surface
+
+The target runtime adds the missing v2 families:
+
+```text
+GET    /v1/events
+POST   /v1/accounts
+GET    /v1/accounts
+GET    /v1/accounts/:id
+PATCH  /v1/accounts/:id
+DELETE /v1/accounts/:id
+POST   /v1/watch
+GET    /v1/watch
+DELETE /v1/watch/:account
+POST   /v1/work/generate
+POST   /v1/publish
+POST   /v1/accounts/:id/send
+POST   /v1/invoices
+GET    /v1/invoices
+GET    /v1/invoices/:id
+POST   /v1/invoices/:id/cancel
+GET    /v1/invoices/:id/payments
 ```
 
-## Operating modes
+That target is documented in the RFCs and roadmap, but it is not all live yet.
 
-### Observe mode (first)
+## Authentication
 
-RaiFlow watches Nano accounts for incoming payments, matches them to invoices, and emits events. It does not hold or spend funds. No private keys required.
+Authentication is part of the intended runtime design, but it is not yet fully enforced across the runtime surface.
 
-This is the first and default mode. See [RFC 0002](/rfcs/0002-observe-mode).
+Do not assume the current codebase has complete production-grade auth behavior wired end to end.
 
-### Custodial mode (later)
+## Configuration
 
-Treasury movement, payouts, refunds, and auto-receive may be added later as an optional higher-trust mode. Not the first product.
+Runtime startup uses `raiflow.yaml`.
 
-## Design principles
+Example shape:
 
-1. **Observe first** — prove value before holding funds
-2. **Confirmed payment first** — a confirmed send block is the first event that matters
-3. **Events first** — applications consume events, not block choreography
-4. **Tiny API first** — four primitives, five events, that's it
-5. **Idempotency everywhere** — retries and partial failure are normal
-6. **Off-chain business context** — orders, users, and entitlements stay in your app
-7. **Custody later** — only when clearly justified
+```yaml
+daemon:
+  host: "0.0.0.0"
+  port: 3100
+  apiKey: "env:RAIFLOW_API_KEY"
 
-## Packages
+nano:
+  nodes:
+    - rpc: "env:NANO_RPC_URL"
+      ws: "env:NANO_WS_URL"
+      priority: 1
 
-| Package | Purpose |
-|---------|---------|
-| `@openrai/model` | Canonical types and schemas |
-| `@openrai/watcher` | Chain observation and confirmation tracking |
-| `@openrai/runtime` | Payment expectation + event runtime |
-| `@openrai/sdk-js` | JS/TS SDK |
-| `@openrai/webhook` | Webhook signing and delivery helpers |
+custody:
+  seed: "env:RAIFLOW_SEED"
+  representative: "env:RAIFLOW_REPRESENTATIVE"
 
-## Next
+storage:
+  driver: "sqlite"
+  path: "./raiflow.db"
+```
 
-- [Event model reference →](/runtime/model)
-- [Code examples →](/runtime/examples)
+See the repository `raiflow.yaml.example` for the full current example.
+
+## Read With Care
+
+For target architecture, read:
+
+- [RFC 0001](../rfcs/0001-project-framing)
+- [RFC 0002](../rfcs/0002-observe-mode)
+- [RFC 0003](../rfcs/0003-event-model)
+
+For actual current build state, read:
+
+- [Roadmap](../roadmap)

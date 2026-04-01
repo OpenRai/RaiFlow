@@ -1,195 +1,295 @@
-# RaiFlow Architectural Review (Reconciled)
+# Architectural Review
 
-**Review Date:** 2026-03-30
-**Review Board:** OpenRai Council (adam, bertil, caesar; david timed out)
-**Documents Reconciled:** `architectural-review-0.md` (strategic vision, 291 lines) + previous `architectural-review.md` (implementation review, 311 lines)
-
----
-
-## Executive Summary
-
-The architectural vision in the **original review is strategically sound and must be preserved**. The implementation findings in the **second review are accurate but incomplete** — it failed to read the original strategic document and missed 7 critical gaps.
-
-**Core Insight:** The second review treated the codebase as a standalone project. The original established it as one half of a dual-SDK ecosystem. The reconciliation reveals that **the SDK isn't just incomplete — it's architecturally misaligned** with the strategic vision.
+**Purpose:** Implementation blueprint and package dependency map for v2.  
+**Last updated:** 2026-04-01
 
 ---
 
-## 1. What the Original Document Established (Strategic Doctrine)
+## Package Map
 
-### 1.1 The Frontier Dilemma is THE Architectural Constraint
+```
+packages/
+  model/       — canonical types, schemas, shared contracts
+  config/      — YAML loader, env resolution, typed config
+  storage/     — store contracts, SQLite driver, migrations
+  rpc/         — multi-node RPC, WebSocket, failover, confirmation tracking
+  events/      — event bus, persistence, querying
+  custody/     — seed, derivation, signing, PoW, frontier ops
+  runtime/     — HTTP API, services, orchestration
+  webhook/     — HMAC signing, delivery engine
+  raiflow-sdk/ — typed JS/TS client
+```
 
-Nano is state-based (block-lattice), not action-based (like EVM). Each block seals absolute state including the previous hash (frontier). Unexpected incoming transactions invalidate pre-computed outbound blocks. Modern Nano integration must manage local concurrency (Mutex/Queues) to sequence the frontier perfectly.
+### Dependency Graph
 
-**This shapes the dual-SDK boundary:**
-- `nano-core` MUST solve frontier management (mutex/queues) for wallet operations
-- `raiflow-sdk` and RaiFlow's watcher/runtime operate in observe mode and do NOT need frontier management
-- The second review's characterization of watcher's `NanoRpcClient` as "duplication" is **partially incorrect** — it's appropriate separation of concerns, but lacks transport fallback resilience
-
-### 1.2 Symmetric DevEx is Non-Negotiable
-
-Both SDKs must share:
-- **Shared domain objects:** `NanoAmount`, `NanoAddress` — eradicate "Stringly-Typed Money"
-- **Progressive disclosure:** `.initialize({ ... })` pattern with smart defaults
-- **Zero mental whiplash:** Developer graduating from raiflow-sdk to nano-core finds identical syntax
-
-**Currently violated:** The SDK's type shadowing bug is a direct violation of this contract.
-
-### 1.3 WorkProvider.auto() is Mandatory for Production
-
-Empirical browser hostility data proves naive work generation fails:
-- **WebGPU "Throttle Cliff":** Browsers throttle GPU compute after 1-2s, dropping from 336 MH/s to 7.5 MH/s
-- **WASM "Death Spiral":** Multi-threaded WASM in Safari takes longer than single-threaded due to scheduler intervention
-- **WebGL:** Predictable ~15 MH/s baseline
-
-JIT Environment Profiling via `WorkProvider.auto()` is architecturally necessary, not optional.
-
-### 1.4 Multi-Language Strategy Requires DDD Validation Now
-
-Tier 1: Rust, Go, Zig (performance & infrastructure)
-Tier 2: Python, Java/JVM (enterprise & AI)
-
-The DDD patterns (immutable value objects, explicit contracts) must be validated in the current TypeScript implementation to ensure cross-language portability.
-
----
-
-## 2. What the Second Review Found (Implementation Reality)
-
-### Confirmed Issues
-
-| Issue | Severity | Location |
-|-------|----------|----------|
-| **SDK broken dependency** | Critical | `raiflow-sdk/package.json` — `file:../../../nano-core` link |
-| **Type shadowing** | Critical | SDK defines `Invoice` with `status: string` instead of re-exporting `InvoiceStatus` |
-| **Invalid enum value** | Bug | Mock returns `status: 'pending'` — doesn't exist in `InvoiceStatus` |
-| **Missing fields** | Bug | SDK's `Invoice` missing `expectedAmountRaw`, `confirmedAmountRaw`, `currency` |
-| **RFC stasis** | Process | All 3 RFCs are Draft despite implementation |
-| **Observability gap** | Technical debt | Webhook delivery uses raw `console.log` |
-
-### What the Second Review Misframed
-
-**"RPC duplication is the #1 architectural debt"** — Overstated. The watcher observes; nano-core mutates. The transport is similar but the problem domain is different. The real debt is:
-1. Watcher's single-URL RPC client lacks transport fallback
-2. No shared contract for RPC transport between watcher and nano-core
+```
+model ─────────────────────────────────────────────────────────────┐
+                                                              │
+config ─────────────────────────────────────────────────────────┤
+                                                              │
+storage ──► model ─────────────────────────────────────────────┤
+                                                              │
+events ───► model ─────────────────────────────────────────────┤
+                                                              │
+rpc ──────► model ────────────────────────────────────────────┤
+                                                              │
+custody ──► model ─────────────────────────────────────────────┤
+           │                                                  │
+           └──► rpc ──► events ──► storage                     │
+                      (custody emits events)                   │
+                                                              │
+runtime ──► model ────────────────────────────────────────────┤
+           ├──► config                                          │
+           ├──► storage                                         │
+           ├──► events                                         │
+           ├──► custody ──► rpc                                │
+           └──► webhook                                         │
+                                                              │
+webhook ───► model ────────────────────────────────────────────┤
+                                                              │
+raiflow-sdk ──► model ─────────────────────────────────────────┘
+```
 
 ---
 
-## 3. Gaps Neither Document Addressed
+## nano-core Boundary
 
-### 3.1 The nano-core Existential Crisis
+`@openrai/nano-core` (separate repo, npm: `^1.0.0`) provides:
 
-`@openrai/nano-core` exists OUTSIDE the RaiFlow monorepo at `../nano-core`. The `file:` dependency is:
-- **Path fragile** — assumes specific directory structure
-- **Unversioned** — no semver constraints
-- **CI/CD hostile** — build agents may not have nano-core at that path
-- **Publishing blocker** — published package would have missing dependency
+- `NanoAmount` — amount arithmetic and unit conversion
+- `NanoAddress` — address encoding and validation
+- `NanoClient` — low-level RPC transport
+- `WorkProvider` — PoW generation abstraction
 
-**Resolution:** Either bring nano-core into the monorepo, publish to npm with versioned dependency, or temporarily implement `NanoAmount` locally.
-
-### 3.2 The berrypay-cli Strategic Ambiguity
-
-Document A positions berrypay as "SOTA for programmatic micro-payments." The codebase has `berrypay-cli` as a standalone CLI tool using `nanocurrency`, unrelated to the dual-SDK. Options:
-1. **Seed for nano-core:** Extract wallet logic into nano-core
-2. **Separate tool:** Maintain independently
-3. **Legacy:** Deprecate once raiflow-sdk is functional
-
-### 3.3 Watcher/Runtime vs nano-core Integration Path
-
-The watcher should NOT adopt nano-core's full client (which includes frontier management and PoW — irrelevant for observe mode). Instead:
-- Extract a minimal `NanoRpcTransport` interface from nano-core
-- Watcher can optionally use it for transport fallback resilience
-- Both share `@openrai/model` types as the contract layer
-
-### 3.4 Anti-Pattern Mapping to Current Codebase
-
-| Anti-Pattern (from Document A) | Current Violation |
-|-------------------------------|-------------------|
-| **Primitive Obsession** | `amountRaw: string`, `xnoToRaw()` hand-rolled in runtime |
-| **Temporal Coupling** | Inconsistent initialization (constructor vs static factory) |
-| **Opaque Dependencies** | Single RPC URL with no fallback, broken `file:` link |
-| **Naive Work Generation** | No WorkProvider integration anywhere |
-
-### 3.5 RFC Process is Undefined
-
-No mechanism exists for advancing RFCs from Draft → Accepted → Final. This must be formalized before drafting new RFCs.
+RaiFlow owns:
+- Seed management and key derivation
+- Derivation index management and namespace separation
+- Account frontier tracking
+- Send/receive/change orchestration
+- RPC failover and connection management
+- Event persistence and routing
+- Application-level state management
 
 ---
 
-## 4. Revised Prioritization
+## Derivation Namespaces
 
-### Why the Second Review's Order Was Wrong
+Invoice addresses and managed wallet accounts use non-overlapping BIP-44 derivation ranges from the same seed:
 
-The second review recommended: Phase 3 → Persistence → nano-core migration.
+```
+seed
+├── invoice addresses:   index 0x00000000 – 0x7FFFFFFF
+└── managed accounts:    index 0x80000000 – 0xFFFFFFFF
+```
 
-This fails because:
-1. Phase 3 cannot be "completed" while SDK has broken dependency and type shadowing
-2. Persistence is independent of Phase 3 and can proceed in parallel
-3. nano-core migration scope is larger than estimated (WorkProvider, frontier management)
-
-### Reconciled Priority Sequence
-
-| Priority | Action | Timeline |
-|----------|--------|----------|
-| **P0** | Fix SDK broken `file:` dependency | This week |
-| **P0** | Fix Invoice type shadowing — re-export from `@openrai/model` | This week |
-| **P0** | Remove mock data from `InvoicesResource.create()` | This week |
-| **P1** | Clarify nano-core location (monorepo vs npm) | Week 1 |
-| **P1** | Clarify berrypay-cli role in dual-SDK strategy | Week 1 |
-| **P1** | Advance RFCs 0001–0003 to Accepted | Week 1 |
-| **P2** | Draft RFC 0007 (RFC Process) — before 0004-0006 | Week 1–2 |
-| **P2** | Draft RFC 0004 (SDK Architecture) | Week 2–3 |
-| **P2** | Implement real HTTP client in raiflow-sdk | Week 2–3 |
-| **P3** | Draft RFC 0005 (nano-core Integration) — transport interface, NOT full client | Week 3–4 |
-| **P3** | Draft RFC 0006 (Persistence) — SQLite first | Week 3–4 |
-| **P4** | Implement SQLite store adapter | Week 4–6 |
-| **P5** | Extract `NanoRpcTransport` interface from nano-core | Week 6+ |
-| **P6** | Build nano-core with WorkProvider.auto() | Future |
-
-### Key Changes from Second Review
-
-1. **nano-core location is now P1** (was "medium-term") because SDK has hard dependency
-2. **RFC process (0007) precedes RFCs 0004–0006** to prevent further drift
-3. **Persistence can proceed in parallel** with SDK work (not sequential)
-4. **nano-core migration redefined** as optional transport optimization, not structural requirement
+This prevents collisions and makes address purpose distinguishable from the derivation index alone.
 
 ---
 
-## 5. Specific Corrections to Second Review
+## Store Interfaces
 
-| Second Review Claim | Correction |
-|---------------------|------------|
-| "RPC duplication is the #1 architectural debt" | Overstated. Watcher observes, nano-core mutates. Real debt: no transport fallback, no shared contract. |
-| "nano-core is early-stage, NOT used by watcher/runtime" | nano-core doesn't exist in the repo. The `file:` link is a forward reference. |
-| "Phase 3 first. Developer experience is the current bottleneck." | Phase 3 is blocked by P0 items (broken dependency, type shadowing). |
-| "nano-core provides NanoClient with same capabilities plus transport fallback" | nano-core provides significantly more: JIT Profiling, WebGPU/WebGL/WASM/CPU cascade, browser hostility mitigation. Treating it as "just RPC transport" undervalues its role. |
-| Missing analysis of berrypay-cli | Document A positions berrypay as "SOTA." Strategic positioning must be clarified. |
+Each store is a typed interface in `model`. Implementations are swappable.
+
+```
+InvoiceStore
+  create(invoice, idempotencyKey?) → Invoice
+  get(id) → Invoice | undefined
+  list(filter?) → Invoice[]
+  update(id, patch) → Invoice
+  getByPayAddress(address, status?) → Invoice[]
+  getByIdempotencyKey(key) → string | undefined
+
+PaymentStore
+  create(payment) → Payment
+  get(id) → Payment | undefined
+  getByBlockHash(hash) → Payment | undefined
+  listByInvoice(invoiceId) → Payment[]
+
+AccountStore
+  create(account) → Account
+  get(id) → Account | undefined
+  getByAddress(address) → Account | undefined
+  list(filter?) → Account[]
+  update(id, patch) → Account
+
+SendStore
+  create(send) → Send
+  get(id) → Send | undefined
+  listByAccount(accountId) → Send[]
+  getByIdempotencyKey(key) → Send | undefined
+  update(id, patch) → Send
+
+EventStore
+  append(event) → void
+  list(filter?) → RaiFlowEvent[]   // { after?, type?, resourceType?, resourceId?, limit? }
+
+WebhookEndpointStore
+  create(endpoint) → WebhookEndpoint
+  get(id) → WebhookEndpoint | undefined
+  list() → WebhookEndpoint[]
+  delete(id) → boolean
+  getByEventType(eventType) → WebhookEndpoint[]
+```
 
 ---
 
-## 6. Consensus
+## HTTP API Shape
 
-**All councillors agree:**
-- Dual-SDK vision with Symmetric DevEx is architecturally correct
-- Implementation is incomplete — SDK has critical bugs, nano-core location is unresolved
-- RFC process must be formalized before new RFCs
-- berrypay-cli role needs strategic positioning
-- The watcher should NOT adopt nano-core's full client — extract a minimal transport interface instead
+All endpoints under `/v1`. Auth via `Authorization: Bearer <apiKey>` header on all non-health endpoints.
 
-**Resolved disagreements:**
-- **Watcher/nano-core relationship:** Not full adoption. Extract `NanoRpcTransport` interface for optional use.
-- **Phase ordering:** P0 fixes first (broken SDK), then RFC formalization, then Phase 3 completion.
-- **berrypay-cli:** Clarify role in RFC, don't deprecate prematurely.
+### Health
+
+```
+GET /health → { status: 'ok' }
+```
+
+### Events
+
+```
+GET /v1/events?after=<cursor>&type=<filter>&resourceType=<type>&resourceId=<id>&limit=50
+```
+
+### Webhooks
+
+```
+POST   /v1/webhooks           — register endpoint
+GET    /v1/webhooks           — list endpoints
+DELETE /v1/webhooks/:id       — remove endpoint
+```
+
+### Accounts
+
+```
+POST   /v1/accounts           — create managed account
+GET    /v1/accounts           — list accounts
+GET    /v1/accounts/:id       — get account
+PATCH  /v1/accounts/:id       — update label, representative
+DELETE /v1/accounts/:id       — delete account (zero balance only)
+```
+
+### Watch
+
+```
+POST   /v1/watch              — start watching an external account
+GET    /v1/watch              — list watched accounts
+DELETE /v1/watch/:account      — stop watching
+```
+
+### Work and Publish
+
+```
+POST   /v1/work/generate      — generate PoW
+POST   /v1/publish            — publish pre-signed block
+```
+
+### Sends
+
+```
+POST   /v1/accounts/:id/send  — send from managed account
+```
+
+### Invoices
+
+```
+POST   /v1/invoices           — create invoice
+GET    /v1/invoices           — list invoices
+GET    /v1/invoices/:id       — get invoice
+POST   /v1/invoices/:id/cancel — cancel invoice
+GET    /v1/invoices/:id/payments — list payments
+```
 
 ---
 
-## Bottom Line
+## Error Model
 
-The RaiFlow architecture is strategically sound but implementationally challenged. The dual-SDK vision from the original review must guide all decisions. The second review's findings are real but incomplete.
+All errors follow a consistent envelope:
 
-**Critical path:**
-1. **Fix the broken SDK** — dependency, types, mock data
-2. **Clarify the ecosystem** — nano-core location, berrypay-cli role
-3. **Formalize the process** — RFC lifecycle before new RFCs
-4. **Build properly** — real HTTP client after RFC 0004
-5. **Decide on integration** — transport interface, not full adoption
+```typescript
+interface RaiFlowError {
+  error: {
+    message: string   // Human-readable
+    code: string      // Machine-readable, stable across versions
+  }
+}
+```
 
-**The foundation is solid. The execution must now match the vision.**
+Common error codes:
+- `unauthorized` — missing or invalid API key
+- `not_found` — resource does not exist
+- `conflict` — state conflict (e.g. delete non-empty account)
+- `bad_request` — invalid input
+- `internal_error` — unexpected server error
+
+---
+
+## Configuration Shape
+
+```yaml
+# raiflow.yaml
+daemon:
+  host: "127.0.0.1"
+  port: 7400
+  apiKey: "env:RAIFLOW_API_KEY"
+
+nano:
+  nodes:
+    - rpc: "http://localhost:7076"
+      ws: "ws://localhost:7078"
+      priority: 1
+    - rpc: "http://backup:7076"
+      ws: "ws://backup:7078"
+      priority: 2
+
+custody:
+  seed: "env:RAIFLOW_SEED"
+  representative: "nano_1rep..."
+
+invoices:
+  defaultExpirySeconds: 3600
+  autoSweep: true
+  sweepDestination: "treasury"
+
+storage:
+  driver: "sqlite"
+  path: "./raiflow.db"
+
+webhooks:
+  - url: "https://myapp.com/hooks/raiflow"
+    secret: "env:WEBHOOK_SECRET"
+    events: ["*"]
+
+logging:
+  level: "info"    # debug | info | warn | error
+  format: "json"   # json | pretty
+```
+
+---
+
+## Implementation Exit Criteria
+
+Each milestone is complete when:
+
+**M1 (Foundation)**
+- `raiflow` starts from `raiflow.yaml`
+- Migrations run automatically
+- Auth rejects unauthenticated requests
+- `GET /health` returns `{"status":"ok"}`
+- `GET /v1/events` returns an empty event log
+
+**M2 (RPC + Custody)**
+- Multi-node failover works with a dead primary node
+- WS reconnect fires after disconnect
+- A managed account can be derived deterministically from seed
+- A valid block can be signed and published
+
+**M3 (Wallet Domain)**
+- Managed and watched accounts coexist
+- Send with duplicate idempotency key is rejected
+- Send without idempotency key is rejected
+- Pre-signed publish emits `block.published` and `block.confirmed`
+
+**M4 (Invoice Domain)**
+- Invoice pay addresses are derived and unique
+- Payment detection and confirmation transitions work
+- `exact` completion policy does not complete on overpayment
+- Sweep sends a valid block from the pay address to treasury

@@ -1,0 +1,29 @@
+{
+  "name": "@openrai/custody",
+  "version": "0.0.1",
+  "private": false,
+  "description": "Seed, derivation, signing, PoW, and frontier operations for RaiFlow",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"No tests yet\"",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openrai/model": "workspace:*",
+    "@openrai/nano-core": "^1.0.0",
+    "nanocurrency": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.2"
+  }
+}

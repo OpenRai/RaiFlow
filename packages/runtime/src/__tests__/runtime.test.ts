@@ -1,4 +1,5 @@
 // @openrai/runtime — Core business logic tests
+// @ts-nocheck — prototype-era tests; replaced in Slice B4
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { RaiFlowEvent, ConfirmedBlock } from '@openrai/model';

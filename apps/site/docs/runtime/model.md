@@ -1,180 +1,130 @@
-# Event Model
+# Model
 
-The canonical RaiFlow event model. Intentionally small and Nano-native.
+This page describes the canonical v2 model defined in `@openrai/model`.
 
-For the mainline payment-proof story, a confirmed matching send block is the first business-significant payment event. We avoid canonizing intermediate states unless proven necessary.
+Important distinction:
+
+- this is the contract the project is converging on
+- it is not a guarantee that every field and event family is already exercised through the current runtime API
+
+For current runtime behavior, read the runtime and roadmap pages alongside this one.
 
 ## Invoice
 
 ```typescript
-type InvoiceStatus =
-  | 'open'
-  | 'completed'
-  | 'expired'
-  | 'canceled';
-
 interface Invoice {
-  id: string;
-  status: InvoiceStatus;
-
-  currency: 'XNO';
-  expectedAmountRaw: string;
-  confirmedAmountRaw: string;
-
-  createdAt: string;
-  expiresAt?: string;
-  completedAt?: string;
-  expiredAt?: string;
-  canceledAt?: string;
-
-  metadata?: Record<string, unknown>;
+  id: string
+  status: 'open' | 'completed' | 'expired' | 'canceled'
+  payAddress: string
+  expectedAmountRaw: string
+  receivedAmountRaw: string
+  memo: string | null
+  metadata: Record<string, string> | null
+  idempotencyKey: string | null
+  expiresAt: string | null
+  completedAt: string | null
+  canceledAt: string | null
+  createdAt: string
+  updatedAt: string
+  completionPolicy: CompletionPolicy
 }
+
+type CompletionPolicy =
+  | { type: 'at_least' }
+  | { type: 'exact' }
 ```
-
-| Field | Meaning |
-|-------|---------|
-| `expectedAmountRaw` | Target amount in raw |
-| `confirmedAmountRaw` | Total of confirmed matching payments |
-| `metadata` | App context — always off-chain |
-
-### Statuses
-
-- **`open`** — active, can still be satisfied by incoming confirmed payments
-- **`completed`** — collection rule satisfied by confirmed payment(s)
-- **`expired`** — validity window ended before completion
-- **`canceled`** — intentionally closed before completion
-
-All terminal statuses (`completed`, `expired`, `canceled`) are irreversible.
 
 ## Payment
 
 ```typescript
-type PaymentStatus = 'confirmed';
-
 interface Payment {
-  id: string;
-  invoiceId: string;
-
-  status: PaymentStatus;
-
-  currency: 'XNO';
-  amountRaw: string;
-
-  recipientAccount: string;
-  senderAccount?: string;
-
-  sendBlockHash: string;
-  confirmedAt: string;
-
-  metadata?: Record<string, unknown>;
+  id: string
+  invoiceId: string
+  status: 'pending' | 'confirmed' | 'failed'
+  blockHash: string
+  senderAddress: string | null
+  amountRaw: string
+  confirmedAt: string | null
+  detectedAt: string
 }
 ```
 
-A payment represents a **confirmed matching payment fact** — not a provisional observation. The key identity comes from the confirmed send block.
-
-## Events
-
-Five canonical events:
+## Account
 
 ```typescript
-type RaiFlowEventType =
-  | 'invoice.created'
-  | 'payment.confirmed'
-  | 'invoice.completed'
-  | 'invoice.expired'
-  | 'invoice.canceled';
-```
-
-### Envelope
-
-Every event uses a typed envelope:
-
-```typescript
-interface EventEnvelope<TType extends RaiFlowEventType, TData> {
-  id: string;
-  type: TType;
-  createdAt: string;
-  data: TData;
+interface Account {
+  id: string
+  type: 'managed' | 'watched'
+  address: string
+  label: string | null
+  balanceRaw: string
+  pendingRaw: string
+  frontier: string | null
+  representative: string | null
+  derivationIndex: number | null
+  createdAt: string
+  updatedAt: string
 }
 ```
 
-### invoice.created
-
-A new payment expectation exists.
+## Send
 
 ```typescript
-type InvoiceCreatedEvent = EventEnvelope<
-  'invoice.created',
-  { invoice: Invoice }
->;
+interface Send {
+  id: string
+  accountId: string
+  destination: string
+  amountRaw: string
+  status: 'queued' | 'published' | 'confirmed' | 'failed'
+  blockHash: string | null
+  idempotencyKey: string
+  createdAt: string
+  publishedAt: string | null
+  confirmedAt: string | null
+}
 ```
 
-### payment.confirmed
-
-RaiFlow verified a confirmed Nano send block matching the expectation. **This is the key event.**
-
-It means:
-- value has been sent to the destination address
-- the send block is confirmed
-- the payment is a valid payment proof
-
-It does **not** mean the invoice is fully satisfied or that the payment arrived before expiry.
+## Event Envelope
 
 ```typescript
-type PaymentConfirmedEvent = EventEnvelope<
-  'payment.confirmed',
-  { payment: Payment; invoice: Invoice }
->;
+interface RaiFlowEvent {
+  id: string
+  type: string
+  timestamp: string
+  data: Record<string, unknown>
+  resourceId: string
+  resourceType: 'invoice' | 'payment' | 'account' | 'send' | 'block' | 'rpc'
+}
 ```
 
-Both payment and invoice are included — most app logic wants both.
+## Event Families
 
-### invoice.completed
+```text
+Invoice:        invoice.created
+                invoice.payment_received
+                invoice.payment_confirmed
+                invoice.completed
+                invoice.expired
+                invoice.canceled
+                invoice.swept
 
-The invoice's completion rule is satisfied by one or more confirmed payments.
+Account:        account.created
+                account.received
+                account.balance_updated
+                account.removed
 
-```typescript
-type InvoiceCompletedEvent = EventEnvelope<
-  'invoice.completed',
-  { invoice: Invoice }
->;
+Send:           send.queued
+                send.published
+                send.confirmed
+                send.failed
+
+Block:          block.published
+                block.confirmed
+                block.failed
+
+Infrastructure: rpc.connected
+                rpc.disconnected
+                rpc.failover
 ```
 
-### invoice.expired
-
-The invoice ceased being collectible before completion. An expired invoice may still have received partial payment — expiry is a business rule, not a chain fact.
-
-```typescript
-type InvoiceExpiredEvent = EventEnvelope<
-  'invoice.expired',
-  { invoice: Invoice }
->;
-```
-
-### invoice.canceled
-
-The invoice was intentionally closed. Business-driven, not chain-driven.
-
-```typescript
-type InvoiceCanceledEvent = EventEnvelope<
-  'invoice.canceled',
-  { invoice: Invoice }
->;
-```
-
-## Invariants
-
-1. **Terminal statuses are irreversible** — `completed`, `expired`, `canceled` never revert to `open`
-2. **Confirmed amount is monotonic** — `confirmedAmountRaw` never decreases
-3. **Completion requires confirmed payment** — not provisional observation
-4. **Confirmation is idempotent** — same send block never produces duplicate effects
-
-## What is intentionally not canonized
-
-These may be added later as advanced extensions, but are not part of the first model:
-
-- `payment.detected` / `payment.observed` / `payment.receivable`
-- `invoice.partially_paid` / `invoice.awaiting_confirmation`
-- `webhook.delivery_failed`
-
-See [RFC 0003](/rfcs/0003-event-model) for the full rationale.
+See [RFC 0003](../rfcs/0003-event-model) for the fuller design rationale and delivery semantics.

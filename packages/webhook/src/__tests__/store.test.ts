@@ -46,11 +46,11 @@ describe('createWebhookEndpointStore', () => {
     it('preserves url and eventTypes', async () => {
       const ep = await store.create({
         url: 'https://hooks.example.com/raiflow',
-        eventTypes: ['payment.confirmed', 'invoice.completed'],
+        eventTypes: ['invoice.payment_confirmed', 'invoice.completed'],
         secret: 'test-secret',
       });
       expect(ep.url).toBe('https://hooks.example.com/raiflow');
-      expect(ep.eventTypes).toEqual(['payment.confirmed', 'invoice.completed']);
+      expect(ep.eventTypes).toEqual(['invoice.payment_confirmed', 'invoice.completed']);
     });
 
     it('generates unique ids for each call', async () => {
@@ -81,7 +81,7 @@ describe('createWebhookEndpointStore', () => {
 
     it('returns all created endpoints', async () => {
       const ep1 = await store.create(noSecret('https://a.com', ['invoice.created']));
-      const ep2 = await store.create(noSecret('https://b.com', ['payment.confirmed']));
+      const ep2 = await store.create(noSecret('https://b.com', ['invoice.payment_confirmed']));
       const list = await store.list();
       expect(list).toHaveLength(2);
       expect(list).toContainEqual(ep1);
@@ -122,12 +122,12 @@ describe('createWebhookEndpointStore', () => {
   describe('getByEventType', () => {
     it('returns endpoints subscribed to the given event type', async () => {
       const ep1 = await store.create(
-        noSecret('https://a.com', ['invoice.created', 'payment.confirmed']),
+        noSecret('https://a.com', ['invoice.created', 'invoice.payment_confirmed']),
       );
-      const ep2 = await store.create(noSecret('https://b.com', ['payment.confirmed']));
+      const ep2 = await store.create(noSecret('https://b.com', ['invoice.payment_confirmed']));
       const ep3 = await store.create(noSecret('https://c.com', ['invoice.expired']));
 
-      const results = await store.getByEventType('payment.confirmed');
+      const results = await store.getByEventType('invoice.payment_confirmed');
       expect(results).toHaveLength(2);
       expect(results).toContainEqual(ep1);
       expect(results).toContainEqual(ep2);

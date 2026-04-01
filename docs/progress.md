@@ -1,154 +1,94 @@
-# RaiFlow Progress & Plan
+# RaiFlow Progress
 
-**Purpose:** Bootstrap document for new coding sessions. Contains stable architecture context, current phase status, and actionable next steps.
-**Last updated:** 2026-03-31 (Phase 1 completed)
-**Note:** This plan is not set in stone — it will evolve as the project progresses. Update this file as phases complete or priorities shift.
+**Purpose:** Bootstrap document for new coding sessions. Contains current architecture context, active milestone, and immediate next steps.
+**Last updated:** 2026-04-01 (v2 implementation started)
 
 ---
 
 ## Architecture at a Glance
 
+```
+YOUR APP ──► RAIFLOW RUNTIME ──► NANO NODE(S)
+                │
+                ├── INVOICE DOMAIN     (get paid)
+                │       └── create invoice → detect payment → complete/sweep
+                │
+                ├── WALLET DOMAIN      (operate a wallet)
+                │       └── managed accounts · watched accounts · send · publish
+                │
+                ├── UNIFIED EVENT SYSTEM
+                │       └── invoice.* + payment.* + account.* + send.* + block.*
+                │
+                ├── CUSTODY ENGINE     (seed · derivation · signing · PoW · rep)
+                │
+                └── RPC ABSTRACTION    (multi-node · failover · WS · confirmations)
+```
+
 ### Package Map
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  @openrai/model (canonical types, interfaces, contracts)         │
-│  Exports: Invoice, Payment, EventEnvelope, InvoiceStore,         │
-│           PaymentStore, WatcherSink, ConfirmedBlock,             │
-│           WebhookEndpoint, Logger                                │
-└──────────┬──────────────┬──────────────┬──────────────┬──────────┘
-           │              │              │              │
-     ┌─────▼─────┐  ┌────▼─────┐  ┌─────▼─────┐  ┌────▼──────┐
-     │  watcher   │  │ runtime  │  │  webhook   │  │raiflow-sdk│
-     │ (observe)  │  │ (match)  │  │ (deliver)  │  │ (client)  │
-     └────────────┘  └──────────┘  └────────────┘  └─────┬─────┘
-                                                         │
-                                              ┌──────────▼──────────┐
-                                              │  @openrai/nano-core │
-                                              │  (separate repo,    │
-                                              │   published to npm) │
-                                              └─────────────────────┘
+packages/
+  model/       — canonical types, schemas, shared contracts
+  config/      — YAML loader, env resolution, typed config
+  storage/     — store contracts, SQLite driver, migrations
+  rpc/         — multi-node RPC, WS, failover, confirmation tracking
+  events/      — event bus, persistence, querying
+  custody/     — seed, derivation, signing, PoW, frontier ops
+  runtime/     — HTTP API, services, orchestration
+  webhook/     — HMAC signing, delivery engine
+  raiflow-sdk/ — typed JS/TS client
 ```
 
-### Dual-SDK Strategy
+### nano-core Boundary
 
-- **`@openrai/nano-core`** — Protocol engine. NanoClient, NanoAddress, NanoAmount, WorkProvider, TransportFallback. Targets wallet devs, exchange engineers. Separate repo, published to npm.
-- **`@openrai/raiflow-sdk`** — Business runtime. RaiFlowClient wrapping the runtime REST API. Targets SaaS devs, AI agent builders. Lives in this monorepo. Depends on `@openrai/nano-core: ^1.0.0` and `@openrai/model: workspace:*`.
-
-**Symmetric DevEx principle:** Both SDKs share `NanoAmount`, `NanoAddress`, identical `.initialize()` patterns. Zero mental whiplash when graduating between SDKs.
-
-### Runtime HTTP API (9 endpoints)
-
-```
-GET    /health
-POST   /invoices              — create invoice (Idempotency-Key header)
-GET    /invoices              — list invoices (?status=)
-GET    /invoices/:id          — get invoice
-POST   /invoices/:id/cancel   — cancel invoice
-GET    /invoices/:id/payments — list payments for invoice
-GET    /invoices/:id/events   — list events for invoice (?after=<eventId>)
-POST   /webhooks              — register webhook endpoint
-GET    /webhooks              — list endpoints
-DELETE /webhooks/:id          — remove endpoint
-```
-
-### Event Vocabulary (frozen)
-
-```
-invoice.created    — new payment expectation
-payment.confirmed  — confirmed Nano send matched to invoice
-invoice.completed  — invoice fully paid
-invoice.expired    — validity window ended
-invoice.canceled   — intentionally closed
-```
-
-### Key Design Decisions
-
-- **Observe first** — keyless observation, no fund custody initially
-- **Confirmed payment first** — only confirmed send blocks become Payment records
-- **Idempotency everywhere** — InvoiceStore.create has idempotency key, PaymentStore.getByBlockHash dedup
-- **At-least-once webhook delivery** — HMAC-SHA256 signing, exponential backoff retry (5 attempts)
-- **Framework-agnostic HTTP** — web-standard Request/Response, runs on Node/Deno/Bun/Workers
-- **Completion policies** — `at_least` (default, `>=` check) and `exact` (`===` check). No `any` — use `at_least` with `expectedAmountRaw: "1"` for donation jars
-- **Event replay** — per-invoice via `?after=<eventId>` cursor on `GET /invoices/:id/events`. Global event log deferred
+`@openrai/nano-core` (separate repo, published to npm) provides Nano protocol primitives: `NanoAmount`, `NanoAddress`, `NanoClient`, `WorkProvider`. RaiFlow owns orchestration, storage, event routing, and application-level semantics.
 
 ---
 
-## Dependency Graph
+## Active Milestone
 
-```
-Phase 0 ──► Phase 1 (DONE ✓) ──► Phase 5 (Examples) [UNBLOCKED]
-                                  │
-                                  ├──► Phase 2 (RFCs)
-                                  │
-                                  └──► Phase 3 (Persistence) ──► Phase 4 (Observability)
-                                                                    │
-                                                                    └──► Phase 6 (Integration)
-```
+**M2 — RPC + Custody** — ✅ **Complete**
 
-**Critical path:** Phase 1 → Phase 5 (developer-facing, unblocks adoption)
-**Parallel track:** Phase 2 (RFCs) and Phase 3 (Persistence) can run alongside Phase 5
+- RPC pool with multi-node failover, JSON-RPC client, WebSocket client for confirmations
+- Custody engine with seed management, BIP32 derivation, block signing, PoW generation via nano-core
 
 ---
 
-## Phase Status
+**M3 — Wallet Domain** — *in progress*
 
-### Phase 1 — SDK HTTP Client [DONE ✓]
+Building in order:
+1. Accounts service (managed + watched)
+2. Sends service (idempotent, state machine)
+3. Publish service (pre-signed blocks)
+4. Work generation API
 
-- [x] Add `CompletionPolicy` type and `completionPolicy` field to Invoice in model
-- [x] Extend `EventStore.listByInvoice` with optional `after` parameter in model
-- [x] Update runtime completion check to branch on policy (`at_least` vs `exact`)
-- [x] Implement cursor filtering in in-memory EventStore
-- [x] Parse `completionPolicy` in POST /invoices, parse `after` in GET /invoices/:id/events
-- [x] Implement RaiFlowClient HTTP core (fetch-based, baseUrl + apiKey config)
-- [x] Implement InvoicesResource (create with completionPolicy, get, list, cancel, listPayments, listEvents with after)
-- [x] Add WebhooksResource (create, list, delete)
-- [x] Add webhook verification helper (re-export from @openrai/webhook)
-- [x] Update index.ts exports (client, resources, model re-exports, verification)
-- [x] Add tests for exact policy, cursor pagination, SDK HTTP client
+Exit criterion: can create a managed account, derive addresses, send XNO, query send status.
 
-### Phase 2 — RFC Advancement & Drafting [PENDING]
+---
 
-- [ ] Advance RFC 0001 to Accepted
-- [ ] Advance RFC 0002 to Accepted
-- [ ] Advance RFC 0003 to Accepted
-- [ ] Draft RFC 0004 — SDK Architecture (re-export mandate, REST client, auth, versioning)
-- [ ] Draft RFC 0005 — nano-core Integration (separate repo, npm publish, optional transport interface)
-- [ ] Draft RFC 0006 — Persistence Strategy (SQLite first, adapter contract, event log)
+## What Is Already True
 
-### Phase 3 — Persistence [PENDING]
+These decisions are settled and should not be re-litigated without strong new evidence:
 
-- [ ] Create store contract test suite
-- [ ] Implement SQLite adapter (better-sqlite3)
-- [ ] SQLite schema: `completion_policy` column on invoices, index on `(invoice_id, id)` for event cursor queries
-- [ ] SQLite webhook endpoint store
-- [ ] Add `createSqliteRuntime(dbPath)` factory
-- [ ] Run contract tests against SQLite
-- [ ] Add `RAIFLOW_DB_PATH` env var to main.ts
-
-### Phase 4 — Observability [PENDING]
-
-- [ ] Define Logger interface in model
-- [ ] Create console logger (structured JSON)
-- [ ] Replace console.log in webhook delivery (add correlation IDs)
-- [ ] Inject logger into Runtime
-- [ ] Inject logger into Watcher
-
-### Phase 5 — Examples [DONE ✓]
-
-- [x] Complete webhook-consumer example
-- [x] Complete Express API example
-- [x] Complete Next.js checkout demo
-
-### Phase 6 — Integration Testing & Deployment [PENDING]
-
-- [ ] Docker Compose for test environment
-- [ ] Integration tests against Nano test network
-- [ ] Deployment documentation
+1. **Dual-domain, one runtime** — Invoice and wallet domains coexist in the same instance, sharing storage, RPC, custody, and events.
+2. **Managed + watched + pre-signed** — Three custody modes coexist. Managed: RaiFlow holds keys. Watched: external. Pre-signed: air-gapped with RaiFlow publishing.
+3. **Idempotency mandatory on all mutating operations** — especially sends. No idempotency key = rejection.
+4. **Persist-first events** — events are written before delivery is attempted. Delivery failure does not lose the event.
+5. **Multi-node RPC failover** — single-node is not acceptable for production.
+6. **Derivation namespace separation** — invoice addresses and managed wallet accounts derive from non-overlapping index ranges from the same seed.
+7. **`nano-core` for protocol primitives** — RaiFlow does not reimplement Nano address encoding, amount math, or block construction from scratch.
+8. **SQLite default, PostgreSQL later** — single-file zero-dependency default, swap via adapter.
+9. **YAML config with `env:` references** — no hardcoded values, no surprising runtime env var injection.
+10. **Web standard Request/Response** — framework-agnostic HTTP handler. No Express/Hono/Fastify dependency in the core runtime.
 
 ---
 
 ## Open Questions
 
-- **Clock source:** System clock is non-monotonic. Acceptable for single-instance; NTP dependency for multi-instance.
-- **Watcher ↔ nano-core:** Watcher should NOT adopt nano-core's full client (observe mode doesn't need frontier management). Optional `NanoRpcTransport` interface for transport fallback only.
+| Question | Current position | Notes |
+|---|---|---|
+| WebSocket auth mechanism | Bearer token in `Authorization` header | May add subprotocol or ticket auth later |
+| Event total ordering guarantee | Best-effort per resource | Global total ordering deferred |
+| Auto-sweep timing | Immediate on completion | Future: configurable delay |
+| Overpayment on `exact` policy | Do not complete | Developer handles manually |
+| Multiple simultaneous sweeps | Not supported v1 | Queue-based, one at a time |

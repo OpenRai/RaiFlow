@@ -1,326 +1,248 @@
-# RFC 0003 — Event Model and Delivery Semantics
+# RFC 0003 — Event Model
 
-**Status:** Accepted
-**Created:** 2024  
-**Authors:** OpenRai contributors
+This RFC defines the canonical event model for RaiFlow: resource shapes, event taxonomy, delivery semantics, and idempotency invariants.
 
 ---
 
 ## Summary
 
-This RFC defines the canonical event model for RaiFlow: the event types, their payload shapes, resource definitions, and delivery semantics for webhooks.
-
-The model is intentionally small and Nano-native. For the mainline payment-proof story, a confirmed matching send block is the first event that should matter to application logic.
+Every state change in RaiFlow emits a persisted, ordered event. Events are the source of truth for webhooks, WebSocket subscriptions, and internal reactions. Delivery failure does not lose the event.
 
 ---
 
-## Motivation
+## Design Principles
 
-Applications integrating with RaiFlow need a reliable, predictable event contract. Without a frozen event model, every implementation detail becomes a coordination problem.
-
-This RFC fixes:
-- the invoice and payment resource shapes
-- the event type vocabulary
-- the typed event envelope and payload shapes
-- the delivery guarantees RaiFlow targets
-- the webhook signing and verification contract
+1. **Every state change emits an event.** No silent mutations.
+2. **Events are persisted before delivery is attempted.**
+3. **Events are ordered** per resource. Global ordering is best-effort.
+4. **Events are self-contained.** Each event embeds the full relevant resource state, not just an ID.
+5. **Consumers handle duplicates.** RaiFlow targets at-least-once delivery. Use the event `id` for deduplication.
 
 ---
 
-## Core doctrine
+## Event Envelope
 
-- **Invoices** are business expectations.
-- **Payments** are confirmed matching Nano transfers.
-- **Invoice completion** is a business rule derived from collected confirmed payments.
-
-We do not canonize intermediate stages (detected, observed, receivable, settled) in the first model. Those are better treated as derived summaries, UI hints, or optional SDK conveniences.
-
-For most developers, the meaningful progression is:
-
-1. invoice created
-2. payment confirmed
-3. invoice completed
-
----
-
-## Design
-
-### Invoice lifecycle
+Every event shares a common envelope:
 
 ```typescript
-type InvoiceStatus =
-  | 'open'
-  | 'completed'
-  | 'expired'
-  | 'canceled';
+interface RaiFlowEvent {
+  id: string           // UUIDv4
+  type: string         // Dot-namespaced event type
+  timestamp: string    // ISO 8601
+  data: Record<string, unknown> // Event-type-specific payload
+  resourceId: string  // ID of the primary resource
+  resourceType: string // 'invoice' | 'payment' | 'account' | 'send' | 'block'
+}
 ```
 
-- **`open`** — The invoice is active and can still be satisfied by incoming confirmed payments.
-- **`completed`** — The invoice's collection rule has been satisfied by confirmed payment(s).
-- **`expired`** — The invoice is no longer collectible under normal policy because its validity window ended before completion.
-- **`canceled`** — The invoice was intentionally closed before completion.
+---
 
-Statuses like `payment_detected`, `partially_paid`, or `awaiting_confirmation` are intentionally not first-class invoice statuses. They may exist as derived fields or SDK conveniences, but the invoice lifecycle itself remains: open → completed | expired | canceled.
+## Event Taxonomy
 
-### Payment model
+### Invoice Domain
 
-```typescript
-type PaymentStatus =
-  | 'confirmed';
-```
+| Event | Fires when |
+|---|---|
+| `invoice.created` | New invoice created |
+| `invoice.payment_received` | A matching block detected (pending) |
+| `invoice.payment_confirmed` | A matching block confirmed |
+| `invoice.completed` | Total confirmed ≥ expected amount |
+| `invoice.expired` | Expiry timer fired while still open |
+| `invoice.canceled` | Developer canceled the invoice |
+| `invoice.swept` | Collected funds swept to treasury |
 
-A payment record represents a **confirmed matching payment fact** — not every possible provisional observation.
+### Wallet Domain — Account
 
-- **`confirmed`** — RaiFlow has verified that a confirmed Nano send block matching the invoice expectation exists.
+| Event | Fires when |
+|---|---|
+| `account.created` | Managed or watched account added |
+| `account.received` | Inbound block detected on any account |
+| `account.balance_updated` | Confirmed balance changed |
+| `account.removed` | Account deleted or watch stopped |
 
-We may later introduce operational states (`observed`, `candidate`, `rejected`, `late`, `unmatched`) as advanced extensions, but they are not required for the mainline payment-proof story.
+### Wallet Domain — Send
 
-### Invoice shape
+| Event | Fires when |
+|---|---|
+| `send.queued` | Send operation accepted |
+| `send.published` | Block published to network |
+| `send.confirmed` | Block confirmed |
+| `send.failed` | Rejected, timeout, or fork |
+
+### Wallet Domain — Block
+
+| Event | Fires when |
+|---|---|
+| `block.published` | Pre-signed block published |
+| `block.confirmed` | Pre-signed block confirmed |
+| `block.failed` | Pre-signed block rejected |
+
+### Infrastructure
+
+| Event | Fires when |
+|---|---|
+| `rpc.connected` | WebSocket connection established |
+| `rpc.disconnected` | WebSocket connection lost |
+| `rpc.failover` | Switched to backup node |
+
+---
+
+## Resource Shapes
+
+### Invoice
 
 ```typescript
 interface Invoice {
-  id: string;
-  status: InvoiceStatus;
-
-  currency: 'XNO';
-  expectedAmountRaw: string;
-  confirmedAmountRaw: string;
-
-  createdAt: string;
-  expiresAt?: string;
-  completedAt?: string;
-  expiredAt?: string;
-  canceledAt?: string;
-
-  metadata?: Record<string, unknown>;
+  id: string
+  status: InvoiceStatus
+  payAddress: string          // Derived Nano address for this invoice
+  expectedAmountRaw: string   // Requested amount in raw
+  receivedAmountRaw: string   // Total confirmed received in raw
+  memo: string | null
+  metadata: Record<string, string> | null
+  idempotencyKey: string | null
+  expiresAt: string | null
+  completedAt: string | null
+  canceledAt: string | null
+  createdAt: string
+  updatedAt: string
+  completionPolicy: CompletionPolicy
 }
+
+type InvoiceStatus = 'open' | 'completed' | 'expired' | 'canceled'
+
+type CompletionPolicy =
+  | { type: 'at_least' }  // >= expectedAmountRaw (default)
+  | { type: 'exact' }    // === expectedAmountRaw
 ```
 
-- `expectedAmountRaw` = target amount
-- `confirmedAmountRaw` = total of confirmed matching payments
-- `metadata` = app context, always off-chain
-
-### Payment shape
+### Payment
 
 ```typescript
 interface Payment {
-  id: string;
-  invoiceId: string;
+  id: string
+  invoiceId: string
+  status: PaymentStatus
+  blockHash: string
+  senderAddress: string | null
+  amountRaw: string
+  confirmedAt: string | null
+  detectedAt: string
+}
 
-  status: PaymentStatus;
+type PaymentStatus = 'pending' | 'confirmed' | 'failed'
+```
 
-  currency: 'XNO';
-  amountRaw: string;
+### Account
 
-  recipientAccount: string;
-  senderAccount?: string;
+```typescript
+interface Account {
+  id: string
+  type: AccountType
+  address: string
+  label: string | null
+  balanceRaw: string
+  pendingRaw: string
+  frontier: string | null
+  representative: string | null
+  derivationIndex: number | null  // null for watched accounts
+  createdAt: string
+  updatedAt: string
+}
 
-  sendBlockHash: string;
-  confirmedAt: string;
+type AccountType = 'managed' | 'watched'
+```
 
-  metadata?: Record<string, unknown>;
+### Send
+
+```typescript
+interface Send {
+  id: string
+  accountId: string
+  destination: string
+  amountRaw: string
+  status: SendStatus
+  blockHash: string | null
+  idempotencyKey: string
+  createdAt: string
+  publishedAt: string | null
+  confirmedAt: string | null
+}
+
+type SendStatus = 'queued' | 'published' | 'confirmed' | 'failed'
+```
+
+### WebhookEndpoint
+
+```typescript
+interface WebhookEndpoint {
+  id: string
+  url: string
+  secret: string
+  eventTypes: string[]   // e.g. ['invoice.*'] or ['send.confirmed']
+  createdAt: string
 }
 ```
 
-The key payment identity comes from the confirmed send block. This resource answers the developer's real question: "What confirmed payment did RaiFlow match to my invoice?"
-
-### Event types
-
-```typescript
-type RaiFlowEventType =
-  | 'invoice.created'
-  | 'payment.confirmed'
-  | 'invoice.completed'
-  | 'invoice.expired'
-  | 'invoice.canceled';
-```
-
-### Event envelope
-
-Every event shares a typed envelope:
-
-```typescript
-interface EventEnvelope<TType extends RaiFlowEventType, TData> {
-  id: string;        // unique event ID (UUIDv4)
-  type: TType;       // event type string
-  createdAt: string;  // ISO 8601 timestamp
-  data: TData;       // typed event-specific payload
-}
-```
-
-### Event payloads
-
-#### `invoice.created`
-
-Emitted when a new payment expectation is created.
-
-```typescript
-type InvoiceCreatedEvent = EventEnvelope<
-  'invoice.created',
-  { invoice: Invoice }
->;
-```
-
-#### `payment.confirmed`
-
-Emitted when RaiFlow verifies a confirmed Nano send block matching the expectation. This is the key event for the mainline payment-proof story.
-
-It means:
-- value has been sent to the intended destination address
-- the send block is confirmed
-- the payment can be treated as a valid payment proof
-
-It does **not** necessarily mean:
-- the invoice is fully satisfied
-- the payment arrived before expiry policy
-
-```typescript
-type PaymentConfirmedEvent = EventEnvelope<
-  'payment.confirmed',
-  { payment: Payment; invoice: Invoice }
->;
-```
-
-Both payment and invoice are included because most app logic wants the confirmed payment fact alongside the current invoice state after applying it.
-
-#### `invoice.completed`
-
-Emitted when the invoice's completion rule has been satisfied by one or more confirmed payments.
-
-```typescript
-type InvoiceCompletedEvent = EventEnvelope<
-  'invoice.completed',
-  { invoice: Invoice }
->;
-```
-
-#### `invoice.expired`
-
-Emitted when the invoice ceased being collectible under policy before it was completed.
-
-An expired invoice may still have received some payment before or after expiry — expiry is about the invoice business rule, not about whether a payment block exists on-chain.
-
-```typescript
-type InvoiceExpiredEvent = EventEnvelope<
-  'invoice.expired',
-  { invoice: Invoice }
->;
-```
-
-#### `invoice.canceled`
-
-Emitted when the invoice was intentionally closed before completion. This is business-driven, not chain-driven.
-
-```typescript
-type InvoiceCanceledEvent = EventEnvelope<
-  'invoice.canceled',
-  { invoice: Invoice }
->;
-```
-
 ---
 
-## Invariants
+## Delivery Semantics
 
-These are more important than having lots of states.
+**At-least-once delivery.** Events may be delivered more than once. Consumers must handle duplicates idempotently using the event `id`.
 
-### 1. Completion is terminal
-If `invoice.status === 'completed'`, it should not later become `open`.
+### Retry Policy
 
-### 2. Expiry and cancellation are terminal
-If `expired` or `canceled`, it should not later become `open`.
+- Up to 5 delivery attempts per event per endpoint
+- Exponential backoff: 1s, 2s, 4s, 8s, 16s
+- Jitter: ±25% randomization to avoid thundering herd
+- Non-2xx responses trigger retry
+- Network failures trigger retry
+- `4xx` responses do not retry (client error)
 
-### 3. Confirmed amount is monotonic
-`confirmedAmountRaw` should never decrease in observe mode.
+### Webhook Signing
 
-### 4. Completion depends on confirmed payment, not provisional observation
-An invoice becomes `completed` only from confirmed payment facts.
-
-### 5. Payment confirmation is idempotent
-The same confirmed send block must not produce duplicate business effects.
-
----
-
-## What is intentionally not canonized yet
-
-We may eventually need more operational or diagnostic distinctions, but they remain non-canonical until proven necessary:
-
-- `payment.detected` / `payment.observed` / `payment.receivable` / `payment.settled`
-- `invoice.payment_detected` / `invoice.partially_paid` / `invoice.awaiting_confirmation`
-- `webhook.delivery_failed`
-
-Introducing them too early risks:
-1. making Nano feel more complex than it needs to
-2. encouraging developers to branch logic on distinctions they do not need
-3. confusing payment settlement with invoice completion
-4. recreating semantics borrowed from other systems instead of staying Nano-native
-
-If needed later, they should be framed as **advanced extensions**:
-
-```typescript
-type AdvancedPaymentEventType =
-  | 'payment.observed'
-  | 'payment.unmatched'
-  | 'payment.rejected';
-```
-
-With a clear note: these events are operational extensions, not required for the mainline Nano payment-proof story.
-
----
-
-## Delivery semantics
-
-RaiFlow targets **at-least-once delivery** for webhook events.
-
-This means:
-- events may be delivered more than once (due to retries)
-- consumers must handle duplicate delivery idempotently
-- each event has a stable `id` that can be used for deduplication
-
-**At-exactly-once delivery is not guaranteed.** Applications should use the event `id` as an idempotency key.
-
-### Retry policy
-
-The initial retry policy is:
-- up to 5 delivery attempts per event
-- exponential backoff between attempts (1s, 5s, 30s, 5min, 30min)
-- failed deliveries are logged for observability
-
-### Webhook signing
-
-Each webhook delivery is signed using HMAC-SHA256 with the endpoint secret.
-
-The signature is included in the `X-RaiFlow-Signature` HTTP header:
+Every delivery is signed with HMAC-SHA256.
 
 ```
 X-RaiFlow-Signature: sha256=<hex_digest>
+X-RaiFlow-Event: <event.type>
+X-RaiFlow-Event-Id: <event.id>
 ```
 
-The signed payload is the raw JSON body of the request.
+The signed payload is the raw JSON body.
 
-Consumers should verify the signature before processing any event.
+### Event Polling
 
----
+Events are persisted and queryable:
 
-## Alternatives considered
+```
+GET /v1/events?after=<cursor>&type=<filter>&limit=50
+```
 
-### Use exactly-once delivery guarantees
-Exactly-once delivery is difficult to guarantee across network boundaries without coordination at the consumer level. At-least-once with idempotency keys is the standard approach and is simpler to implement correctly.
-
-### Use a different signing scheme (e.g. ECDSA, JWT)
-HMAC-SHA256 is simple, widely understood, and battle-tested for webhook signing (used by Stripe, GitHub, etc). It is the right default.
-
-### Embed full objects vs. references in event payloads
-Events embed the full relevant objects (e.g. `Invoice`, `Payment`) rather than just IDs. This makes events self-contained and reduces the need for consumers to make additional API calls to process an event.
-
-### Canonize intermediate payment states
-Rejected for the first model. States like `detected`, `observed`, or `receivable` are internal or operational concerns. They risk bloating the public API with distinctions that Nano's mainline payment-proof flow does not require.
+Cursor-based pagination using event `id` as the cursor. This provides a catch-up mechanism for consumers that cannot maintain a WebSocket connection.
 
 ---
 
-## Open questions
+## Idempotency Invariants
 
-- Should events be persisted in a queryable event log, or only delivered via webhooks?
-- Should consumers be able to replay missed events?
-- What clock source should be used for `createdAt` timestamps?
-- What invoice completion policies should be supported (exact match, minimum, overpay-accepted)?
+These are non-negotiable:
+
+1. **Payment confirmation is idempotent.** The same confirmed send block hash must not produce duplicate `Payment` records or duplicate `payment.confirmed` events.
+2. **Send operations are idempotent by idempotency key.** Replaying a send with the same idempotency key returns the original result without re-executing.
+3. **Invoice creation is idempotent by idempotency key.** Replaying with the same key returns the existing invoice.
+4. **Completion is terminal.** Once `invoice.status === 'completed'`, it must not later become `open`.
+5. **Confirmed amount is monotonic.** `receivedAmountRaw` never decreases.
+6. **Confirmed balance is monotonic.** Account `balanceRaw` never decreases without a corresponding send record.
+
+---
+
+## What Is Intentionally Not Canonized Yet
+
+These may be added when proven necessary:
+
+- `payment.detected` / `payment.observed` — RaiFlow only records confirmed payments as first-class `Payment` records. Pending observations are internal.
+- `invoice.partially_paid` — derived from `receivedAmountRaw < expectedAmountRaw` on an open invoice, not a separate status.
+- `webhook.delivery_failed` — tracked in delivery log, not a separate emitted event type for v1.
+- Per-event delivery receipts in the event itself — delivery state lives in the webhook delivery log.
+
+Canonizing these prematurely risks making RaiFlow feel more complex than Nano requires.

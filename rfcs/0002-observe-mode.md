@@ -1,127 +1,243 @@
-# RFC 0002 — Observe Mode Architecture
+# RFC 0002 — Runtime Architecture
 
-**Status:** Accepted
-**Created:** 2024  
-**Authors:** OpenRai contributors
+Note on naming: the file path still says `0002-observe-mode.md` for continuity, but this RFC no longer describes the old observe-mode architecture. It describes the v2 runtime architecture.
 
----
-
-## Summary
-
-This RFC describes the architecture for RaiFlow's first operating mode: **observe mode**.
-
-In observe mode, RaiFlow watches one or more Nano accounts for incoming payments, matches them to known invoices, and emits normalized events — without holding or spending funds.
+This RFC describes the internal architecture of the RaiFlow runtime: package boundaries, how the two domains fit together, and the infrastructure shared between them.
 
 ---
 
-## Motivation
-
-Observe mode is the smallest useful version of a Nano payment runtime.
-
-A developer with a Nano address already has everything they need to receive payments. What they lack is a runtime that can:
-
-1. watch for incoming transfers to that address
-2. match transfers to known payment expectations
-3. confirm that the payment has settled
-4. produce a normalized proof object
-5. deliver a reliable event or webhook
-
-This is a tractable, well-bounded problem. Observe mode solves it without requiring RaiFlow to manage private keys, operate hot wallets, or handle payout logic.
-
----
-
-## Design
-
-### Components
+## System Diagram
 
 ```
-┌─────────────────────────────────────┐
-│              Runtime                │
-│                                     │
-│  InvoiceStore  ───►  Matcher        │
-│                          │          │
-│                          ▼          │
-│                    EventEmitter     │
-│                          │          │
-│                          ▼          │
-│                    WebhookDelivery  │
-└─────────────────────────────────────┘
-         ▲
-         │ PaymentObservation
-         │
-┌─────────────────────────────────────┐
-│             Watcher                 │
-│                                     │
-│  AccountWatcher ──► ConfirmationQ   │
-│       │                             │
-│  Nano node RPC                      │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    YOUR APPLICATION                          │
+│       (e-commerce, wallet, bot, agent, SaaS, POS)           │
+└──────────────────────────┬──────────────────────────────────┘
+                           │  raiflow-sdk
+                           │  REST + WebSocket
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     RAIFLOW DAEMON                          │
+│                                                             │
+│  ┌──────────────────┐  ┌────────────────────────────────┐ │
+│  │  INVOICE DOMAIN  │  │  WALLET DOMAIN                   │ │
+│  │  Create invoice  │  │  Create / manage accounts        │ │
+│  │  Match payments  │  │  Watch external accounts         │ │
+│  │  Track lifecycle │  │  Send XNO                        │ │
+│  │  Apply policies  │  │  Track balances                  │ │
+│  │  Sweep to treasury│ │  Publish pre-signed blocks       │ │
+│  └────────┬─────────┘  └──────────────┬───────────────────┘ │
+│           │                           │                     │
+│  ┌────────┴───────────────────────────┴───────────────────┐ │
+│  │              UNIFIED EVENT SYSTEM                        │ │
+│  └────────┬───────────────────────────┬───────────────────┘ │
+│           │                           │                     │
+│  ┌────────┴───────────────────────────┴───────────────────┐ │
+│  │              CUSTODY ENGINE                            │ │
+│  │  Seed storage · Key derivation · Signing · PoW · Rep  │ │
+│  └────────┬───────────────────────────────────────────────┘ │
+│           │                                                 │
+│  ┌────────┴───────────────────────────────────────────────┐ │
+│  │              RPC ABSTRACTION                             │ │
+│  │  Multi-node failover · WS reconnect · Retry · Timeout   │ │
+│  └────────┬───────────────┬───────────────────────────────┘ │
+└───────────┼───────────────┼─────────────────────────────────┘
+       ┌────┴────┐    ┌─────┴─────┐
+       │ Node A  │    │  Node B   │
+       └─────────┘    └───────────┘
 ```
 
-### Watcher (`@openrai/watcher`)
+---
 
-The watcher is responsible for:
+## Package Responsibilities
 
-- connecting to a Nano node (WebSocket or HTTP polling)
-- subscribing to account activity for configured addresses
-- detecting incoming receive blocks
-- tracking confirmation status
-- emitting `PaymentObservation` objects to the runtime
+### `@openrai/model`
 
-The watcher does not know about invoices, business logic, or webhooks.
+Canonical public types, schemas, and shared contracts only. No application logic.
 
-### Runtime (`@openrai/runtime`)
+- Resource types: `Invoice`, `Payment`, `Account`, `Send`, `RaiFlowEvent`, `WebhookEndpoint`
+- Request/response DTOs
+- Store interfaces
+- Event type enums and discriminated unions
+- Shared validation schemas
 
-The runtime is responsible for:
+### `@openrai/config`
 
-- storing invoices and their expected payment parameters
-- receiving `PaymentObservation` events from the watcher
-- matching observations to open invoices (by address, amount, and status)
-- producing `Payment` records for matched, confirmed payments
-- emitting normalized events via typed `EventEnvelope` objects
-- delivering events to registered `WebhookEndpoint` targets
+Loads and validates `raiflow.yaml`.
 
-### Matching logic
+- Parse YAML
+- Resolve `env:VARIABLE_NAME` references
+- Validate required fields and types
+- Produce typed `RaiFlowConfig`
 
-An observation matches an invoice when:
-- the receiving address matches the invoice address
-- the received amount meets or exceeds the expected amount
-- the invoice is in `open` status
-- the send block is confirmed
+### `@openrai/storage`
 
-On a match:
-- a `Payment` record is created
-- the invoice's `confirmedAmountRaw` is updated
-- a `payment.confirmed` event is emitted
-- if the invoice's completion rule is now satisfied, the invoice transitions to `completed` and an `invoice.completed` event is emitted
+Persistent data access layer.
 
-### Confirmation threshold
+- Store interfaces (invoice store, payment store, account store, send store, event store, webhook store)
+- SQLite driver (default)
+- Forward-only migration runner
+- Transaction helpers
 
-The initial observe mode uses the Nano node's native confirmation signaling (confirmation subscription via WebSocket) as the default confirmation signal.
+### `@openrai/rpc`
 
-A confirmed send block is the first event that matters to application logic. Additional confirmation threshold parameters may be supported for future use.
+Nano node communication.
 
-### Invoice expiry
+- Multi-node HTTP RPC with ordered priority failover
+- WebSocket connection manager with reconnect/backoff
+- Request timeout and retry
+- Confirmation subscription routing
+- Infrastructure events: `rpc.connected`, `rpc.disconnected`, `rpc.failover`
 
-If a configured `expiresAt` timestamp is reached on an open invoice that has not been completed, the runtime emits an `invoice.expired` event and transitions the invoice to `expired` status.
+### `@openrai/events`
+
+Unified event system.
+
+- Persist-first event append
+- In-process event bus (fire-and-forget local subscribers)
+- Cursor-based global event queries
+- Event filtering helpers
+
+### `@openrai/custody`
+
+Key and transaction management.
+
+- Seed loading and decryption
+- BIP-44 style key derivation
+- Namespace separation: invoice addresses `0x00000000–0x7FFFFFFF`, managed accounts `0x80000000–0xFFFFFFFF`
+- Block construction: send, receive, change representative
+- Block signing
+- PoW generation abstraction (delegates to `@openrai/nano-core` `WorkProvider`)
+- Representative management
+- Frontier tracking
+- Auto-receive pipeline
+
+### `@openrai/runtime`
+
+HTTP API and service orchestration.
+
+- API key authentication
+- Request ID and structured error middleware
+- Invoice service
+- Account service
+- Send service
+- Publish service
+- Webhook management service
+- Startup: wires config → storage → rpc → custody → events → services
+
+### `@openrai/webhook`
+
+Webhook delivery.
+
+- HMAC-SHA256 payload signing
+- Delivery engine with exponential backoff retry
+- Per-endpoint delivery attempt logging (persisted via storage)
+- Signature verification helper for consumers
+
+### `@openrai/raiflow-sdk`
+
+Typed JavaScript/TypeScript client.
+
+- REST resource classes for every API surface
+- WebSocket subscription client
+- Event polling helpers
+- Public model type re-exports
 
 ---
 
-## Alternatives considered
+## Runtime HTTP API
 
-### Poll-based watching instead of WebSocket subscription
-Polling is a valid fallback. The initial implementation will prefer WebSocket subscriptions where available, with a polling adapter as a fallback.
+Prefix: `/v1`
 
-### Watch all incoming blocks globally instead of per-account
-Rejected as the default. Per-account watching is simpler, more efficient, and sufficient for most use cases. Global block streaming can be considered later.
-
-### Combine watcher and runtime into one package
-Possible, but separation of concerns is cleaner. The watcher is infrastructure; the runtime is application logic. Keeping them separate allows each to be tested and replaced independently.
+```
+GET    /health
+GET    /v1/events           — global event log (?after=&type=&limit=)
+POST   /v1/webhooks
+GET    /v1/webhooks
+DELETE /v1/webhooks/:id
+POST   /v1/accounts
+GET    /v1/accounts
+GET    /v1/accounts/:id
+PATCH  /v1/accounts/:id
+DELETE /v1/accounts/:id
+POST   /v1/watch
+GET    /v1/watch
+DELETE /v1/watch/:account
+POST   /v1/work/generate
+POST   /v1/publish
+POST   /v1/accounts/:id/send
+POST   /v1/invoices
+GET    /v1/invoices
+GET    /v1/invoices/:id
+POST   /v1/invoices/:id/cancel
+GET    /v1/invoices/:id/payments
+```
 
 ---
 
-## Open questions
+## Custody Engine and nano-core
 
-- What Nano node RPC client library should the watcher use?
-- Should the watcher support multiple simultaneous node connections for redundancy?
-- What is the minimum viable persistence model for the invoice store?
+`@openrai/custody` uses `@openrai/nano-core` for:
+
+- Nano address encoding and validation
+- `NanoAmount` and amount arithmetic
+- `WorkProvider` for PoW generation
+- Low-level block construction helpers
+
+`@openrai/custody` owns:
+
+- Seed storage and decryption
+- Derivation index management
+- Account frontier tracking
+- Send/receive/change orchestration
+- Representative setting
+
+RaiFlow does not reimplement Nano protocol logic. It delegates to nano-core and orchestrates.
+
+---
+
+## Integration Modes
+
+Both modes coexist in the same RaiFlow instance simultaneously. Not startup configuration toggles — capabilities that live side by side.
+
+**Managed Custody** — RaiFlow holds the seed.
+
+```typescript
+const account = await raiflow.accounts.create({ label: 'treasury' })
+// account.type === 'managed'
+// RaiFlow owns the keys. Auto-receives. Can send on command.
+```
+
+**External Custody** — You hold the keys.
+
+```typescript
+const watched = await raiflow.watch.create({
+  account: 'nano_1external...',
+  label: 'cold-storage',
+})
+// watched.type === 'watched'
+// RaiFlow monitors, emits events, but cannot sign for this account.
+```
+
+**Pre-signed Publishing** — Air-gapped signing.
+
+```typescript
+const result = await raiflow.publish({
+  block: mySignedBlock,
+  watchConfirmation: true,
+})
+// RaiFlow handles RPC failover, retry, confirmation tracking, event emission.
+```
+
+---
+
+## Sweep Mechanics
+
+When an invoice completes with `autoSweep` enabled:
+
+1. RaiFlow auto-receives all pending blocks on the invoice's pay address
+2. RaiFlow constructs a send block from the pay address to the sweep destination
+3. The send is tracked through the same custody engine as wallet domain sends
+4. An `invoice.swept` event fires on success
+
+Invoice addresses are transient collection points. Funds consolidate into treasury exactly like a cash register being emptied into a safe.
