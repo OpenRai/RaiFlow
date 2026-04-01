@@ -9,6 +9,7 @@ export {
   WebhooksResource,
   type CreateWebhookOptions,
 } from './resources/Webhooks.js';
+export { SystemResource, type RuntimeHealth } from './resources/System.js';
 
 // Re-export canonical types from model
 export type {

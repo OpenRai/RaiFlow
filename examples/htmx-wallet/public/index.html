@@ -21,8 +21,8 @@
     <main class="app-container glass-panel">
         <header class="app-header">
             <div class="header-titles">
-                <h1>RaiFlow <span>Wallet Demo</span></h1>
-                <p>Event-driven runtime test</p>
+                <h1>RaiFlow <span>Runtime Console</span></h1>
+                <p>Operator dashboard for connectivity, clients, and domain events</p>
             </div>
             <div 
                 id="status-indicator" 
@@ -34,51 +34,44 @@
             </div>
         </header>
 
-        <section class="wallet-overview">
+        <section class="wallet-overview" hx-get="/api/summary" hx-trigger="load, every 5s" hx-swap="innerHTML">
             <div class="balance-card">
-                <h3>Open Invoice Total</h3>
-                <div 
-                    class="balance-amount" 
-                    hx-get="/api/balance" 
-                    hx-trigger="load, every 4s"
-                >
-                    <span class="skeleton-text">Loading...</span>
-                </div>
+                <h3>Loading summary</h3>
+                <div class="balance-amount"><span class="skeleton-text">Loading...</span></div>
             </div>
-
-            <div class="qr-card">
-                <h3>Configured Recipient Address</h3>
-                <div 
-                    id="address-container" 
-                    hx-get="/api/address" 
-                    hx-trigger="load" 
-                    hx-swap="innerHTML"
-                >
-                    <span class="skeleton-text">Loading...</span>
-                </div>
-                <div id="qrcode" class="qr-canvas"></div>
-            </div>
-        </section>
-
-        <section class="transactions-panel" style="margin-top: 1.5rem;">
-            <h3>Create Invoice</h3>
-            <form class="glass-panel" hx-post="/api/invoices" hx-target="#tx-table-body" hx-swap="innerHTML" style="padding: 1rem; display: grid; gap: 0.75rem;">
-                <input name="amount" type="text" placeholder="Amount in XNO, e.g. 0.5" class="address-pill" />
-                <input name="order_id" type="text" placeholder="Order ID (optional)" class="address-pill" />
-                <button class="btn" type="submit">Create Invoice</button>
-            </form>
         </section>
 
         <section class="transactions-panel">
-            <h3>Recent Invoices</h3>
+            <h3>Connectivity</h3>
             <div class="table-container">
                 <table class="tx-table">
                     <thead>
                         <tr>
-                            <th>Status</th>
-                            <th>Order / ID</th>
-                            <th>Amount</th>
-                            <th>Action</th>
+                            <th>Subsystem</th>
+                            <th>State</th>
+                            <th>Detail</th>
+                            <th>Observed</th>
+                        </tr>
+                    </thead>
+                    <tbody id="connectivity-body" hx-get="/api/connectivity" hx-trigger="load, every 5s" hx-swap="innerHTML">
+                        <tr>
+                            <td colspan="4" class="empty-state">Loading connectivity…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="transactions-panel">
+            <h3>Recent Domain Events</h3>
+            <div class="table-container">
+                <table class="tx-table">
+                    <thead>
+                        <tr>
+                            <th>Event</th>
+                            <th>Resource</th>
+                            <th>Clock Time</th>
+                            <th>Relative</th>
                         </tr>
                     </thead>
                     <tbody 
@@ -88,31 +81,38 @@
                         hx-swap="innerHTML"
                     >
                         <tr>
-                            <td colspan="4" class="empty-state">Loading transactions...</td>
+                            <td colspan="4" class="empty-state">Loading events...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="transactions-panel">
+            <h3>Attached Clients / Sinks</h3>
+            <div class="table-container">
+                <table class="tx-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Endpoint</th>
+                            <th>Subscriptions</th>
+                            <th>Registered</th>
+                        </tr>
+                    </thead>
+                    <tbody 
+                        id="clients-body" 
+                        hx-get="/api/clients" 
+                        hx-trigger="load, every 5s" 
+                        hx-swap="innerHTML"
+                    >
+                        <tr>
+                            <td colspan="4" class="empty-state">Loading clients...</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
         </section>
     </main>
-
-    <script>
-        document.body.addEventListener('htmx:afterSwap', function(event) {
-            if (event.detail.target.id === 'address-container') {
-                const uri = document.getElementById('nano-uri')?.value;
-                if (uri) {
-                    document.getElementById('qrcode').innerHTML = "";
-                    new QRCode(document.getElementById("qrcode"), {
-                        text: uri,
-                        width: 128,
-                        height: 128,
-                        colorDark : "#ffffff",
-                        colorLight : "transparent",
-                        correctLevel : QRCode.CorrectLevel.M
-                    });
-                }
-            }
-        });
-    </script>
 </body>
 </html>

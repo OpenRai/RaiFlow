@@ -1,4 +1,5 @@
 import { InvoicesResource } from './resources/Invoices.js';
+import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
 
 export interface RaiFlowClientOptions {
@@ -10,6 +11,7 @@ export interface RaiFlowClientOptions {
 
 export class RaiFlowClient {
   public invoices: InvoicesResource;
+  public system: SystemResource;
   public webhooks: WebhooksResource;
 
   private readonly baseUrl: string;
@@ -19,6 +21,7 @@ export class RaiFlowClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
     this.invoices = new InvoicesResource(this);
+    this.system = new SystemResource(this);
     this.webhooks = new WebhooksResource(this);
   }
 
