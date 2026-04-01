@@ -105,6 +105,7 @@ Key and transaction management.
 - Seed loading and decryption
 - BIP-44 style key derivation
 - Namespace separation: invoice addresses `0x00000000–0x7FFFFFFF`, managed accounts `0x80000000–0xFFFFFFFF`
+- Deterministic derivation invariant: the same derivation input must always resolve to the same address; if an application-level string is used to choose an invoice address, that mapping must be deterministic or explicitly persisted
 - Block construction: send, receive, change representative
 - Block signing
 - PoW generation abstraction (delegates to `@openrai/nano-core` `WorkProvider`)

@@ -19,6 +19,9 @@ import { RaiFlowClient } from '@openrai/raiflow-sdk';
 
 const PORT = parseInt(process.env.PORT ?? '3002', 10);
 const RAIFLOW_URL = process.env.RAIFLOW_URL ?? 'http://localhost:3100';
+const DEFAULT_RECIPIENT_ACCOUNT =
+  process.env.RAIFLOW_RECIPIENT_ACCOUNT ??
+  'nano_3strnmn7h9b7oghxa6h9ckrpf5r454fsobpicixps6xwiwc5q4hat7wjbpqz';
 
 // =============================================================================
 // SDK client
@@ -117,7 +120,7 @@ app.use(express.static(join(dirname(fileURLToPath(import.meta.url)), 'public')))
 
 // POST /invoices — create invoice and redirect to status page
 app.post('/invoices', async (req, res) => {
-  const { amount, policy, order_id } = req.body;
+  const { amount, policy, order_id, recipient_account } = req.body;
 
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
     res.status(400).send('Invalid amount');
@@ -130,9 +133,11 @@ app.post('/invoices', async (req, res) => {
     : { type: 'at_least' };
 
   const metadata = order_id ? { orderId: order_id } : undefined;
+  const recipientAccount = String(recipient_account || DEFAULT_RECIPIENT_ACCOUNT).trim();
 
   try {
     const invoice = await raiflow.invoices.create({
+      recipientAccount,
       expectedAmountRaw: raw,
       completionPolicy,
       metadata,

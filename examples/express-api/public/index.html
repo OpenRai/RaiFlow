@@ -76,6 +76,14 @@
 
   <div class="card">
     <form method="POST" action="/invoices">
+      <label for="recipient_account">Recipient Account</label>
+      <input
+        type="text"
+        id="recipient_account"
+        name="recipient_account"
+        placeholder="nano_..."
+      >
+
       <label for="amount">Amount (XNO)</label>
       <input
         type="text"
@@ -86,6 +94,7 @@
         pattern="[0-9]+(\.[0-9]+)?"
       >
       <p class="hint">Human-readable amount, e.g. "1.5" or "0.001"</p>
+      <p class="hint">Leave recipient account empty to use the server default.</p>
 
       <label for="policy">Completion Policy</label>
       <select id="policy" name="policy">

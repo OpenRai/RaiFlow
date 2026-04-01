@@ -76,10 +76,11 @@ These decisions are settled and should not be re-litigated without strong new ev
 4. **Persist-first events** — events are written before delivery is attempted. Delivery failure does not lose the event.
 5. **Multi-node RPC failover** — single-node is not acceptable for production.
 6. **Derivation namespace separation** — invoice addresses and managed wallet accounts derive from non-overlapping index ranges from the same seed.
-7. **`nano-core` for protocol primitives** — RaiFlow does not reimplement Nano address encoding, amount math, or block construction from scratch.
-8. **SQLite default, PostgreSQL later** — single-file zero-dependency default, swap via adapter.
-9. **YAML config with `env:` references** — no hardcoded values, no surprising runtime env var injection.
-10. **Web standard Request/Response** — framework-agnostic HTTP handler. No Express/Hono/Fastify dependency in the core runtime.
+7. **Deterministic address mapping** — if any string or external identifier participates in address selection, the same input must resolve to the same address across restarts unless a persisted mapping says otherwise.
+8. **`nano-core` for protocol primitives** — RaiFlow does not reimplement Nano address encoding, amount math, or block construction from scratch.
+9. **SQLite default, PostgreSQL later** — single-file zero-dependency default, swap via adapter.
+10. **YAML config with `env:` references** — no hardcoded values, no surprising runtime env var injection.
+11. **Web standard Request/Response** — framework-agnostic HTTP handler. No Express/Hono/Fastify dependency in the core runtime.
 
 ---
 

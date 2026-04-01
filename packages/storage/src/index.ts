@@ -64,7 +64,7 @@ export function createMigrationRunner(db: Database): MigrationRunner {
           CREATE TABLE IF NOT EXISTS invoices (
             id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
-            pay_address TEXT NOT NULL UNIQUE,
+            pay_address TEXT NOT NULL,
             expected_amount_raw TEXT NOT NULL,
             received_amount_raw TEXT NOT NULL DEFAULT '0',
             memo TEXT,
@@ -186,6 +186,50 @@ export function createMigrationRunner(db: Database): MigrationRunner {
           CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
           CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries(event_id);
           CREATE INDEX IF NOT EXISTS idx_pending_receivables_account ON pending_receivables(account_id, received_at);
+        `);
+      },
+    },
+    {
+      id: 2,
+      name: '002_allow_duplicate_invoice_pay_addresses',
+      up: (db) => {
+        db.exec(`
+          DROP INDEX IF EXISTS idx_invoices_pay_address;
+
+          CREATE TABLE invoices_new (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            pay_address TEXT NOT NULL,
+            expected_amount_raw TEXT NOT NULL,
+            received_amount_raw TEXT NOT NULL DEFAULT '0',
+            memo TEXT,
+            metadata TEXT,
+            idempotency_key TEXT UNIQUE,
+            expires_at TEXT,
+            completed_at TEXT,
+            canceled_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completion_policy TEXT NOT NULL DEFAULT '{"type":"at_least"}'
+          );
+
+          INSERT INTO invoices_new (
+            id, status, pay_address, expected_amount_raw, received_amount_raw,
+            memo, metadata, idempotency_key, expires_at, completed_at, canceled_at,
+            created_at, updated_at, completion_policy
+          )
+          SELECT
+            id, status, pay_address, expected_amount_raw, received_amount_raw,
+            memo, metadata, idempotency_key, expires_at, completed_at, canceled_at,
+            created_at, updated_at, completion_policy
+          FROM invoices;
+
+          DROP TABLE invoices;
+          ALTER TABLE invoices_new RENAME TO invoices;
+
+          CREATE INDEX IF NOT EXISTS idx_invoices_pay_address ON invoices(pay_address);
+          CREATE INDEX IF NOT EXISTS idx_invoices_idempotency ON invoices(idempotency_key);
+          CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
         `);
       },
     },

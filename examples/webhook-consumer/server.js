@@ -215,7 +215,12 @@ async function main() {
   console.log('');
 
   try {
-    const endpoint = await raiflow.webhooks.create({
+    const { data: existingEndpoints } = await raiflow.webhooks.list();
+    const existing = existingEndpoints.find((endpoint) =>
+      endpoint.url === webhookUrl && endpoint.secret === WEBHOOK_SECRET,
+    );
+
+    const endpoint = existing ?? await raiflow.webhooks.create({
       url: webhookUrl,
       eventTypes: [
         'invoice.created',

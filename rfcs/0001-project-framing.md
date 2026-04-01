@@ -51,6 +51,8 @@ RaiFlow operates two co-equal domains simultaneously in the same instance:
 
 Create payment expectations, derive addresses, detect and match incoming confirmed payments, manage lifecycle (complete/expire/cancel), optionally sweep collected funds to treasury.
 
+If invoice address selection depends on any external identifier or application string, the mapping must be deterministic and stable across restarts. Random address selection without persisted mapping is not acceptable.
+
 **Wallet Domain** — "Operate a wallet"
 
 Manage derived accounts from a seed, watch external accounts without holding keys, send XNO, publish pre-signed blocks, generate work on demand, track balances and frontiers, auto-receive pending blocks.

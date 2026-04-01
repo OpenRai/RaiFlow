@@ -1,6 +1,8 @@
 // Landing page — create an invoice
 
 export default function Home() {
+  const defaultRecipientAccount = process.env.NEXT_PUBLIC_RAIFLOW_RECIPIENT_ACCOUNT ?? 'nano_3strnmn7h9b7oghxa6h9ckrpf5r454fsobpicixps6xwiwc5q4hat7wjbpqz';
+
   return (
     <div style={{
       fontFamily: 'system-ui, sans-serif',
@@ -22,6 +24,26 @@ export default function Home() {
         padding: '2rem',
       }}>
         <form action="/api/create-invoice" method="POST">
+          <label style={{ display: 'block', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#888', marginBottom: '0.5rem' }}>
+            Recipient Account
+          </label>
+          <input
+            type="text"
+            name="recipientAccount"
+            defaultValue={defaultRecipientAccount}
+            style={{
+              width: '100%',
+              padding: '0.75rem',
+              fontSize: '1rem',
+              background: '#111',
+              border: '1px solid #333',
+              borderRadius: '6px',
+              color: '#e0e0e0',
+              marginBottom: '1rem',
+              boxSizing: 'border-box',
+            }}
+          />
+
           <label style={{ display: 'block', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#888', marginBottom: '0.5rem' }}>
             Amount (XNO)
           </label>

@@ -84,6 +84,8 @@ seed
 
 This prevents collisions and makes address purpose distinguishable from the derivation index alone.
 
+Address assignment must also be deterministic. If RaiFlow derives or selects an address based on any application string, external identifier, or idempotency key, the same input must resolve to the same address across restarts unless an explicit persisted remapping exists.
+
 ---
 
 ## Store Interfaces
