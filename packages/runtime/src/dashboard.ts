@@ -49,6 +49,10 @@ function requestTagClass(status: number): string {
   return 'tag-good';
 }
 
+function booleanPill(value: boolean): string {
+  return `<span class="bool-pill ${value ? 'bool-true' : 'bool-false'}"><span class="bool-led"></span>${value ? 'enabled' : 'disabled'}</span>`;
+}
+
 function latencyBars(metrics: RuntimeMetricsSnapshot | undefined): string {
   const requests = metrics?.recentRequests ?? [];
   if (requests.length === 0) return '<div class="empty">No recent request data yet</div>';
@@ -69,28 +73,28 @@ function configRows(config: RaiFlowConfig | undefined): string {
     return '<tr><td colspan="2" class="empty">No config available</td></tr>';
   }
 
-  const rows: Array<[string, string]> = [
-    ['daemon.host', config.daemon.host],
-    ['daemon.port', String(config.daemon.port)],
-    ['daemon.apiKeyConfigured', config.daemon.apiKey ? 'yes' : 'no'],
-    ['storage.driver', config.storage.driver],
-    ['storage.path', config.storage.path],
-    ['logging.level', config.logging.level],
-    ['logging.format', config.logging.format],
-    ['nano.nodes.count', String(config.nano.nodes.length)],
-    ['nano.nodes.rpc', config.nano.nodes.map((node) => node.rpc).join(', ') || 'none'],
-    ['nano.nodes.ws', config.nano.nodes.map((node) => node.ws).join(', ') || 'none'],
-    ['custody.configured', config.custody ? 'yes' : 'no'],
-    ['invoices.defaultExpirySeconds', String(config.invoices.defaultExpirySeconds)],
-    ['invoices.autoSweep', config.invoices.autoSweep ? 'yes' : 'no'],
-    ['invoices.sweepDestinationConfigured', config.invoices.sweepDestination ? 'yes' : 'no'],
-    ['webhooks.configured.count', String(config.webhooks.length)],
+  const rows: Array<{ key: string; value: string }> = [
+    { key: 'daemon.host', value: escapeHtml(config.daemon.host) },
+    { key: 'daemon.port', value: escapeHtml(String(config.daemon.port)) },
+    { key: 'daemon.apiKeyConfigured', value: booleanPill(Boolean(config.daemon.apiKey)) },
+    { key: 'storage.driver', value: escapeHtml(config.storage.driver) },
+    { key: 'storage.path', value: escapeHtml(config.storage.path) },
+    { key: 'logging.level', value: escapeHtml(config.logging.level) },
+    { key: 'logging.format', value: escapeHtml(config.logging.format) },
+    { key: 'nano.nodes.count', value: escapeHtml(String(config.nano.nodes.length)) },
+    { key: 'nano.nodes.rpc', value: escapeHtml(config.nano.nodes.map((node) => node.rpc).join(', ') || 'none') },
+    { key: 'nano.nodes.ws', value: escapeHtml(config.nano.nodes.map((node) => node.ws).join(', ') || 'none') },
+    { key: 'custody.configured', value: booleanPill(Boolean(config.custody)) },
+    { key: 'invoices.defaultExpirySeconds', value: escapeHtml(String(config.invoices.defaultExpirySeconds)) },
+    { key: 'invoices.autoSweep', value: booleanPill(config.invoices.autoSweep) },
+    { key: 'invoices.sweepDestinationConfigured', value: booleanPill(Boolean(config.invoices.sweepDestination)) },
+    { key: 'webhooks.configured.count', value: escapeHtml(String(config.webhooks.length)) },
   ];
 
-  return rows.map(([key, value]) => `
+  return rows.map((row) => `
     <tr>
-      <td><span class="mono">${escapeHtml(key)}</span></td>
-      <td>${escapeHtml(value)}</td>
+      <td><span class="mono">${escapeHtml(row.key)}</span></td>
+      <td>${row.value}</td>
     </tr>
   `).join('');
 }
@@ -133,7 +137,14 @@ export async function renderDashboard(
     metrics?: RuntimeMetricsSnapshot;
   },
 ): Promise<string> {
-  const view = options?.view === 'config' ? 'config' : 'overview';
+  const view = options?.view === 'config'
+    ? 'config'
+    : options?.view === 'process'
+      ? 'process'
+      : options?.view === 'requests'
+        ? 'requests'
+        : 'overview';
+
   const invoices = await runtime.listInvoices();
   const webhooks = await runtime.webhookEndpointStore.list();
   const metrics = options?.metrics;
@@ -165,6 +176,7 @@ export async function renderDashboard(
   const open = invoices.filter((invoice) => invoice.status === 'open').length;
   const completed = invoices.filter((invoice) => invoice.status === 'completed').length;
   const terminal = invoices.filter((invoice) => invoice.status === 'expired' || invoice.status === 'canceled').length;
+  const anomalyCount = (metrics?.status5xx ?? 0) + (metrics?.status4xx ?? 0) + terminal;
 
   const invoiceRows = recentInvoices.length === 0
     ? '<tr><td colspan="5" class="empty">No invoices yet</td></tr>'
@@ -217,12 +229,236 @@ export async function renderDashboard(
       </tr>
     `).join('');
 
+  const overviewSignals = `
+    <section class="overview-strip">
+      <article class="panel compact-panel">
+        <h2 class="section-title">Health / Connectivity</h2>
+        <div class="signal-grid">
+          <div><span class="signal-label">runtime</span><span class="tag tag-good">online</span></div>
+          <div><span class="signal-label">last request</span><span>${metrics?.lastRequestAt ? escapeHtml(relativeTime(metrics.lastRequestAt)) : 'never'}</span></div>
+          <div><span class="signal-label">uptime</span><span>${metrics ? escapeHtml(relativeTime(metrics.startedAt)) : 'n/a'}</span></div>
+          <div><span class="signal-label">api responses</span><span>${metrics ? `${metrics.status2xx} ok / ${metrics.status4xx + metrics.status5xx} warn` : 'n/a'}</span></div>
+        </div>
+      </article>
+      <article class="panel compact-panel">
+        <h2 class="section-title">Financial / Domain Flow</h2>
+        <div class="signal-grid">
+          <div><span class="signal-label">open invoices</span><span>${open}</span></div>
+          <div><span class="signal-label">completed</span><span>${completed}</span></div>
+          <div><span class="signal-label">recent events</span><span>${recentEvents.length}</span></div>
+          <div><span class="signal-label">last event</span><span>${recentEvents[0] ? escapeHtml(relativeTime(recentEvents[0].createdAt)) : 'none yet'}</span></div>
+        </div>
+      </article>
+      <article class="panel compact-panel">
+        <h2 class="section-title">Sink / Client Activity</h2>
+        <div class="signal-grid">
+          <div><span class="signal-label">attached sinks</span><span>${webhooks.length}</span></div>
+          <div><span class="signal-label">configured in file</span><span>${options?.config ? options.config.webhooks.length : 0}</span></div>
+          <div><span class="signal-label">latest sink</span><span>${webhooks[0] ? escapeHtml(relativeTime(webhooks[0].createdAt)) : 'none'}</span></div>
+          <div><span class="signal-label">invoice polling</span><span>${recentInvoices.length} visible</span></div>
+        </div>
+      </article>
+      <article class="panel compact-panel">
+        <h2 class="section-title">Anomalies / Warnings</h2>
+        <div class="signal-grid">
+          <div><span class="signal-label">4xx responses</span><span>${metrics ? metrics.status4xx : 0}</span></div>
+          <div><span class="signal-label">5xx responses</span><span>${metrics ? metrics.status5xx : 0}</span></div>
+          <div><span class="signal-label">terminal invoices</span><span>${terminal}</span></div>
+          <div><span class="signal-label">total warning signals</span><span class="${anomalyCount > 0 ? 'warning-text' : ''}">${anomalyCount}</span></div>
+        </div>
+      </article>
+    </section>
+  `;
+
   const nav = `
     <nav class="tabs">
       <a class="tab ${view === 'overview' ? 'tab-active' : ''}" href="/">Overview</a>
       <a class="tab ${view === 'config' ? 'tab-active' : ''}" href="/?view=config">Config</a>
+      <a class="tab ${view === 'process' ? 'tab-active' : ''}" href="/?view=process">Process</a>
+      <a class="tab ${view === 'requests' ? 'tab-active' : ''}" href="/?view=requests">Requests</a>
     </nav>
   `;
+
+  const mainContent = view === 'overview'
+    ? `
+    <section class="grid">
+      <article class="panel stat">
+        <h2>Uptime</h2>
+        <div class="value">${metrics ? escapeHtml(relativeTime(metrics.startedAt)) : 'n/a'}</div>
+        <div class="subvalue">pid ${metrics ? metrics.pid : 'n/a'}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>Recent Events</h2>
+        <div class="value">${recentEvents.length}</div>
+        <div class="subvalue">last activity ${recentEvents[0] ? escapeHtml(relativeTime(recentEvents[0].createdAt)) : 'none yet'}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>Open Invoices</h2>
+        <div class="value">${open}</div>
+        <div class="subvalue">${completed} completed · ${terminal} terminal</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>Attached Sinks</h2>
+        <div class="value">${webhooks.length}</div>
+        <div class="subvalue">last request ${metrics?.lastRequestAt ? escapeHtml(relativeTime(metrics.lastRequestAt)) : 'never'}</div>
+        <div class="spark"></div>
+      </article>
+    </section>
+
+    ${overviewSignals}
+
+    <section class="two-col">
+      <article class="panel">
+        <h2 class="section-title">Recent Domain Events</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Resource</th>
+              <th>Clock Time</th>
+              <th>Relative</th>
+            </tr>
+          </thead>
+          <tbody>${eventRows}</tbody>
+        </table>
+      </article>
+
+      <article class="panel">
+        <h2 class="section-title">Recent Invoices</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Order</th>
+              <th>Recipient</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody>${invoiceRows}</tbody>
+        </table>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title">Attached Clients / Webhook Sinks</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Endpoint</th>
+            <th>Subscriptions</th>
+            <th>Registered</th>
+          </tr>
+        </thead>
+        <tbody>${webhookRows}</tbody>
+      </table>
+    </section>
+    `
+    : view === 'config'
+      ? `
+    <section class="panel">
+      <h2 class="section-title">Effective Non-Secret Configuration</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>${configRows(options?.config)}</tbody>
+      </table>
+      <div class="footer" style="margin-top: 16px; text-align: left;">
+        Secrets are not shown here. This view only exposes effective non-secret values and presence flags.
+      </div>
+    </section>
+    `
+      : view === 'process'
+        ? `
+    <section class="grid">
+      <article class="panel stat">
+        <h2>Uptime</h2>
+        <div class="value">${metrics ? escapeHtml(relativeTime(metrics.startedAt)) : 'n/a'}</div>
+        <div class="subvalue">pid ${metrics ? metrics.pid : 'n/a'}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>Memory RSS</h2>
+        <div class="value">${metrics ? escapeHtml(formatBytes(metrics.memoryRssBytes)) : 'n/a'}</div>
+        <div class="subvalue">heap used ${metrics ? escapeHtml(formatBytes(metrics.memoryHeapUsedBytes)) : 'n/a'}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>Total Requests</h2>
+        <div class="value">${metrics ? metrics.requestCount : 0}</div>
+        <div class="subvalue">avg latency ${metrics ? escapeHtml(formatDuration(metrics.avgRequestMs)) : 'n/a'}</div>
+        ${latencyBars(metrics)}
+      </article>
+      <article class="panel stat">
+        <h2>Last Request</h2>
+        <div class="value">${metrics?.lastRequestAt ? escapeHtml(relativeTime(metrics.lastRequestAt)) : 'never'}</div>
+        <div class="subvalue">db ${metrics ? escapeHtml(metrics.dbPath) : 'n/a'}</div>
+        <div class="spark"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title">Process Metrics</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>${systemRows(metrics)}</tbody>
+      </table>
+    </section>
+    `
+        : `
+    <section class="grid">
+      <article class="panel stat">
+        <h2>Total Requests</h2>
+        <div class="value">${metrics ? metrics.requestCount : 0}</div>
+        <div class="subvalue">avg latency ${metrics ? escapeHtml(formatDuration(metrics.avgRequestMs)) : 'n/a'}</div>
+        ${latencyBars(metrics)}
+      </article>
+      <article class="panel stat">
+        <h2>2xx Responses</h2>
+        <div class="value">${metrics ? metrics.status2xx : 0}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>4xx Responses</h2>
+        <div class="value">${metrics ? metrics.status4xx : 0}</div>
+        <div class="spark"></div>
+      </article>
+      <article class="panel stat">
+        <h2>5xx Responses</h2>
+        <div class="value">${metrics ? metrics.status5xx : 0}</div>
+        <div class="spark"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title">Recent HTTP Requests</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Method</th>
+            <th>Path</th>
+            <th>Status</th>
+            <th>Latency</th>
+            <th>Age</th>
+          </tr>
+        </thead>
+        <tbody>${requestRows}</tbody>
+      </table>
+    </section>
+    `;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -316,14 +552,15 @@ export async function renderDashboard(
       color: var(--muted);
     }
     .value {
-      font-size: 2.3rem;
+      font-size: 2rem;
       font-weight: 700;
       letter-spacing: -0.05em;
+      line-height: 1;
     }
     .subvalue {
-      margin-top: 8px;
+      margin-top: 6px;
       color: var(--muted);
-      font-size: 0.9rem;
+      font-size: 0.84rem;
     }
     .spark {
       margin-top: 12px;
@@ -348,6 +585,33 @@ export async function renderDashboard(
       display: grid;
       gap: 20px;
       grid-template-columns: 1.1fr 1fr;
+    }
+    .overview-strip {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .compact-panel {
+      padding: 16px 18px;
+    }
+    .signal-grid {
+      display: grid;
+      gap: 10px;
+    }
+    .signal-grid > div {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.9rem;
+      align-items: center;
+    }
+    .signal-label {
+      color: var(--muted);
+      text-transform: lowercase;
+    }
+    .warning-text {
+      color: #f5d76e;
+      font-weight: 700;
     }
     .section-title {
       margin: 0 0 14px;
@@ -390,6 +654,42 @@ export async function renderDashboard(
     .tag-good { background: rgba(46,204,113,0.15); color: #6ee7a0; }
     .tag-warn { background: rgba(241,196,15,0.15); color: #f5d76e; }
     .tag-bad { background: rgba(231,76,60,0.12); color: #ff9a8e; }
+    .bool-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .bool-led {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+    .bool-true {
+      background: rgba(46,204,113,0.14);
+      color: #79efae;
+      border: 1px solid rgba(46,204,113,0.28);
+    }
+    .bool-true .bool-led {
+      background: #2ecc71;
+      box-shadow: 0 0 10px rgba(46,204,113,0.7);
+    }
+    .bool-false {
+      background: rgba(231,76,60,0.12);
+      color: #ff9a8e;
+      border: 1px solid rgba(231,76,60,0.26);
+    }
+    .bool-false .bool-led {
+      background: #e74c3c;
+      box-shadow: 0 0 10px rgba(231,76,60,0.55);
+    }
     .muted, .empty { color: var(--muted); }
     .footer {
       color: var(--muted);
@@ -398,10 +698,12 @@ export async function renderDashboard(
     }
     @media (max-width: 1100px) {
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .two-col { grid-template-columns: 1fr; }
     }
     @media (max-width: 700px) {
       .grid { grid-template-columns: 1fr; }
+      .overview-strip { grid-template-columns: 1fr; }
       body { padding: 14px; }
     }
   </style>
@@ -417,129 +719,7 @@ export async function renderDashboard(
       <div class="status">Runtime online</div>
     </section>
 
-    ${view === 'overview' ? `
-    <section class="grid">
-      <article class="panel stat">
-        <h2>Uptime</h2>
-        <div class="value">${metrics ? escapeHtml(relativeTime(metrics.startedAt)) : 'n/a'}</div>
-        <div class="subvalue">pid ${metrics ? metrics.pid : 'n/a'}</div>
-        <div class="spark"></div>
-      </article>
-      <article class="panel stat">
-        <h2>Total Requests</h2>
-        <div class="value">${metrics ? metrics.requestCount : 0}</div>
-        <div class="subvalue">avg latency ${metrics ? escapeHtml(formatDuration(metrics.avgRequestMs)) : 'n/a'}</div>
-        ${latencyBars(metrics)}
-      </article>
-      <article class="panel stat">
-        <h2>Open Invoices</h2>
-        <div class="value">${open}</div>
-        <div class="subvalue">${completed} completed · ${terminal} terminal</div>
-        <div class="spark"></div>
-      </article>
-      <article class="panel stat">
-        <h2>Attached Sinks</h2>
-        <div class="value">${webhooks.length}</div>
-        <div class="subvalue">last request ${metrics?.lastRequestAt ? escapeHtml(relativeTime(metrics.lastRequestAt)) : 'never'}</div>
-        <div class="spark"></div>
-      </article>
-    </section>
-
-    <section class="two-col">
-      <article class="panel">
-        <h2 class="section-title">Recent HTTP Requests</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Method</th>
-              <th>Path</th>
-              <th>Status</th>
-              <th>Latency</th>
-              <th>Age</th>
-            </tr>
-          </thead>
-          <tbody>${requestRows}</tbody>
-        </table>
-      </article>
-
-      <article class="panel">
-        <h2 class="section-title">Process Metrics</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Metric</th>
-              <th>Value</th>
-            </tr>
-          </thead>
-          <tbody>${systemRows(metrics)}</tbody>
-        </table>
-      </article>
-    </section>
-
-    <section class="two-col">
-      <article class="panel">
-        <h2 class="section-title">Recent Domain Events</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Event</th>
-              <th>Resource</th>
-              <th>Clock Time</th>
-              <th>Relative</th>
-            </tr>
-          </thead>
-          <tbody>${eventRows}</tbody>
-        </table>
-      </article>
-
-      <article class="panel">
-        <h2 class="section-title">Recent Invoices</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Status</th>
-              <th>Order</th>
-              <th>Recipient</th>
-              <th>Age</th>
-            </tr>
-          </thead>
-          <tbody>${invoiceRows}</tbody>
-        </table>
-      </article>
-    </section>
-
-    <section class="panel">
-      <h2 class="section-title">Attached Clients / Webhook Sinks</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Endpoint</th>
-            <th>Subscriptions</th>
-            <th>Registered</th>
-          </tr>
-        </thead>
-        <tbody>${webhookRows}</tbody>
-      </table>
-    </section>
-    ` : `
-    <section class="panel">
-      <h2 class="section-title">Effective Non-Secret Configuration</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Key</th>
-            <th>Value</th>
-          </tr>
-        </thead>
-        <tbody>${configRows(options?.config)}</tbody>
-      </table>
-      <div class="footer" style="margin-top: 16px; text-align: left;">
-        Secrets are not shown here. This view only exposes effective non-secret values and presence flags.
-      </div>
-    </section>
-    `}
+    ${mainContent}
 
     <div class="footer">Auto-refreshes every 5 seconds · ${new Date().toLocaleTimeString()}</div>
   </main>
