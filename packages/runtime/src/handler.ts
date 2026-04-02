@@ -74,7 +74,11 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
 
   // GET /
   if (method === 'GET' && parts.length === 0) {
-    const html = await renderDashboard(runtime);
+    const html = await renderDashboard(runtime, {
+      view: url.searchParams.get('view') ?? undefined,
+      config: (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ as import('@openrai/config').RaiFlowConfig | undefined,
+      metrics: (globalThis as { __RAIFLOW_METRICS__?: unknown }).__RAIFLOW_METRICS__ as import('./monitoring.js').RuntimeMetricsSnapshot | undefined,
+    });
     return new Response(html, {
       status: 200,
       headers: { 'Content-Type': 'text/html; charset=utf-8' },

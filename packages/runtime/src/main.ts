@@ -15,6 +15,7 @@ import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, create
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
+import { createRuntimeMetrics } from './monitoring.js';
 import {
   createLegacySqliteEventStore,
   createLegacySqliteInvoiceStore,
@@ -44,6 +45,7 @@ const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?
 let config: RaiFlowConfig;
 try {
   config = loadConfig(CONFIG_PATH);
+  (globalThis as { __RAIFLOW_CONFIG__?: RaiFlowConfig }).__RAIFLOW_CONFIG__ = config;
 } catch (err) {
   console.error(`[raiflow] failed to load config from ${CONFIG_PATH}:`, err instanceof Error ? err.message : err);
   process.exit(1);
@@ -90,8 +92,9 @@ const logger = {
 // ---------------------------------------------------------------------------
 
 let db: Database;
+let dbPath = '';
 try {
-  const dbPath = resolve(WORKSPACE_ROOT, config.storage.path);
+  dbPath = resolve(WORKSPACE_ROOT, config.storage.path);
   db = createDatabase(dbPath);
   logger.info('sqlite open', dbPath);
 } catch (err) {
@@ -102,7 +105,11 @@ try {
 // Run migrations
 const migrationRunner = createMigrationRunner(db);
 await migrationRunner.up();
-logger.info('migrations applied', migrationRunner.getApplied().join(', '));
+const appliedMigrations = migrationRunner.getApplied();
+logger.info('migrations applied', appliedMigrations.join(', '));
+
+const metrics = createRuntimeMetrics({ dbPath, migrations: appliedMigrations });
+(globalThis as { __RAIFLOW_METRICS__?: ReturnType<typeof createRuntimeMetrics> }).__RAIFLOW_METRICS__ = metrics;
 
 // ---------------------------------------------------------------------------
 // Stores (wire through events system)
@@ -179,12 +186,26 @@ async function sendWebResponse(webRes: Response, res: ServerResponse): Promise<v
 }
 
 const server = createServer(async (req, res) => {
+  const startedAt = Date.now();
+  const requestUrl = `http://${req.headers.host ?? 'localhost'}${req.url ?? '/'}`;
   try {
     const webReq = await toWebRequest(req);
     const webRes = await handle(webReq);
+    metrics.recordRequest({
+      method: webReq.method,
+      path: new URL(requestUrl).pathname,
+      status: webRes.status,
+      durationMs: Date.now() - startedAt,
+    });
     await sendWebResponse(webRes, res);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Internal server error';
+    metrics.recordRequest({
+      method: req.method ?? 'GET',
+      path: new URL(requestUrl).pathname,
+      status: 500,
+      durationMs: Date.now() - startedAt,
+    });
     logger.error('unhandled request error:', message);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message, code: 'internal_error' } }));
