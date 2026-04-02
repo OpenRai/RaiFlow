@@ -4,9 +4,9 @@
   "description": "Reference Next.js checkout integration for RaiFlow",
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3003",
+    "dev": "sh -c 'printf \"[next-checkout] http://localhost:3003\\n\"; next dev -p 3003'",
     "build": "next build",
-    "start": "next start -p 3003"
+    "start": "sh -c 'printf \"[next-checkout] http://localhost:3003\\n\"; next start -p 3003'"
   },
   "dependencies": {
     "next": "^14.2.0",

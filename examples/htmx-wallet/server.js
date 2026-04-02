@@ -194,6 +194,6 @@ app.get('/api/clients', async (_req, res) => {
 
 app.listen(PORT, async () => {
   await refreshHealth();
-  console.log(`[server] http://localhost:${PORT}`);
+  console.log(`[dashboard] http://localhost:${PORT}`);
   console.log(`[raiflow] pointing to ${RAIFLOW_URL}`);
 });

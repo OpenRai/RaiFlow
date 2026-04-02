@@ -299,6 +299,6 @@ app.get('/webhooks', (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[server] http://localhost:${PORT}`);
+  console.log(`[express-demo] http://localhost:${PORT}`);
   console.log(`[raiflow] pointing to ${RAIFLOW_URL}`);
 });

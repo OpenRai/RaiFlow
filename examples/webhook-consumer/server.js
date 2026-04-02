@@ -235,8 +235,8 @@ async function main() {
     console.log(`[consumer]   Secret: ${endpoint.secret}`);
     console.log(`[consumer]   URL:    ${endpoint.url}`);
     console.log('');
-    console.log(`[server]    Listening on http://localhost:${PORT}`);
-    console.log(`[server]    Open http://localhost:${PORT} to view the event log`);
+    console.log(`[webhook-consumer] Listening on http://localhost:${PORT}`);
+    console.log(`[webhook-consumer] Open http://localhost:${PORT} to view the event log`);
     console.log('');
     console.log('  NOTE: For this webhook to receive events from a remote runtime,');
     console.log('  this server must be publicly accessible. Use ngrok:');
@@ -250,7 +250,7 @@ async function main() {
   }
 
   app.listen(PORT, () => {
-    console.log('[server] Ready to receive webhook events');
+    console.log('[webhook-consumer] Ready to receive webhook events');
   });
 }
 

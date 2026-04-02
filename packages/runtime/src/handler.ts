@@ -2,6 +2,7 @@
 
 import type { InvoiceStatus, RaiFlowEventType } from '@openrai/model';
 import { Runtime } from './runtime.js';
+import { renderDashboard } from './dashboard.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,6 +70,15 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   // GET /health
   if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
     return json({ status: 'ok' });
+  }
+
+  // GET /
+  if (method === 'GET' && parts.length === 0) {
+    const html = await renderDashboard(runtime);
+    return new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
   }
 
   // ---------------------------------------------------------------------------
