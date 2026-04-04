@@ -115,6 +115,7 @@ class PooledRpcClient implements RpcClient {
 export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   const stateListeners = new Set<(state: RpcPoolState) => void>();
   let currentState: RpcPoolState = { status: 'disconnected' };
+  let detachEndpointListener = () => {};
   let client = NanoClient.initialize(buildClientOptions(nodes));
 
   function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
@@ -129,8 +130,23 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   }
 
   function refreshClient(): void {
+    detachEndpointListener();
     client = NanoClient.initialize(buildClientOptions(nodes));
+    detachEndpointListener = client.onEndpointChange((event) => {
+      if (event.kind !== 'rpc') return;
+
+      const activeNode = nodeFromRpcUrl(nodes, event.activeUrl);
+      const previousNode = event.previousUrl ? nodeFromRpcUrl(nodes, event.previousUrl) : undefined;
+      currentState = {
+        status: event.status,
+        ...(activeNode ? { activeNode } : {}),
+        ...(previousNode ? { previousNode } : {}),
+      };
+      for (const listener of stateListeners) listener(currentState);
+    });
   }
+
+  refreshClient();
 
   function buildClient(): RpcClient {
     return new PooledRpcClient(client);
@@ -146,11 +162,6 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
       if (existing >= 0) nodes[existing] = config;
       else nodes.push(config);
       refreshClient();
-      currentState = {
-        status: 'connected',
-        ...(config.rpc.length > 0 ? { activeNode: config } : {}),
-      };
-      for (const listener of stateListeners) listener(currentState);
     },
 
     removeNode(rpcUrl: string): void {
@@ -158,11 +169,10 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
       if (idx < 0) return;
       nodes.splice(idx, 1);
       refreshClient();
-      currentState = nodes.length === 0 ? { status: 'disconnected' } : {
-        status: 'connected',
-        ...(nodes[0] ? { activeNode: nodes[0] } : {}),
-      };
-      for (const listener of stateListeners) listener(currentState);
+      if (nodes.length === 0 && client.getAuditReport().rpc.length === 0) {
+        currentState = { status: 'disconnected' };
+        for (const listener of stateListeners) listener(currentState);
+      }
     },
 
     getActiveNode(): RpcClient | undefined {

@@ -66,10 +66,6 @@ function isString(v: unknown): v is string {
   return typeof v === 'string';
 }
 
-function isNumber(v: unknown): v is number {
-  return typeof v === 'number';
-}
-
 function isBoolean(v: unknown): v is boolean {
   return typeof v === 'boolean';
 }
@@ -88,18 +84,6 @@ function requireString(obj: Record<string, unknown>, key: string): string {
   return val;
 }
 
-function requireNumber(obj: Record<string, unknown>, key: string): number {
-  const val = obj[key];
-  if (!isNumber(val)) throw new Error(`config.${key} must be a number`);
-  return val;
-}
-
-function requireBoolean(obj: Record<string, unknown>, key: string): boolean {
-  const val = obj[key];
-  if (!isBoolean(val)) throw new Error(`config.${key} must be a boolean`);
-  return val;
-}
-
 function optionalString(obj: Record<string, unknown>, key: string): string | undefined {
   const val = obj[key];
   if (val === undefined) return undefined;
@@ -110,7 +94,7 @@ function optionalString(obj: Record<string, unknown>, key: string): string | und
 function optionalNumber(obj: Record<string, unknown>, key: string): number | undefined {
   const val = obj[key];
   if (val === undefined) return undefined;
-  if (!isNumber(val)) throw new Error(`config.${key} must be a number`);
+  if (typeof val !== 'number') throw new Error(`config.${key} must be a number`);
   return val;
 }
 
@@ -118,12 +102,6 @@ function optionalBoolean(obj: Record<string, unknown>, key: string): boolean | u
   const val = obj[key];
   if (val === undefined) return undefined;
   if (!isBoolean(val)) throw new Error(`config.${key} must be a boolean`);
-  return val;
-}
-
-function requireObject(obj: Record<string, unknown>, key: string): Record<string, unknown> {
-  const val = obj[key];
-  if (!isObject(val)) throw new Error(`config.${key} must be an object`);
   return val;
 }
 
@@ -152,6 +130,20 @@ function resolveEnvValue(val: unknown): unknown {
   return val;
 }
 
+function resolveStringArray(value: unknown, key: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`config.${key} must be an array of strings`);
+  }
+
+  const resolved = resolveEnvValue(value);
+  if (!isStringArray(resolved)) {
+    throw new Error(`config.${key} must be an array of strings`);
+  }
+
+  return resolved;
+}
+
 function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
   const daemon = isObject(obj.daemon) ? obj.daemon : {};
   const apiKey = optionalString(daemon, 'apiKey');
@@ -164,19 +156,10 @@ function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
 
 function parseNano(obj: Record<string, unknown>): NanoConfig {
   const nano = isObject(obj.nano) ? obj.nano : {};
-  const rpc = Array.isArray(nano.rpc)
-    ? (resolveEnvValue(nano.rpc) as unknown[]).filter(isString)
-    : [];
-  const ws = Array.isArray(nano.ws)
-    ? (resolveEnvValue(nano.ws) as unknown[]).filter(isString)
-    : [];
-  const work = Array.isArray(nano.work)
-    ? (resolveEnvValue(nano.work) as unknown[]).filter(isString)
-    : [];
   return {
-    rpc,
-    ws,
-    work,
+    rpc: resolveStringArray(nano.rpc, 'nano.rpc'),
+    ws: resolveStringArray(nano.ws, 'nano.ws'),
+    work: resolveStringArray(nano.work, 'nano.work'),
   };
 }
 

@@ -43,4 +43,11 @@ describe('loadConfig nano transport arrays', () => {
     const config = loadConfig(path);
     expect(config.nano).toEqual({ rpc: ['https://rpc.example.com'], ws: ['wss://ws.example.com'], work: ['https://work.example.com'] });
   });
+
+  it('rejects invalid nano transport values', () => {
+    const path = writeConfig('nano:\n  rpc: "https://rpc.example.com"\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    expect(() => loadConfig(path)).toThrow('config.nano.rpc must be an array of strings');
+  });
 });
