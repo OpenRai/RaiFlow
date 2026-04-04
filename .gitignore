@@ -114,6 +114,9 @@ dist
 # Sveltekit cache directory
 .svelte-kit/
 
+# Playwright MCP snapshots
+.playwright-mcp/
+
 # vitepress build output
 **/.vitepress/dist
 
