@@ -1,7 +1,6 @@
 // @openrai/runtime — HTTP handler tests
 
 import { describe, it, expect } from 'vitest';
-import type { RaiFlowEvent } from '@openrai/model';
 import type { WebhookDelivery } from '@openrai/webhook';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
@@ -14,7 +13,7 @@ const ONE_XNO = '1000000000000000000000000000000';
 const TEST_ACCOUNT = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
 
 function createTestRuntime() {
-  const deliveredEvents: { event: RaiFlowEvent; endpoints: unknown[] }[] = [];
+  const deliveredEvents: { event: unknown; endpoints: unknown[] }[] = [];
   const fakeDelivery: WebhookDelivery = {
     deliver: async (event, endpoints) => {
       deliveredEvents.push({ event, endpoints });
@@ -57,6 +56,28 @@ describe('GET /health', () => {
 
     expect(res.status).toBe(200);
     expect(await parseJson(res)).toEqual({ status: 'ok' });
+  });
+
+  it('renders upstream RPC pill on dashboard home', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+    (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ = {
+      daemon: { host: '0.0.0.0', port: 3100 },
+      nano: { rpc: [], ws: [], work: [] },
+      custody: null,
+      invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
+      storage: { driver: 'sqlite', path: './raiflow.db' },
+      webhooks: [],
+      logging: { level: 'info', format: 'pretty' },
+    };
+
+    const res = await handler(req('GET', '/'));
+    const html = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(html).toContain('Upstream RPC');
+    expect(html).toContain('https://rpc.nano.to/');
+    expect(html).toContain('upstream-led');
   });
 });
 

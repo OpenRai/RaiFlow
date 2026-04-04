@@ -227,20 +227,16 @@ Common error codes:
 ## Configuration Shape
 
 ```yaml
-# raiflow.yaml
+# raiflow.yml
 daemon:
   host: "127.0.0.1"
   port: 7400
   apiKey: "env:RAIFLOW_API_KEY"
 
 nano:
-  nodes:
-    - rpc: "http://localhost:7076"
-      ws: "ws://localhost:7078"
-      priority: 1
-    - rpc: "http://backup:7076"
-      ws: "ws://backup:7078"
-      priority: 2
+  rpc: ["http://localhost:7076", "http://backup:7076"]
+  ws: ["ws://localhost:7078", "ws://backup:7078"]
+  work: []
 
 custody:
   seed: "env:RAIFLOW_SEED"
@@ -272,7 +268,7 @@ logging:
 Each milestone is complete when:
 
 **M1 (Foundation)**
-- `raiflow` starts from `raiflow.yaml`
+- `raiflow` starts from `raiflow.yml`
 - Migrations run automatically
 - Auth rejects unauthenticated requests
 - `GET /health` returns `{"status":"ok"}`

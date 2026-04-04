@@ -10,11 +10,13 @@ daemon:
   # apiKey: "env:RAIFLOW_API_KEY"
 
 nano:
-  nodes: []
-  # nodes:
-  #   - rpc: "env:NANO_RPC_URL"
-  #     ws: "env:NANO_WS_URL"
-  #     priority: 1
+  rpc: []
+  ws: []
+  work: []
+  # Optional overrides. When omitted, RaiFlow falls back to nano-core defaults for RPC/WS/work.
+  # rpc: ["env:NANO_RPC_URL"]
+  # ws: ["env:NANO_WS_URL"]
+  # work: ["env:NANO_WORK_URL"]
 
 invoices:
   defaultExpirySeconds: 3600
@@ -34,4 +36,5 @@ logging:
 # Optional custody config for managed-account features:
 # custody:
 #   seed: "env:RAIFLOW_SEED"
+#   # Required when custody is enabled. RaiFlow does not default this from nano-core.
 #   representative: "env:RAIFLOW_REPRESENTATIVE"

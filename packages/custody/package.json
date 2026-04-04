@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@openrai/model": "workspace:*",
-    "@openrai/nano-core": "link:../../../nano-core",
+    "@openrai/nano-core": "2.1.0",
     "nanocurrency": "^2.5.0"
   },
   "devDependencies": {

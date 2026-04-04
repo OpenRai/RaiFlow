@@ -8,6 +8,7 @@
  * Mode selection:
  *   - If `wsUrl` is provided → WebSocket mode (real-time confirmations)
  *   - Otherwise              → RPC polling mode (periodic `accounts_receivable`)
+ *   - If either URL is omitted, nano-core defaults are used for that transport
  *
  * No external dependencies.
  */
@@ -30,10 +31,10 @@ export interface WatcherConfig {
   wsUrl?: string;
   /**
    * HTTP RPC URL of the Nano node, e.g. "http://localhost:7076".
-   * Required in polling mode. In WebSocket mode it is currently unused
-   * but reserved for future initial-sync support.
+   * Optional. When omitted, nano-core default RPC endpoints are used.
+   * In WebSocket mode it is currently unused but reserved for future initial-sync support.
    */
-  rpcUrl: string;
+  rpcUrl?: string;
   /** Accounts to watch for incoming confirmed sends. */
   accounts: string[];
   /** The sink that receives confirmed block events. */

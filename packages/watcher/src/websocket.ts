@@ -12,7 +12,8 @@
  * No external dependencies.
  */
 
-import { WsEndpointPool } from '@openrai/nano-core/transport/ws';
+import { NanoClient } from '@openrai/nano-core';
+import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock, WatcherSink } from '@openrai/model';
 
 // ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ import type { ConfirmedBlock, WatcherSink } from '@openrai/model';
 
 export interface NanoWebSocketConfig {
   /** WebSocket URL of the Nano node, e.g. "ws://localhost:7078" */
-  url: string;
+  url?: string;
   /** Milliseconds to wait before attempting a reconnect. Default: 5000 */
   reconnectIntervalMs?: number;
   /** Maximum number of reconnection attempts. Default: Infinity */
@@ -57,7 +58,7 @@ interface WsMessage {
 // ---------------------------------------------------------------------------
 
 export class NanoWebSocketClient {
-  private readonly pool: WsEndpointPool;
+  private readonly client: NanoClient;
   private readonly baseReconnectIntervalMs: number;
   private readonly maxReconnectAttempts: number;
 
@@ -69,12 +70,15 @@ export class NanoWebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: NanoWebSocketConfig) {
-    this.pool = new WsEndpointPool({
-      urls: [config.url],
-      defaults: [config.url],
+    this.client = NanoClient.initialize({
+      ...(config.url ? { ws: [config.url] } : {}),
     });
     this.baseReconnectIntervalMs = config.reconnectIntervalMs ?? 5_000;
     this.maxReconnectAttempts = config.maxReconnectAttempts ?? Infinity;
+  }
+
+  getAuditReport(): EndpointAuditRecord[] {
+    return this.client.wsPool.getAuditReport();
   }
 
   // -------------------------------------------------------------------------
@@ -140,7 +144,7 @@ export class NanoWebSocketClient {
 
   private async establishSocket(): Promise<void> {
     try {
-      this.ws = await this.pool.connect();
+      this.ws = await this.client.wsPool.connect();
     } catch {
       this.scheduleReconnect();
       return;

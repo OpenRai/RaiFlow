@@ -6,7 +6,7 @@ This page describes the runtime as it exists today, not only as it is intended t
 
 The runtime currently does these things reliably:
 
-- boots from `raiflow.yaml`
+- boots from `raiflow.yml`
 - opens SQLite storage and runs migrations
 - wires the event store and event bus
 - exposes a small HTTP surface inherited from the earlier invoice prototype
@@ -66,7 +66,7 @@ Do not assume the current codebase has complete production-grade auth behavior w
 
 ## Configuration
 
-Runtime startup uses `raiflow.yaml`.
+Runtime startup uses `raiflow.yml`.
 
 Example shape:
 
@@ -74,24 +74,31 @@ Example shape:
 daemon:
   host: "0.0.0.0"
   port: 3100
-  apiKey: "env:RAIFLOW_API_KEY"
+  # apiKey: "env:RAIFLOW_API_KEY"
 
 nano:
-  nodes:
-    - rpc: "env:NANO_RPC_URL"
-      ws: "env:NANO_WS_URL"
-      priority: 1
+  rpc: []
+  ws: []
+  work: []
+  # rpc: ["env:NANO_RPC_URL"]
+  # ws: ["env:NANO_WS_URL"]
+  # work: ["env:NANO_WORK_URL"]
 
-custody:
-  seed: "env:RAIFLOW_SEED"
-  representative: "env:RAIFLOW_REPRESENTATIVE"
+# custody:
+#   seed: "env:RAIFLOW_SEED"
+#   representative: "env:RAIFLOW_REPRESENTATIVE"
 
 storage:
   driver: "sqlite"
   path: "./raiflow.db"
 ```
 
-See the repository `raiflow.yaml.example` for the full current example.
+With `@openrai/nano-core` v2, `NANO_RPC_URL`, `NANO_WS_URL`, and `NANO_WORK_URL`
+are best treated as optional endpoint overrides rather than mandatory startup
+variables. A custody `representative` is still required if you enable the
+`custody` block.
+
+See the repository `raiflow.yml.example` for the full current example.
 
 ## Read With Care
 

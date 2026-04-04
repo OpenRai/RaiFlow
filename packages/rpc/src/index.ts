@@ -1,14 +1,13 @@
 // @openrai/rpc — Multi-node RPC, WebSocket, failover, and confirmation tracking
 
-import { HttpEndpointPool } from '@openrai/nano-core/transport/http';
-import { WsEndpointPool } from '@openrai/nano-core/transport/ws';
-import type { EndpointActivityEvent, EndpointAuditRecord } from '@openrai/nano-core/transport';
+import { NanoClient } from '@openrai/nano-core';
+import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock } from '@openrai/model';
 
 export interface RpcNodeConfig {
-  rpc: string;
-  ws: string;
-  priority: number;
+  rpc: string[];
+  ws: string[];
+  work: string[];
 }
 
 export interface RpcClient {
@@ -56,14 +55,26 @@ export interface RpcPoolState {
 }
 
 function nodeFromRpcUrl(nodes: RpcNodeConfig[], rpcUrl: string): RpcNodeConfig | undefined {
-  return nodes.find((node) => node.rpc === rpcUrl);
+  return nodes.find((node) => node.rpc.includes(rpcUrl));
+}
+
+function configuredRpcUrls(nodes: RpcNodeConfig[]): string[] {
+  return nodes.flatMap((node) => node.rpc);
+}
+
+function configuredWsUrls(nodes: RpcNodeConfig[]): string[] {
+  return nodes.flatMap((node) => node.ws);
+}
+
+function configuredWorkUrls(nodes: RpcNodeConfig[]): string[] {
+  return nodes.flatMap((node) => node.work);
 }
 
 class PooledRpcClient implements RpcClient {
-  constructor(private readonly pool: HttpEndpointPool) {}
+  constructor(private readonly client: NanoClient) {}
 
   async accountInfo(account: string): Promise<AccountInfoResponse> {
-    return this.pool.postJson<AccountInfoResponse>({
+    return this.client.rpcPool.postJson<AccountInfoResponse>({
       action: 'account_info',
       account,
       representative: true,
@@ -72,7 +83,7 @@ class PooledRpcClient implements RpcClient {
   }
 
   async accountsReceivable(account: string): Promise<Receivable[]> {
-    const response = await this.pool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
+    const response = await this.client.rpcPool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
       action: 'accounts_receivable',
       account,
       source: true,
@@ -87,49 +98,42 @@ class PooledRpcClient implements RpcClient {
   }
 
   async process(block: string): Promise<ProcessResponse> {
-    return this.pool.postJson<ProcessResponse>({ action: 'process', block });
+    return this.client.rpcPool.postJson<ProcessResponse>({ action: 'process', block });
   }
 
   async workGenerate(hash: string, difficulty?: string): Promise<WorkGenerateResponse> {
-    return this.pool.postJson<WorkGenerateResponse>({
-      action: 'work_generate',
-      hash,
-      ...(difficulty ? { difficulty } : {}),
-    });
+    return {
+      work: await this.client.workProvider.generate(hash, difficulty ?? 'fffffff800000000'),
+    };
   }
 
   getAuditReport(): EndpointAuditRecord[] {
-    return this.pool.getAuditReport();
+    return this.client.rpcPool.getAuditReport();
   }
 }
 
 export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   const stateListeners = new Set<(state: RpcPoolState) => void>();
   let currentState: RpcPoolState = { status: 'disconnected' };
-  const rpcPool = new HttpEndpointPool({
-    kind: 'rpc',
-    urls: nodes.map((node) => node.rpc),
-    defaults: nodes.map((node) => node.rpc),
-    onActiveEndpointChange(event: EndpointActivityEvent) {
-      if (event.kind !== 'rpc') return;
+  let client = NanoClient.initialize(buildClientOptions(nodes));
 
-      const activeNode = nodeFromRpcUrl(nodes, event.activeUrl);
-      const previousNode = event.previousUrl ? nodeFromRpcUrl(nodes, event.previousUrl) : undefined;
-      currentState = {
-        status: event.status,
-        ...(activeNode ? { activeNode } : {}),
-        ...(previousNode ? { previousNode } : {}),
-      };
-      for (const listener of stateListeners) listener(currentState);
-    },
-  });
+  function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
+    const rpc = configuredRpcUrls(configuredNodes);
+    const ws = configuredWsUrls(configuredNodes);
+    const work = configuredWorkUrls(configuredNodes);
+    return {
+      ...(rpc.length > 0 ? { rpc } : {}),
+      ...(ws.length > 0 ? { ws } : {}),
+      ...(work.length > 0 ? { work } : {}),
+    };
+  }
 
-  function sortedNodes(): RpcNodeConfig[] {
-    return [...nodes].sort((a, b) => b.priority - a.priority);
+  function refreshClient(): void {
+    client = NanoClient.initialize(buildClientOptions(nodes));
   }
 
   function buildClient(): RpcClient {
-    return new PooledRpcClient(rpcPool);
+    return new PooledRpcClient(client);
   }
 
   return {
@@ -138,19 +142,31 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     },
 
     addNode(config: RpcNodeConfig): void {
-      const existing = nodes.findIndex((n) => n.rpc === config.rpc);
+      const existing = nodes.findIndex((n) => n.rpc.some((url) => config.rpc.includes(url)));
       if (existing >= 0) nodes[existing] = config;
       else nodes.push(config);
+      refreshClient();
+      currentState = {
+        status: 'connected',
+        ...(config.rpc.length > 0 ? { activeNode: config } : {}),
+      };
+      for (const listener of stateListeners) listener(currentState);
     },
 
     removeNode(rpcUrl: string): void {
-      const idx = nodes.findIndex((n) => n.rpc === rpcUrl);
+      const idx = nodes.findIndex((n) => n.rpc.includes(rpcUrl));
       if (idx < 0) return;
       nodes.splice(idx, 1);
+      refreshClient();
+      currentState = nodes.length === 0 ? { status: 'disconnected' } : {
+        status: 'connected',
+        ...(nodes[0] ? { activeNode: nodes[0] } : {}),
+      };
+      for (const listener of stateListeners) listener(currentState);
     },
 
     getActiveNode(): RpcClient | undefined {
-      if (!currentState.activeNode && nodes.length === 0) return undefined;
+      if (configuredRpcUrls(nodes).length === 0 && client.getAuditReport().rpc.length === 0) return undefined;
       return buildClient();
     },
 
@@ -160,7 +176,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     },
 
     getAuditReport(): EndpointAuditRecord[] {
-      return rpcPool.getAuditReport();
+      return client.rpcPool.getAuditReport();
     },
   };
 }
@@ -174,10 +190,9 @@ export interface WsClient {
   getAuditReport(): EndpointAuditRecord[];
 }
 
-export function createWsClient(wsUrl: string): WsClient {
-  const pool = new WsEndpointPool({
-    urls: [wsUrl],
-    defaults: [wsUrl],
+export function createWsClient(wsUrl?: string): WsClient {
+  const client = NanoClient.initialize({
+    ...(wsUrl ? { ws: [wsUrl] } : {}),
   });
 
   let ws: WebSocket | null = null;
@@ -185,7 +200,7 @@ export function createWsClient(wsUrl: string): WsClient {
   const confirmationListeners = new Set<(block: ConfirmedBlock) => void>();
 
   async function establish(): Promise<void> {
-    ws = await pool.connect();
+    ws = await client.wsPool.connect();
     const socket = ws;
     if (!socket) throw new Error('WebSocket connection failed');
     socket.onmessage = (event) => {
@@ -257,7 +272,7 @@ export function createWsClient(wsUrl: string): WsClient {
     },
 
     getAuditReport(): EndpointAuditRecord[] {
-      return pool.getAuditReport();
+      return client.wsPool.getAuditReport();
     },
   };
 }

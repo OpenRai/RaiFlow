@@ -9,14 +9,10 @@ export interface DaemonConfig {
   apiKey?: string;
 }
 
-export interface NanoNodeConfig {
-  rpc: string;
-  ws: string;
-  priority: number;
-}
-
 export interface NanoConfig {
-  nodes: NanoNodeConfig[];
+  rpc: string[];
+  ws: string[];
+  work: string[];
 }
 
 export interface CustodyConfig {
@@ -168,16 +164,19 @@ function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
 
 function parseNano(obj: Record<string, unknown>): NanoConfig {
   const nano = isObject(obj.nano) ? obj.nano : {};
-  const nodes = Array.isArray(nano.nodes) ? nano.nodes : [];
+  const rpc = Array.isArray(nano.rpc)
+    ? (resolveEnvValue(nano.rpc) as unknown[]).filter(isString)
+    : [];
+  const ws = Array.isArray(nano.ws)
+    ? (resolveEnvValue(nano.ws) as unknown[]).filter(isString)
+    : [];
+  const work = Array.isArray(nano.work)
+    ? (resolveEnvValue(nano.work) as unknown[]).filter(isString)
+    : [];
   return {
-    nodes: nodes.map((n, i) => {
-      if (!isObject(n)) throw new Error(`config.nano.nodes[${i}] must be an object`);
-      return {
-        rpc: resolveEnv(requireString(n as Record<string, unknown>, 'rpc')),
-        ws: resolveEnv(requireString(n as Record<string, unknown>, 'ws')),
-        priority: requireNumber(n as Record<string, unknown>, 'priority'),
-      };
-    }),
+    rpc,
+    ws,
+    work,
   };
 }
 

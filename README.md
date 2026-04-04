@@ -11,7 +11,7 @@ RaiFlow is in the middle of a v2 rebuild.
 What is true today:
 
 - The v2 foundation packages exist and build: `config`, `storage`, `events`, `rpc`, `custody`
-- The daemon boots from `raiflow.yaml`
+- The daemon boots from `raiflow.yml`
 - SQLite migrations run on startup
 - The event store and event bus are implemented
 - The RPC package has multi-node client/failover primitives
@@ -128,10 +128,14 @@ pnpm install
 2. Create a config file:
 
 ```bash
-cp raiflow.yaml.example raiflow.yaml
+cp raiflow.yml.example raiflow.yml
 ```
 
-3. Fill in the required environment variables referenced by `raiflow.yaml`
+3. Fill in any environment variables referenced by the features you enable in `raiflow.yml`
+
+   For the default example, none are required just to boot locally. `NANO_RPC_URL`,
+   `NANO_WS_URL`, and `NANO_WORK_URL` are optional endpoint overrides. `RAIFLOW_SEED` and
+   `RAIFLOW_REPRESENTATIVE` are only needed when you enable custody-backed features.
 
 4. Build the workspace:
 

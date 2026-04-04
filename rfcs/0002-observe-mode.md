@@ -63,7 +63,7 @@ Canonical public types, schemas, and shared contracts only. No application logic
 
 ### `@openrai/config`
 
-Loads and validates `raiflow.yaml`.
+Loads and validates `raiflow.yml`.
 
 - Parse YAML
 - Resolve `env:VARIABLE_NAME` references
@@ -83,7 +83,7 @@ Persistent data access layer.
 
 Nano node communication.
 
-- Multi-node HTTP RPC with ordered priority failover
+- Multi-endpoint HTTP RPC failover across configured `nano.rpc` URLs
 - WebSocket connection manager with reconnect/backoff
 - Request timeout and retry
 - Confirmation subscription routing

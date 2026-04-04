@@ -1,7 +1,8 @@
-import { HttpEndpointPool } from '@openrai/nano-core/transport/http';
+import { NanoClient } from '@openrai/nano-core';
+import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 
 export interface NanoRpcConfig {
-  url: string;
+  url?: string;
   /** Request timeout in milliseconds. Default: 15000 */
   timeoutMs?: number;
 }
@@ -105,22 +106,19 @@ export interface BlockInfo {
 }
 
 export class NanoRpcClient {
-  private readonly pool: HttpEndpointPool;
+  private readonly client: NanoClient;
   private readonly timeoutMs: number;
 
   constructor(config: NanoRpcConfig) {
     this.timeoutMs = config.timeoutMs ?? 15_000;
-    this.pool = new HttpEndpointPool({
-      kind: 'rpc',
-      urls: [config.url],
-      defaults: [config.url],
-      timeoutMs: this.timeoutMs,
+    this.client = NanoClient.initialize({
+      ...(config.url ? { rpc: [config.url] } : {}),
     });
   }
 
   private async post<T>(body: Record<string, unknown>): Promise<T> {
     try {
-      return await this.pool.postJson<T>(body);
+      return await this.client.rpcPool.postJson<T>(body);
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'AbortError';
       const message = isAbort
@@ -135,6 +133,10 @@ export class NanoRpcClient {
         err,
       );
     }
+  }
+
+  getAuditReport(): EndpointAuditRecord[] {
+    return this.client.rpcPool.getAuditReport();
   }
 
   async accountInfo(account: string): Promise<AccountInfo | undefined> {

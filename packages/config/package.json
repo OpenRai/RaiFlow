@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "echo \"No tests yet\"",
+    "test": "vitest run",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
   }
 }

@@ -1,4 +1,6 @@
 import type { RaiFlowConfig } from '@openrai/config';
+import { NanoClient } from '@openrai/nano-core';
+import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { Runtime } from './runtime.js';
 import type { RuntimeMetricsSnapshot } from './monitoring.js';
 
@@ -53,6 +55,31 @@ function booleanPill(value: boolean): string {
   return `<span class="bool-pill ${value ? 'bool-true' : 'bool-false'}"><span class="bool-led"></span>${value ? 'enabled' : 'disabled'}</span>`;
 }
 
+function configuredRpcUrls(config: RaiFlowConfig | undefined): string[] {
+  if (!config) return [];
+  return config.nano.rpc;
+}
+
+function upstreamRpcPill(config: RaiFlowConfig | undefined): string {
+  const rpc = configuredRpcUrls(config);
+  const client = NanoClient.initialize(rpc.length > 0 ? { rpc } : undefined);
+  const upstreams = client.getAuditReport().rpc;
+
+  return `
+    <div class="status status-stack">
+      <span class="status-label">Upstream RPC</span>
+      <div class="status-endpoints">
+        ${upstreams.map((entry: EndpointAuditRecord) => `
+          <span class="upstream-pill">
+            <span class="upstream-led" aria-hidden="true"></span>
+            <span class="upstream-url mono">${escapeHtml(entry.url)}</span>
+          </span>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
 function latencyBars(metrics: RuntimeMetricsSnapshot | undefined): string {
   const requests = metrics?.recentRequests ?? [];
   if (requests.length === 0) return '<div class="empty">No recent request data yet</div>';
@@ -81,9 +108,9 @@ function configRows(config: RaiFlowConfig | undefined): string {
     { key: 'storage.path', value: escapeHtml(config.storage.path) },
     { key: 'logging.level', value: escapeHtml(config.logging.level) },
     { key: 'logging.format', value: escapeHtml(config.logging.format) },
-    { key: 'nano.nodes.count', value: escapeHtml(String(config.nano.nodes.length)) },
-    { key: 'nano.nodes.rpc', value: escapeHtml(config.nano.nodes.map((node) => node.rpc).join(', ') || 'none') },
-    { key: 'nano.nodes.ws', value: escapeHtml(config.nano.nodes.map((node) => node.ws).join(', ') || 'none') },
+    { key: 'nano.rpc', value: escapeHtml(config.nano.rpc.join(', ') || 'none') },
+    { key: 'nano.ws', value: escapeHtml(config.nano.ws.join(', ') || 'none') },
+    { key: 'nano.work', value: escapeHtml(config.nano.work.join(', ') || 'none') },
     { key: 'custody.configured', value: booleanPill(Boolean(config.custody)) },
     { key: 'invoices.defaultExpirySeconds', value: escapeHtml(String(config.invoices.defaultExpirySeconds)) },
     { key: 'invoices.autoSweep', value: booleanPill(config.invoices.autoSweep) },
@@ -518,6 +545,59 @@ export async function renderDashboard(
       background: rgba(255,255,255,0.05);
       font-weight: 600;
     }
+    .status-rail {
+      display: flex;
+      align-items: center;
+      justify-content: end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .status-stack {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      max-width: min(100%, 860px);
+      border-radius: 16px;
+      padding: 8px 12px;
+    }
+    .status-label {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+    .status-endpoints {
+      display: flex;
+      align-items: center;
+      justify-content: end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .upstream-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(46,204,113,0.24);
+      background: rgba(46,204,113,0.10);
+      color: #79efae;
+      font-size: 0.82rem;
+      max-width: 100%;
+    }
+    .upstream-led {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #2ecc71;
+      box-shadow: 0 0 10px rgba(46,204,113,0.7);
+      flex: 0 0 auto;
+    }
+    .upstream-url {
+      word-break: break-all;
+    }
     .tabs {
       display: inline-flex;
       gap: 8px;
@@ -705,6 +785,8 @@ export async function renderDashboard(
       .grid { grid-template-columns: 1fr; }
       .overview-strip { grid-template-columns: 1fr; }
       body { padding: 14px; }
+      .status-rail { justify-content: start; }
+      .status-endpoints { justify-content: start; }
     }
   </style>
 </head>
@@ -716,7 +798,7 @@ export async function renderDashboard(
         <p>Built-in runtime overview, recent domain activity, attached sinks, and effective non-secret configuration.</p>
         ${nav}
       </div>
-      <div class="status">Runtime online</div>
+      <div class="status-rail">${upstreamRpcPill(options?.config)}</div>
     </section>
 
     ${mainContent}
