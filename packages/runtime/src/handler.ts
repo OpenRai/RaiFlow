@@ -1,6 +1,7 @@
 // @openrai/runtime — Framework-agnostic HTTP handler
 
 import type { InvoiceStatus, RaiFlowEventType } from '@openrai/model';
+import { RaiFlowError, isErrorWithCode } from '@openrai/model';
 import { Runtime } from './runtime.js';
 import { renderDashboard } from './dashboard.js';
 
@@ -151,12 +152,11 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
           const invoice = await runtime.cancelInvoice(invoiceId);
           return json(invoice);
         } catch (err) {
-          if (err instanceof Error) {
-            const code = (err as Error & { code?: string }).code;
-            if (code === 'not_found') {
+          if (isErrorWithCode(err)) {
+            if (err.code === 'not_found') {
               return errorResponse(err.message, 'not_found', 404);
             }
-            if (code === 'conflict') {
+            if (err.code === 'conflict') {
               return errorResponse(err.message, 'conflict', 409);
             }
           }

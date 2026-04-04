@@ -1,9 +1,8 @@
 // @openrai/runtime — Store unit tests
-// @ts-nocheck — prototype-era tests; replaced in Slice B4
 
 import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import type { Invoice, Payment } from '@openrai/model';
+import type { LegacyInvoice, LegacyPayment, LegacyInvoiceStore, LegacyPaymentStore, LegacyEventStore, LegacyRaiFlowEvent } from '@openrai/model';
 import {
   createInvoiceStore,
   createPaymentStore,
@@ -17,7 +16,7 @@ import {
 const ONE_XNO = '1000000000000000000000000000000';
 const TEST_ACCOUNT = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
 
-function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
+function makeInvoice(overrides: Partial<LegacyInvoice> = {}): LegacyInvoice {
   return {
     id: randomUUID(),
     status: 'open',
@@ -30,9 +29,9 @@ function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
   };
 }
 
-function makePayment(overrides: Partial<Payment> & { invoiceId: string }): Payment {
-  const { invoiceId, ...rest } = overrides;
-  return {
+function makePayment(overrides: Partial<LegacyPayment> & { invoiceId: string }): LegacyPayment {
+  const { invoiceId } = overrides;
+  const defaults: LegacyPayment = {
     id: randomUUID(),
     invoiceId,
     status: 'confirmed',
@@ -41,8 +40,11 @@ function makePayment(overrides: Partial<Payment> & { invoiceId: string }): Payme
     recipientAccount: TEST_ACCOUNT,
     sendBlockHash: `hash_${randomUUID()}`,
     confirmedAt: new Date().toISOString(),
-    ...rest,
   };
+  const rest = overrides as Partial<LegacyPayment>;
+  // Remove invoiceId from rest to avoid duplicate
+  const { invoiceId: _, ...restWithoutId } = rest;
+  return { ...defaults, ...restWithoutId } as LegacyPayment;
 }
 
 // ---------------------------------------------------------------------------

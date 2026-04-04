@@ -1,8 +1,7 @@
 // @openrai/runtime — Core business logic tests
-// @ts-nocheck — prototype-era tests; replaced in Slice B4
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { RaiFlowEvent, ConfirmedBlock } from '@openrai/model';
+import type { LegacyRaiFlowEvent, ConfirmedBlock } from '@openrai/model';
 import type { WebhookDelivery } from '@openrai/webhook';
 import { Runtime, xnoToRaw } from '../runtime.js';
 
@@ -17,6 +16,18 @@ const TWO_XNO = '2000000000000000000000000000000';
 const TEST_ACCOUNT_1 = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
 const TEST_ACCOUNT_2 = 'nano_2testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
 
+function createTestRuntime() {
+  const deliveredEvents: { event: LegacyRaiFlowEvent; endpoints: unknown[] }[] = [];
+  const fakeDelivery: WebhookDelivery = {
+    deliver: async (event: unknown, endpoints: unknown[]) => {
+      deliveredEvents.push({ event: event as LegacyRaiFlowEvent, endpoints });
+    },
+    shutdown: () => {},
+  };
+  const runtime = new Runtime({ webhookDelivery: fakeDelivery });
+  return { runtime, deliveredEvents };
+}
+
 function makeBlock(
   overrides: Partial<ConfirmedBlock> & { recipientAccount: string },
 ): ConfirmedBlock {
@@ -29,18 +40,6 @@ function makeBlock(
     confirmedAt: new Date().toISOString(),
     ...rest,
   };
-}
-
-function createTestRuntime() {
-  const deliveredEvents: { event: RaiFlowEvent; endpoints: unknown[] }[] = [];
-  const fakeDelivery: WebhookDelivery = {
-    deliver: async (event, endpoints) => {
-      deliveredEvents.push({ event, endpoints });
-    },
-    shutdown: () => {},
-  };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery });
-  return { runtime, deliveredEvents };
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +675,7 @@ describe('createInvoice with expectedAmount (XNO)', () => {
 describe('runtime.on / runtime.off', () => {
   it('listener receives events of the subscribed type', async () => {
     const { runtime } = createTestRuntime();
-    const received: RaiFlowEvent[] = [];
+    const received: LegacyRaiFlowEvent[] = [];
     runtime.on('invoice.created', (ev) => { received.push(ev); });
 
     await runtime.createInvoice({
@@ -692,7 +691,7 @@ describe('runtime.on / runtime.off', () => {
 
   it('wildcard listener receives all event types', async () => {
     const { runtime } = createTestRuntime();
-    const received: RaiFlowEvent[] = [];
+    const received: LegacyRaiFlowEvent[] = [];
     runtime.on('*', (ev) => { received.push(ev); });
 
     await runtime.createInvoice({
@@ -717,8 +716,8 @@ describe('runtime.on / runtime.off', () => {
 
   it('off removes a listener', async () => {
     const { runtime } = createTestRuntime();
-    const received: RaiFlowEvent[] = [];
-    const listener = (ev: RaiFlowEvent) => { received.push(ev); };
+    const received: LegacyRaiFlowEvent[] = [];
+    const listener = (ev: LegacyRaiFlowEvent) => { received.push(ev); };
     runtime.on('invoice.created', listener);
     runtime.off('invoice.created', listener);
 

@@ -40,7 +40,7 @@ packages/
 - **Derivation namespaces:** Invoice addresses and managed wallet accounts use non-overlapping index ranges from the same seed.
 - **Workspace deps:** Use `workspace:*` for internal packages.
 - **Framework-agnostic HTTP:** Runtime uses web-standard `Request`/`Response`. Works on Node, Deno, Bun, Workers.
-- **YAML config with `env:`:** No hardcoded values. Use `raiflow.yaml` with `env:VARIABLE_NAME` references.
+- **YAML config with `env:`:** No hardcoded values. Use `raiflow.yml` with `env:VARIABLE_NAME` references.
 
 ## When Making Changes
 

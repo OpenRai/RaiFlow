@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // @openrai/runtime — Standalone server entry point
 //
-// Boots from raiflow.yaml config, initializes SQLite via the storage package,
+// Boots from raiflow.yml config, initializes SQLite via the storage package,
 // and exposes the HTTP handler on the configured daemon host:port.
 //
-// Configuration via YAML file (default: ./raiflow.yaml) or RAIFLOW_CONFIG_PATH env var.
+// Configuration via YAML file (default: ./raiflow.yml) or RAIFLOW_CONFIG_PATH env var.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { resolve, dirname } from 'node:path';
@@ -40,7 +40,7 @@ function findWorkspaceRoot(): string {
 }
 
 const WORKSPACE_ROOT = findWorkspaceRoot();
-const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yaml');
+const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yml');
 
 let config: RaiFlowConfig;
 try {

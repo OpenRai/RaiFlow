@@ -10,7 +10,7 @@ RaiFlow is in a v2 rebuild.
 
 What exists now:
 
-- config loading from `raiflow.yaml`
+- config loading from `raiflow.yml`
 - SQLite-backed storage and migrations
 - event persistence primitives
 - RPC and WebSocket client primitives

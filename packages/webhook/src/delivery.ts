@@ -1,7 +1,17 @@
 // @openrai/webhook — Webhook delivery engine with retry & exponential backoff
 
-import type { RaiFlowEvent, WebhookEndpoint } from '@openrai/model';
+import type { WebhookEndpoint } from '@openrai/model';
 import { signPayload } from './signing.js';
+
+/** Minimal event shape required for webhook delivery */
+interface WebhookEventData {
+  id: string;
+  type: string;
+}
+
+function getEventData(event: unknown): WebhookEventData {
+  return event as WebhookEventData;
+}
 
 export interface DeliveryConfig {
   /** Max retry attempts per event. Default 5. */
@@ -19,7 +29,7 @@ export interface WebhookDelivery {
    * Deliver an event to all matching endpoints.
    * The first attempt for each endpoint is awaited; retries happen in the background.
    */
-  deliver(event: RaiFlowEvent, endpoints: WebhookEndpoint[]): Promise<void>;
+  deliver(event: unknown, endpoints: WebhookEndpoint[]): Promise<void>;
   /** Shut down the delivery engine, cancelling any pending retry timers. */
   shutdown(): void;
 }
@@ -37,10 +47,11 @@ function computeBackoff(attempt: number, baseDelayMs: number, maxDelayMs: number
 /** Attempt to POST a webhook payload to a single endpoint. */
 async function postToEndpoint(
   endpoint: WebhookEndpoint,
-  event: RaiFlowEvent,
+  event: unknown,
   body: string,
   timeoutMs: number,
 ): Promise<boolean> {
+  const eventData = getEventData(event);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -52,8 +63,8 @@ async function postToEndpoint(
       headers: {
         'Content-Type': 'application/json',
         'X-RaiFlow-Signature': signature,
-        'X-RaiFlow-Event': event.type,
-        'X-RaiFlow-Event-Id': event.id,
+        'X-RaiFlow-Event': eventData.type,
+        'X-RaiFlow-Event-Id': eventData.id,
       },
       body,
     });
@@ -66,7 +77,7 @@ async function postToEndpoint(
     }
 
     console.log(
-      `[webhook] delivered event ${event.id} (${event.type}) to endpoint ${endpoint.id} (${endpoint.url})`,
+      `[webhook] delivered event ${eventData.id} (${eventData.type}) to endpoint ${endpoint.id} (${endpoint.url})`,
     );
     return true;
   } catch (err) {
@@ -83,15 +94,16 @@ async function postToEndpoint(
 /** Schedule retries in the background. Returns a timer handle set for cleanup. */
 function scheduleRetries(
   endpoint: WebhookEndpoint,
-  event: RaiFlowEvent,
+  event: unknown,
   body: string,
   attempt: number,
   config: Required<DeliveryConfig>,
   pendingTimers: Set<ReturnType<typeof setTimeout>>,
 ): void {
+  const eventData = getEventData(event);
   if (attempt >= config.maxRetries) {
     console.log(
-      `[webhook] giving up on endpoint ${endpoint.id} (${endpoint.url}) after ${config.maxRetries} retries for event ${event.id}`,
+      `[webhook] giving up on endpoint ${endpoint.id} (${endpoint.url}) after ${config.maxRetries} retries for event ${eventData.id}`,
     );
     return;
   }
@@ -139,7 +151,8 @@ export function createWebhookDelivery(config: DeliveryConfig = {}): WebhookDeliv
   return {
     async deliver(event, endpoints) {
       // Filter endpoints that subscribe to this event type
-      const matching = endpoints.filter((ep) => ep.eventTypes.includes(event.type));
+      const eventData = getEventData(event);
+      const matching = endpoints.filter((ep) => ep.eventTypes.includes(eventData.type));
 
       if (matching.length === 0) return;
 

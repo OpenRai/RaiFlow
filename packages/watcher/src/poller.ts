@@ -102,8 +102,10 @@ export class NanoPoller {
     let receivable: Record<string, string[]>;
     try {
       receivable = await this.rpc.accountsReceivable(accounts, 20);
-    } catch {
+    } catch (err) {
       // Transient RPC errors should not crash the poller.
+      const message = err instanceof Error ? err.message : String(err);
+      console.debug(`[poller] accounts_receivable RPC failed: ${message}`);
       return;
     }
 
@@ -114,7 +116,9 @@ export class NanoPoller {
         let blockInfo;
         try {
           blockInfo = await this.rpc.blockInfo(hash);
-        } catch {
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.debug(`[poller] block_info RPC failed for ${hash}: ${message}`);
           continue;
         }
 

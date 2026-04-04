@@ -413,7 +413,8 @@ export interface WatcherSink {
 // Error Model
 // ---------------------------------------------------------------------------
 
-export interface RaiFlowError {
+/** Error response shape for HTTP API responses */
+export interface RaiFlowErrorResponse {
   error: {
     message: string;
     code: string;
@@ -427,13 +428,14 @@ export type ErrorCode =
   | 'bad_request'
   | 'internal_error';
 
+export { RaiFlowError, StorageError, CustodyError, isErrorWithCode, getErrorCode } from './errors.js';
+
 // ---------------------------------------------------------------------------
 // Backward compatibility aliases (prototype-era)
 // These allow the old runtime to keep building while being rewritten.
 // Remove when runtime is fully rewritten.
 // ---------------------------------------------------------------------------
 
-export type LegacyInvoiceStatus = InvoiceStatus;
 export type LegacyPaymentStatus = PaymentStatus;
 
 /** Prototype-era Invoice shape. Remove when runtime is rewritten. */
@@ -483,6 +485,14 @@ export interface LegacyInvoiceStore {
   update(id: string, patch: Partial<LegacyInvoice>): Promise<LegacyInvoice>;
   getByRecipientAccount(account: string, status?: InvoiceStatus): Promise<LegacyInvoice[]>;
   getByIdempotencyKey(key: string): Promise<string | undefined>;
+}
+
+/** Prototype-era PaymentStore. Remove when runtime is rewritten. */
+export interface LegacyPaymentStore {
+  create(payment: LegacyPayment): Promise<LegacyPayment>;
+  get(id: string): Promise<LegacyPayment | undefined>;
+  getByBlockHash(hash: string): Promise<LegacyPayment | undefined>;
+  listByInvoice(invoiceId: string): Promise<LegacyPayment[]>;
 }
 
 /** Prototype-era EventStore. Remove when runtime is rewritten. */

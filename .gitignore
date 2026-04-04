@@ -26,6 +26,7 @@ pids
 *.pid
 *.seed
 *.pid.lock
+raiflow.yml
 *.db
 *.db-shm
 *.db-wal

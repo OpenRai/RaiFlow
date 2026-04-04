@@ -1,24 +1,24 @@
 // @openrai/runtime — Runtime core
-// @ts-nocheck — prototype-era; being replaced in Slice B4
 
 import { randomUUID } from 'node:crypto';
 import type {
-  Invoice,
   InvoiceStatus,
-  InvoiceStore,
-  PaymentStore,
-  EventStore,
-  RaiFlowEvent,
   RaiFlowEventType,
   WatcherSink,
   ConfirmedBlock,
   CompletionPolicy,
+  LegacyInvoice,
+  LegacyInvoiceStore,
+  LegacyPaymentStore,
+  LegacyEventStore,
+  LegacyRaiFlowEvent,
+  WebhookEndpointStore,
 } from '@openrai/model';
+import { RaiFlowError } from '@openrai/model';
 import {
   createWebhookDelivery,
   createWebhookEndpointStore,
   type WebhookDelivery,
-  type WebhookEndpointStore,
 } from '@openrai/webhook';
 import {
   createInvoiceStore,
@@ -30,7 +30,7 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-export type EventListener = (event: RaiFlowEvent) => void | Promise<void>;
+export type EventListener = (event: LegacyRaiFlowEvent) => void | Promise<void>;
 
 // ---------------------------------------------------------------------------
 // XNO → raw conversion
@@ -85,9 +85,9 @@ export function xnoToRaw(xno: string): string {
 // ---------------------------------------------------------------------------
 
 export interface RuntimeConfig {
-  invoiceStore?: InvoiceStore;
-  paymentStore?: PaymentStore;
-  eventStore?: EventStore;
+  invoiceStore?: LegacyInvoiceStore;
+  paymentStore?: LegacyPaymentStore;
+  eventStore?: LegacyEventStore;
   webhookEndpointStore?: WebhookEndpointStore;
   webhookDelivery?: WebhookDelivery;
   /** Interval in ms for the expiry checker. Default 10000 (10s). */
@@ -102,9 +102,9 @@ const TERMINAL_STATES = new Set<InvoiceStatus>(['completed', 'expired', 'cancele
 // ---------------------------------------------------------------------------
 
 export class Runtime implements WatcherSink {
-  readonly invoiceStore: InvoiceStore;
-  readonly paymentStore: PaymentStore;
-  readonly eventStore: EventStore;
+  readonly invoiceStore: LegacyInvoiceStore;
+  readonly paymentStore: LegacyPaymentStore;
+  readonly eventStore: LegacyEventStore;
   readonly webhookEndpointStore: WebhookEndpointStore;
 
   private readonly webhookDelivery: WebhookDelivery;
@@ -112,11 +112,10 @@ export class Runtime implements WatcherSink {
   private expiryTimer: ReturnType<typeof setInterval> | undefined;
   private readonly listeners = new Map<string, Set<EventListener>>();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(config: RuntimeConfig = {}) {
-    this.invoiceStore = (config.invoiceStore ?? createInvoiceStore()) as any;
-    this.paymentStore = (config.paymentStore ?? createPaymentStore()) as any;
-    this.eventStore = (config.eventStore ?? createEventStore()) as any;
+    this.invoiceStore = config.invoiceStore ?? createInvoiceStore();
+    this.paymentStore = config.paymentStore ?? createPaymentStore();
+    this.eventStore = config.eventStore ?? createEventStore();
     this.webhookEndpointStore =
       config.webhookEndpointStore ?? createWebhookEndpointStore();
     this.webhookDelivery = config.webhookDelivery ?? createWebhookDelivery();
@@ -164,7 +163,7 @@ export class Runtime implements WatcherSink {
       completionPolicy?: CompletionPolicy;
     },
     idempotencyKey?: string,
-  ): Promise<Invoice> {
+  ): Promise<LegacyInvoice> {
     const resolvedAmountRaw =
       params.expectedAmountRaw ??
       (params.expectedAmount !== undefined ? xnoToRaw(params.expectedAmount) : undefined);
@@ -173,7 +172,7 @@ export class Runtime implements WatcherSink {
       throw new Error('Either expectedAmountRaw or expectedAmount is required');
     }
 
-    const invoice: Invoice = {
+    const invoice: LegacyInvoice = {
       id: randomUUID(),
       status: 'open',
       currency: 'XNO',
@@ -204,23 +203,22 @@ export class Runtime implements WatcherSink {
     return stored;
   }
 
-  async getInvoice(id: string): Promise<Invoice | undefined> {
+  async getInvoice(id: string): Promise<LegacyInvoice | undefined> {
     return this.invoiceStore.get(id);
   }
 
-  async listInvoices(filter?: { status?: InvoiceStatus }): Promise<Invoice[]> {
+  async listInvoices(filter?: { status?: InvoiceStatus }): Promise<LegacyInvoice[]> {
     return this.invoiceStore.list(filter);
   }
 
-  async cancelInvoice(id: string): Promise<Invoice> {
+  async cancelInvoice(id: string): Promise<LegacyInvoice> {
     const invoice = await this.invoiceStore.get(id);
     if (invoice === undefined) {
-      throw Object.assign(new Error(`Invoice not found: ${id}`), { code: 'not_found' });
+      throw RaiFlowError.notFound('Invoice', id);
     }
     if (TERMINAL_STATES.has(invoice.status)) {
-      throw Object.assign(
-        new Error(`Invoice ${id} is already in terminal state: ${invoice.status}`),
-        { code: 'conflict' },
+      throw RaiFlowError.conflict(
+        `Invoice ${id} is already in terminal state: ${invoice.status}`,
       );
     }
 
@@ -371,7 +369,7 @@ export class Runtime implements WatcherSink {
   // Event emission
   // -------------------------------------------------------------------------
 
-  private async emitEvent(event: RaiFlowEvent): Promise<void> {
+  private async emitEvent(event: LegacyRaiFlowEvent): Promise<void> {
     await this.eventStore.append(event);
 
     // Notify local listeners (fire-and-forget).
@@ -380,7 +378,11 @@ export class Runtime implements WatcherSink {
       ...(this.listeners.get('*') ?? []),
     ];
     for (const fn of targets) {
-      try { void Promise.resolve(fn(event)).catch(() => {}); } catch { /* swallow sync throws */ }
+      try {
+        void Promise.resolve(fn(event)).catch(() => {});
+      } catch {
+        // Swallow sync throws from listener
+      }
     }
 
     const endpoints = await this.webhookEndpointStore.getByEventType(event.type);
