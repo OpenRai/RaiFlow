@@ -13,6 +13,6 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "@openrai/raiflow-sdk": "workspace:*",
-    "@openrai/nano-core": "^1.0.0"
+    "@openrai/nano-core": "link:../../../nano-core"
   }
 }

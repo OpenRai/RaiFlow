@@ -12,6 +12,7 @@
  * No external dependencies.
  */
 
+import { WsEndpointPool } from '@openrai/nano-core/transport/ws';
 import type { ConfirmedBlock, WatcherSink } from '@openrai/model';
 
 // ---------------------------------------------------------------------------
@@ -56,8 +57,8 @@ interface WsMessage {
 // ---------------------------------------------------------------------------
 
 export class NanoWebSocketClient {
-  private readonly url: string;
-  private readonly reconnectIntervalMs: number;
+  private readonly pool: WsEndpointPool;
+  private readonly baseReconnectIntervalMs: number;
   private readonly maxReconnectAttempts: number;
 
   private ws: WebSocket | null = null;
@@ -68,8 +69,11 @@ export class NanoWebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: NanoWebSocketConfig) {
-    this.url = config.url;
-    this.reconnectIntervalMs = config.reconnectIntervalMs ?? 5_000;
+    this.pool = new WsEndpointPool({
+      urls: [config.url],
+      defaults: [config.url],
+    });
+    this.baseReconnectIntervalMs = config.reconnectIntervalMs ?? 5_000;
     this.maxReconnectAttempts = config.maxReconnectAttempts ?? Infinity;
   }
 
@@ -121,18 +125,34 @@ export class NanoWebSocketClient {
   // Private: socket management
   // -------------------------------------------------------------------------
 
+  private getReconnectDelay(): number {
+    // Exponential backoff: base * 2^attempts, capped at some maximum
+    const delay = Math.min(
+      this.baseReconnectIntervalMs * Math.pow(1.5, this.reconnectAttempts),
+      60_000, // Max 60 seconds
+    );
+    return delay;
+  }
+
   private openSocket(): void {
+    void this.establishSocket();
+  }
+
+  private async establishSocket(): Promise<void> {
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = await this.pool.connect();
     } catch {
       this.scheduleReconnect();
       return;
     }
 
-    this.ws.addEventListener('open', () => {
-      this.reconnectAttempts = 0;
-      this.sendSubscription();
-    });
+    if (!this.ws) {
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.reconnectAttempts = 0;
+    this.sendSubscription();
 
     this.ws.addEventListener('message', (event: MessageEvent) => {
       this.handleMessage(event.data as string);
@@ -140,9 +160,7 @@ export class NanoWebSocketClient {
 
     this.ws.addEventListener('close', () => {
       this.ws = null;
-      if (!this.stopped) {
-        this.scheduleReconnect();
-      }
+      if (!this.stopped) this.scheduleReconnect();
     });
 
     this.ws.addEventListener('error', () => {
@@ -155,12 +173,15 @@ export class NanoWebSocketClient {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
 
     this.reconnectAttempts++;
+    const delay = this.getReconnectDelay();
+    console.debug(`[ws-client] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.stopped) {
         this.openSocket();
       }
-    }, this.reconnectIntervalMs);
+    }, delay);
   }
 
   private sendSubscription(): void {

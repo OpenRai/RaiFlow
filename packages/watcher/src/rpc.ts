@@ -1,15 +1,4 @@
-/**
- * @openrai/watcher — src/rpc.ts
- *
- * Minimal typed Nano RPC client using Node's built-in fetch.
- * Requires Node 18+ (fetch is available globally).
- *
- * No external dependencies.
- */
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
+import { HttpEndpointPool } from '@openrai/nano-core/transport/http';
 
 export interface NanoRpcConfig {
   url: string;
@@ -17,24 +6,16 @@ export interface NanoRpcConfig {
   timeoutMs?: number;
 }
 
-// ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
-
 export class NanoRpcError extends Error {
   constructor(
     message: string,
     public readonly code?: string,
-    public readonly cause?: unknown,
+    public override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'NanoRpcError';
   }
 }
-
-// ---------------------------------------------------------------------------
-// Response shapes (raw RPC)
-// ---------------------------------------------------------------------------
 
 interface RpcAccountInfoResponse {
   frontier: string;
@@ -50,8 +31,6 @@ export interface AccountInfo {
   representative: string;
   blockCount: string;
 }
-
-// ---------------------------------------------------------------------------
 
 interface RpcHistoryBlock {
   type: string;
@@ -74,7 +53,6 @@ export interface HistoryBlock {
   type: string;
   subtype?: string;
   account: string;
-  /** The link_as_account field (recipient for send blocks). */
   linkAsAccount?: string;
   amount: string;
   hash: string;
@@ -82,16 +60,12 @@ export interface HistoryBlock {
   localTimestamp?: string;
 }
 
-// ---------------------------------------------------------------------------
-
 interface RpcAccountsReceivableResponse {
   blocks: Record<string, string[]>;
   error?: string;
 }
 
 export type AccountsReceivable = Record<string, string[]>;
-
-// ---------------------------------------------------------------------------
 
 interface RpcBlockInfoResponse {
   block_account: string;
@@ -130,84 +104,47 @@ export interface BlockInfo {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
-
 export class NanoRpcClient {
-  private readonly url: string;
+  private readonly pool: HttpEndpointPool;
   private readonly timeoutMs: number;
 
   constructor(config: NanoRpcConfig) {
-    this.url = config.url;
     this.timeoutMs = config.timeoutMs ?? 15_000;
+    this.pool = new HttpEndpointPool({
+      kind: 'rpc',
+      urls: [config.url],
+      defaults: [config.url],
+      timeoutMs: this.timeoutMs,
+    });
   }
-
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
 
   private async post<T>(body: Record<string, unknown>): Promise<T> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    let response: Response;
     try {
-      response = await fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      return await this.pool.postJson<T>(body);
     } catch (err) {
-      const isAbort =
-        err instanceof Error && err.name === 'AbortError';
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const message = isAbort
+        ? `RPC request timed out after ${this.timeoutMs}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+
       throw new NanoRpcError(
-        isAbort ? `RPC request timed out after ${this.timeoutMs}ms` : `RPC fetch failed: ${String(err)}`,
-        isAbort ? 'TIMEOUT' : 'FETCH_ERROR',
+        isAbort ? message : `RPC request failed: ${message}`,
+        isAbort ? 'TIMEOUT' : 'RPC_ERROR',
         err,
       );
-    } finally {
-      clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      throw new NanoRpcError(
-        `RPC HTTP error ${response.status}: ${response.statusText}`,
-        `HTTP_${response.status}`,
-      );
-    }
-
-    let json: unknown;
-    try {
-      json = await response.json();
-    } catch (err) {
-      throw new NanoRpcError('Failed to parse RPC response as JSON', 'PARSE_ERROR', err);
-    }
-
-    return json as T;
   }
 
-  // -------------------------------------------------------------------------
-  // Public methods
-  // -------------------------------------------------------------------------
-
-  /**
-   * Fetch account info (frontier, balance, representative, block count).
-   * Returns `undefined` if the account is not found / unopened.
-   */
   async accountInfo(account: string): Promise<AccountInfo | undefined> {
     const raw = await this.post<RpcAccountInfoResponse>({
       action: 'account_info',
       account,
     });
 
-    if (raw.error === 'Account not found') {
-      return undefined;
-    }
-    if (raw.error) {
-      throw new NanoRpcError(`account_info error: ${raw.error}`, 'RPC_ERROR');
-    }
+    if (raw.error === 'Account not found') return undefined;
+    if (raw.error) throw new NanoRpcError(`account_info error: ${raw.error}`, 'RPC_ERROR');
 
     return {
       frontier: raw.frontier,
@@ -217,9 +154,6 @@ export class NanoRpcClient {
     };
   }
 
-  /**
-   * Fetch recent confirmed blocks for an account.
-   */
   async accountHistory(account: string, count: number): Promise<HistoryBlock[]> {
     const raw = await this.post<RpcAccountHistoryResponse>({
       action: 'account_history',
@@ -228,26 +162,20 @@ export class NanoRpcClient {
       raw: true,
     });
 
-    if (raw.error) {
-      throw new NanoRpcError(`account_history error: ${raw.error}`, 'RPC_ERROR');
-    }
+    if (raw.error) throw new NanoRpcError(`account_history error: ${raw.error}`, 'RPC_ERROR');
 
-    const history = raw.history ?? [];
-    return history.map((b) => ({
-      type: b.type,
-      subtype: b.subtype,
-      account: b.account,
-      linkAsAccount: b.link_as_account,
-      amount: b.amount,
-      hash: b.hash,
-      confirmed: b.confirmed === 'true' || b.confirmed === '1',
-      localTimestamp: b.local_timestamp,
+    return (raw.history ?? []).map((block) => ({
+      type: block.type,
+      subtype: block.subtype,
+      account: block.account,
+      linkAsAccount: block.link_as_account,
+      amount: block.amount,
+      hash: block.hash,
+      confirmed: block.confirmed === 'true' || block.confirmed === '1',
+      localTimestamp: block.local_timestamp,
     }));
   }
 
-  /**
-   * Fetch pending (receivable) block hashes for a list of accounts.
-   */
   async accountsReceivable(accounts: string[], count: number): Promise<AccountsReceivable> {
     const raw = await this.post<RpcAccountsReceivableResponse>({
       action: 'accounts_receivable',
@@ -256,16 +184,11 @@ export class NanoRpcClient {
       threshold: '1',
     });
 
-    if (raw.error) {
-      throw new NanoRpcError(`accounts_receivable error: ${raw.error}`, 'RPC_ERROR');
-    }
+    if (raw.error) throw new NanoRpcError(`accounts_receivable error: ${raw.error}`, 'RPC_ERROR');
 
     return raw.blocks ?? {};
   }
 
-  /**
-   * Fetch detailed info about a specific block.
-   */
   async blockInfo(hash: string): Promise<BlockInfo> {
     const raw = await this.post<RpcBlockInfoResponse>({
       action: 'block_info',
@@ -273,9 +196,7 @@ export class NanoRpcClient {
       hash,
     });
 
-    if (raw.error) {
-      throw new NanoRpcError(`block_info error: ${raw.error}`, 'RPC_ERROR');
-    }
+    if (raw.error) throw new NanoRpcError(`block_info error: ${raw.error}`, 'RPC_ERROR');
 
     return {
       blockAccount: raw.block_account,

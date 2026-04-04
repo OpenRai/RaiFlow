@@ -1,5 +1,8 @@
 // @openrai/rpc — Multi-node RPC, WebSocket, failover, and confirmation tracking
 
+import { HttpEndpointPool } from '@openrai/nano-core/transport/http';
+import { WsEndpointPool } from '@openrai/nano-core/transport/ws';
+import type { EndpointActivityEvent, EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock } from '@openrai/model';
 
 export interface RpcNodeConfig {
@@ -13,6 +16,7 @@ export interface RpcClient {
   accountsReceivable(account: string): Promise<Receivable[]>;
   process(block: string): Promise<ProcessResponse>;
   workGenerate(hash: string, difficulty?: string): Promise<WorkGenerateResponse>;
+  getAuditReport(): EndpointAuditRecord[];
 }
 
 export interface AccountInfoResponse {
@@ -42,6 +46,7 @@ export interface RpcPool {
   removeNode(rpcUrl: string): void;
   getActiveNode(): RpcClient | undefined;
   onStateChange(listener: (state: RpcPoolState) => void): () => void;
+  getAuditReport(): EndpointAuditRecord[];
 }
 
 export interface RpcPoolState {
@@ -50,215 +55,176 @@ export interface RpcPoolState {
   previousNode?: RpcNodeConfig;
 }
 
-async function jsonRpc<T>(url: string, method: string, params?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: method, ...params }),
-  });
-  if (!response.ok) {
-    throw new Error(`RPC error: ${response.status} ${response.statusText}`);
-  }
-  const data = await response.json() as { error?: string } & T;
-  if (data.error) {
-    throw new Error(`RPC error: ${data.error}`);
-  }
-  return data;
+function nodeFromRpcUrl(nodes: RpcNodeConfig[], rpcUrl: string): RpcNodeConfig | undefined {
+  return nodes.find((node) => node.rpc === rpcUrl);
 }
 
-class SingleNodeClient implements RpcClient {
-  constructor(private readonly url: string) {}
+class PooledRpcClient implements RpcClient {
+  constructor(private readonly pool: HttpEndpointPool) {}
 
   async accountInfo(account: string): Promise<AccountInfoResponse> {
-    return jsonRpc(this.url, 'account_info', { account, representative: true, confirmed: true }) as Promise<AccountInfoResponse>;
+    return this.pool.postJson<AccountInfoResponse>({
+      action: 'account_info',
+      account,
+      representative: true,
+      confirmed: true,
+    });
   }
 
   async accountsReceivable(account: string): Promise<Receivable[]> {
-    const response = await jsonRpc<{ blocks: Record<string, { amount: string; sender: string }> }>(
-      this.url,
-      'accounts_receivable',
-      { account, source: true, include_only_confirmed: false },
-    );
+    const response = await this.pool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
+      action: 'accounts_receivable',
+      account,
+      source: true,
+      include_only_confirmed: false,
+    });
+
     return Object.entries(response.blocks).map(([hash, block]) => ({
       hash,
-      amount: block.amount,
-      sender: block.sender,
+      amount: (block as { amount: string }).amount,
+      sender: (block as { sender: string }).sender,
     }));
   }
 
   async process(block: string): Promise<ProcessResponse> {
-    return jsonRpc(this.url, 'process', { block }) as Promise<ProcessResponse>;
+    return this.pool.postJson<ProcessResponse>({ action: 'process', block });
   }
 
   async workGenerate(hash: string, difficulty?: string): Promise<WorkGenerateResponse> {
-    const params: Record<string, unknown> = { hash };
-    if (difficulty) params['difficulty'] = difficulty;
-    return jsonRpc(this.url, 'work_generate', params) as Promise<WorkGenerateResponse>;
+    return this.pool.postJson<WorkGenerateResponse>({
+      action: 'work_generate',
+      hash,
+      ...(difficulty ? { difficulty } : {}),
+    });
+  }
+
+  getAuditReport(): EndpointAuditRecord[] {
+    return this.pool.getAuditReport();
   }
 }
 
 export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   const stateListeners = new Set<(state: RpcPoolState) => void>();
-  let activeIndex = -1;
   let currentState: RpcPoolState = { status: 'disconnected' };
+  const rpcPool = new HttpEndpointPool({
+    kind: 'rpc',
+    urls: nodes.map((node) => node.rpc),
+    defaults: nodes.map((node) => node.rpc),
+    onActiveEndpointChange(event: EndpointActivityEvent) {
+      if (event.kind !== 'rpc') return;
 
-  function sortByPriority(): number {
-    return [...nodes].sort((a, b) => b.priority - a.priority).findIndex((n) => n.rpc === nodes[activeIndex]?.rpc);
+      const activeNode = nodeFromRpcUrl(nodes, event.activeUrl);
+      const previousNode = event.previousUrl ? nodeFromRpcUrl(nodes, event.previousUrl) : undefined;
+      currentState = {
+        status: event.status,
+        ...(activeNode ? { activeNode } : {}),
+        ...(previousNode ? { previousNode } : {}),
+      };
+      for (const listener of stateListeners) listener(currentState);
+    },
+  });
+
+  function sortedNodes(): RpcNodeConfig[] {
+    return [...nodes].sort((a, b) => b.priority - a.priority);
   }
 
-  function setActive(index: number, prev?: RpcNodeConfig): void {
-    activeIndex = index;
-    currentState = {
-      status: index >= 0 ? 'connected' : 'disconnected',
-      activeNode: nodes[index],
-      previousNode: prev,
-    };
-    for (const listener of stateListeners) {
-      listener(currentState);
-    }
-  }
-
-  function init(): void {
-    const sorted = [...nodes].sort((a, b) => b.priority - a.priority);
-    const first = sorted[0];
-    if (first !== undefined) {
-      const idx = nodes.indexOf(first);
-      setActive(idx);
-    }
-  }
-
-  init();
-
-  async function healthCheck(url: string): Promise<boolean> {
-    try {
-      await jsonRpc<{ nickname?: string }>(url, 'version');
-      return true;
-    } catch {
-      return false;
-    }
+  function buildClient(): RpcClient {
+    return new PooledRpcClient(rpcPool);
   }
 
   return {
     getClient(): RpcClient {
-      const node = nodes[activeIndex];
-      if (!node) throw new Error('No active RPC node available');
-      return new SingleNodeClient(node.rpc);
+      return buildClient();
     },
 
     addNode(config: RpcNodeConfig): void {
       const existing = nodes.findIndex((n) => n.rpc === config.rpc);
-      if (existing >= 0) {
-        nodes[existing] = config;
-      } else {
-        nodes.push(config);
-      }
-      if (activeIndex < 0) {
-        const sorted = [...nodes].sort((a, b) => b.priority - a.priority);
-        const first = sorted[0];
-        if (first !== undefined) setActive(nodes.indexOf(first));
-      }
+      if (existing >= 0) nodes[existing] = config;
+      else nodes.push(config);
     },
 
     removeNode(rpcUrl: string): void {
       const idx = nodes.findIndex((n) => n.rpc === rpcUrl);
       if (idx < 0) return;
-      const prev = nodes[activeIndex];
       nodes.splice(idx, 1);
-      if (idx === activeIndex) {
-        if (nodes.length === 0) {
-          setActive(-1, prev);
-        } else {
-          const sorted = [...nodes].sort((a, b) => b.priority - a.priority);
-          const first = sorted[0];
-          setActive(first !== undefined ? nodes.indexOf(first) : -1, prev);
-        }
-      }
     },
 
     getActiveNode(): RpcClient | undefined {
-      const node = nodes[activeIndex];
-      return node ? new SingleNodeClient(node.rpc) : undefined;
+      if (!currentState.activeNode && nodes.length === 0) return undefined;
+      return buildClient();
     },
 
     onStateChange(listener: (state: RpcPoolState) => void): () => void {
       stateListeners.add(listener);
       return () => stateListeners.delete(listener);
     },
+
+    getAuditReport(): EndpointAuditRecord[] {
+      return rpcPool.getAuditReport();
+    },
   };
 }
 
 export interface WsClient {
-  connect(accounts: string[]): void;
+  connect(accounts: string[]): Promise<void>;
   disconnect(): void;
   addAccount(account: string): void;
   removeAccount(account: string): void;
   onConfirmation(listener: (block: ConfirmedBlock) => void): () => void;
+  getAuditReport(): EndpointAuditRecord[];
 }
 
 export function createWsClient(wsUrl: string): WsClient {
+  const pool = new WsEndpointPool({
+    urls: [wsUrl],
+    defaults: [wsUrl],
+  });
+
   let ws: WebSocket | null = null;
   const accounts = new Set<string>();
   const confirmationListeners = new Set<(block: ConfirmedBlock) => void>();
-  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function connect(): void {
-    if (ws) {
-      ws.close();
-    }
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      if (accounts.size > 0) {
-        const msg = {
-          action: 'subscribe',
-          topic: 'confirmation',
-          options: {
-            accounts: [...accounts],
-            include_block: true,
-          },
-        };
-        ws!.send(JSON.stringify(msg));
-      }
-    };
-
-    ws.onmessage = (event) => {
+  async function establish(): Promise<void> {
+    ws = await pool.connect();
+    const socket = ws;
+    if (!socket) throw new Error('WebSocket connection failed');
+    socket.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data as string) as Record<string, unknown>;
         if (msg.topic === 'confirmation' && msg.message) {
           const m = msg.message as Record<string, unknown>;
           const block = m.block as Record<string, unknown> | undefined;
-          if (block) {
-            const confirmedBlock: ConfirmedBlock = {
-              blockHash: block.hash as string,
-              senderAccount: (block.account as string) ?? '',
-              recipientAccount: (block.contents as string) ?? '',
-              amountRaw: m.amount as string,
-              confirmedAt: new Date().toISOString(),
-            };
-            for (const listener of confirmationListeners) {
-              listener(confirmedBlock);
-            }
-          }
+          if (!block) return;
+          const confirmedBlock: ConfirmedBlock = {
+            blockHash: block.hash as string,
+            senderAccount: (block.account as string) ?? '',
+            recipientAccount: (block.contents as string) ?? '',
+            amountRaw: m.amount as string,
+            confirmedAt: new Date().toISOString(),
+          };
+          for (const listener of confirmationListeners) listener(confirmedBlock);
         }
       } catch {
         // ignore parse errors
       }
     };
-
-    ws.onclose = () => {
-      ws = null;
-      reconnectTimer = setTimeout(connect, 5000);
-    };
   }
 
   return {
-    connect(accounts_: string[]): void {
-      for (const a of accounts_) accounts.add(a);
-      connect();
+    async connect(accounts_: string[]): Promise<void> {
+      for (const account of accounts_) accounts.add(account);
+      await establish();
+
+      if (ws && accounts.size > 0) {
+        ws.send(JSON.stringify({
+          action: 'subscribe',
+          topic: 'confirmation',
+          options: { accounts: [...accounts], include_block: true },
+        }));
+      }
     },
 
     disconnect(): void {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
       ws = null;
     },
@@ -288,6 +254,10 @@ export function createWsClient(wsUrl: string): WsClient {
     onConfirmation(listener: (block: ConfirmedBlock) => void): () => void {
       confirmationListeners.add(listener);
       return () => confirmationListeners.delete(listener);
+    },
+
+    getAuditReport(): EndpointAuditRecord[] {
+      return pool.getAuditReport();
     },
   };
 }

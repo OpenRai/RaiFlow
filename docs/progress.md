@@ -62,6 +62,14 @@ Building in order:
 3. Publish service (pre-signed blocks)
 4. Work generation API
 
+Current frontier:
+- RaiFlow `packages/rpc` now consumes the local `@openrai/nano-core` transport pools instead of maintaining its own HTTP/WebSocket transport primitives.
+- The workspace is temporarily linked to the sibling `../nano-core` checkout so transport/auth work can land and be validated end-to-end before publish.
+- RaiFlow `packages/watcher` RPC polling and WebSocket observation now also consume the local `@openrai/nano-core` transport pools.
+- `nano-core` defaults now reflect the April 2026 endpoint policy: four default RPC endpoints, `wss://rpc.nano.to` for WS, and `https://rpc.nano.to` as the only default public work endpoint.
+- `packages/rpc` now derives `connected` and `failover` state changes from the shared transport foundation rather than maintaining a disconnected placeholder view of active node state.
+- Next transport follow-up is to persist and surface infrastructure events like `rpc.connected` and `rpc.failover` through the runtime once the legacy event adapter no longer constrains non-invoice event types.
+
 Exit criterion: can create a managed account, derive addresses, send XNO, query send status.
 
 ---

@@ -18,7 +18,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@openrai/model": "workspace:*"
+    "@openrai/model": "workspace:*",
+    "@openrai/nano-core": "link:../../../nano-core"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
