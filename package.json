@@ -11,12 +11,16 @@
     "site:dev": "pnpm --filter @openrai/site docs:dev",
     "site:build": "pnpm --filter @openrai/site docs:build",
     "site:preview": "pnpm --filter @openrai/site docs:preview",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish --filter @openrai/model --filter @openrai/webhook --filter @openrai/raiflow-sdk",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "format": "pnpm -r format"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.29.6",
     "typescript": "^5.8.2"
   }
 }
