@@ -3,9 +3,9 @@ Use Changesets for published packages in this workspace.
 Typical flow:
 
 1. Create a changeset with `pnpm changeset`
-2. Merge to `main`
-3. GitHub Actions opens or updates the release PR
-4. Merging that PR publishes changed public packages via npm Trusted Publisher
+2. Apply version bumps, create a commit, and create package tags with `pnpm release:version`
+3. Push the commit and tags with `git push && git push --tags`
+4. GitHub Actions publishes the tagged public packages via npm Trusted Publisher
 
 Published packages currently managed this way:
 

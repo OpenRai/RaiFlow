@@ -1,6 +1,6 @@
 {
   "name": "@openrai/raiflow-sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Business runtime SDK for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",

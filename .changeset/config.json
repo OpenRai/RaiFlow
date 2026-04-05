@@ -16,9 +16,9 @@
     "@openrai/storage",
     "@openrai/watcher",
     "@openrai/site",
-    "express-api",
-    "htmx-wallet",
-    "next-checkout",
-    "webhook-consumer"
+    "express-api-example",
+    "htmx-wallet-demo",
+    "next-checkout-example",
+    "webhook-consumer-example"
   ]
 }
