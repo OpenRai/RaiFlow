@@ -13,6 +13,7 @@
     "site:preview": "pnpm --filter @openrai/site docs:preview",
     "changeset": "changeset",
     "version-packages": "changeset version",
+    "release:version": "node ./scripts/release-version.mjs",
     "release": "changeset publish --filter @openrai/model --filter @openrai/webhook --filter @openrai/raiflow-sdk",
     "build": "pnpm -r build",
     "test": "pnpm -r test",

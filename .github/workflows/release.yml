@@ -2,11 +2,13 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - '@openrai/model@*'
+      - '@openrai/webhook@*'
+      - '@openrai/raiflow-sdk@*'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
   id-token: write
 
 jobs:
@@ -37,10 +39,5 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Create release PR or publish
-        uses: changesets/action@v1
-        with:
-          version: pnpm version-packages
-          publish: pnpm release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish package
+        run: pnpm release

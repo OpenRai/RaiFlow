@@ -178,3 +178,35 @@ The repo already contains the foundation needed for that runtime:
 - custody primitives
 
 What remains is the hard part that matters most to users: finishing the domain services and exposing them coherently through the runtime API.
+
+## Release Flow
+
+RaiFlow uses a solo-developer Changesets flow for the public packages in this workspace:
+
+- `@openrai/model`
+- `@openrai/webhook`
+- `@openrai/raiflow-sdk`
+
+Local package development stays on `workspace:*` links, including the examples, so in-repo changes are exercised without publishing prereleases.
+
+Typical release steps:
+
+1. Add a changeset:
+
+```bash
+pnpm changeset
+```
+
+2. Apply the version bumps, create a release commit, and create one tag per bumped package:
+
+```bash
+pnpm release:version
+```
+
+3. Push the commit and tags:
+
+```bash
+git push && git push --tags
+```
+
+GitHub Actions then builds, tests, and publishes tagged packages from `.github/workflows/release.yml` using npm Trusted Publisher.
