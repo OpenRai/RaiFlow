@@ -1,6 +1,6 @@
 {
   "name": "@openrai/webhook",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": false,
   "description": "Webhook signing, verification, and delivery helpers for RaiFlow",
   "repository": "https://github.com/OpenRai/RaiFlow",
