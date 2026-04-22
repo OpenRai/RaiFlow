@@ -26,9 +26,10 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+          registry-url: https://registry.npmjs.org
 
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@latest
+      - name: Install npm 11 for OIDC support
+        run: npm install -g npm@11
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -39,7 +40,25 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Publish package
-        run: pnpm release
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      - name: Resolve package directory from tag
+        id: package
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            @openrai/model@*)
+              echo "dir=packages/model" >> "$GITHUB_OUTPUT"
+              ;;
+            @openrai/webhook@*)
+              echo "dir=packages/webhook" >> "$GITHUB_OUTPUT"
+              ;;
+            @openrai/raiflow-sdk@*)
+              echo "dir=packages/raiflow-sdk" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported release tag: ${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Publish tagged package
+        working-directory: ${{ steps.package.outputs.dir }}
+        run: npm publish --access public --provenance
