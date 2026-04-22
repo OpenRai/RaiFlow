@@ -14,5 +14,6 @@
     "react-dom": "^18.3.0",
     "@openrai/raiflow-sdk": "workspace:*",
     "@openrai/nano-core": "2.1.0"
-  }
+  },
+  "private": true
 }

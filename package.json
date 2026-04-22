@@ -14,7 +14,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release:version": "node ./scripts/release-version.mjs",
-    "release": "changeset publish --filter @openrai/model --filter @openrai/webhook --filter @openrai/raiflow-sdk",
+    "release": "changeset publish",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",

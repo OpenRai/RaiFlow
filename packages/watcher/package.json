@@ -1,7 +1,7 @@
 {
   "name": "@openrai/watcher",
   "version": "0.0.1",
-  "private": false,
+  "private": true,
   "description": "Chain observation and confirmation tracking for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",

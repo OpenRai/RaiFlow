@@ -10,5 +10,6 @@
   "dependencies": {
     "express": "^4.19.0",
     "@openrai/raiflow-sdk": "workspace:*"
-  }
+  },
+  "private": true
 }

@@ -1,7 +1,7 @@
 {
   "name": "@openrai/runtime",
   "version": "0.0.1",
-  "private": false,
+  "private": true,
   "description": "Payment expectation and event runtime for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",

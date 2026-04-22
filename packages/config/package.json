@@ -1,7 +1,7 @@
 {
   "name": "@openrai/config",
   "version": "0.0.1",
-  "private": false,
+  "private": true,
   "description": "YAML config loader, env resolution, and typed config for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",

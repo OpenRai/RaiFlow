@@ -1,7 +1,7 @@
 {
   "name": "@openrai/storage",
   "version": "0.0.1",
-  "private": false,
+  "private": true,
   "description": "Persistent data access layer for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",

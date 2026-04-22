@@ -1,7 +1,7 @@
 {
   "name": "@openrai/custody",
   "version": "0.0.1",
-  "private": false,
+  "private": true,
   "description": "Seed, derivation, signing, PoW, and frontier operations for RaiFlow",
   "type": "module",
   "main": "./dist/index.js",
