@@ -24,9 +24,11 @@
   },
   "dependencies": {
     "@openrai/config": "workspace:*",
+    "@openrai/custody": "workspace:*",
     "@openrai/events": "workspace:*",
     "@openrai/model": "workspace:*",
     "@openrai/nano-core": "2.1.0",
+    "@openrai/rpc": "workspace:*",
     "@openrai/storage": "workspace:*",
     "@openrai/webhook": "workspace:*"
   },

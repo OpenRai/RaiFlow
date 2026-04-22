@@ -13,6 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
 import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
+import { createRpcPool } from '@openrai/rpc';
+import { createCustodyEngine } from '@openrai/custody';
+import { Watcher } from '@openrai/watcher';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
 import { createRuntimeMetrics } from './monitoring.js';
@@ -130,16 +133,73 @@ const webhookStore = createSqliteWebhookStore(db);
 const legacyEventStore = createLegacySqliteEventStore(eventStore);
 
 // ---------------------------------------------------------------------------
-// Runtime (prototype — still uses legacy model, being replaced in later slices)
+// RPC pool
+// ---------------------------------------------------------------------------
+
+let rpcPool = createRpcPool([]);
+if (config.nano.rpc.length > 0 || config.nano.ws.length > 0 || config.nano.work.length > 0) {
+  rpcPool = createRpcPool([{
+    rpc: config.nano.rpc,
+    ws: config.nano.ws,
+    work: config.nano.work,
+  }]);
+  logger.info('rpc pool initialized', `rpc=${config.nano.rpc.length} ws=${config.nano.ws.length} work=${config.nano.work.length}`);
+}
+
+// ---------------------------------------------------------------------------
+// Custody engine
+// ---------------------------------------------------------------------------
+
+let custodyEngine: ReturnType<typeof createCustodyEngine> | undefined;
+if (config.custody) {
+  custodyEngine = createCustodyEngine({
+    seed: config.custody.seed,
+    representative: config.custody.representative,
+    derivationStartIndex: { invoice: 0, managed: 0 },
+  });
+  custodyEngine.loadSeed(config.custody.seed);
+  logger.info('custody engine initialized');
+}
+
+// ---------------------------------------------------------------------------
+// Runtime
 // ---------------------------------------------------------------------------
 
 const runtime = new Runtime({
   invoiceStore: invoiceStore as any,
   paymentStore: paymentStore as any,
   eventStore: legacyEventStore as any,
+  v2EventStore: eventStore,
   webhookEndpointStore: webhookStore as any,
+  accountStore,
+  sendStore,
+  custodyEngine,
+  rpcPool,
   expiryIntervalMs: 10_000,
 });
+
+// ---------------------------------------------------------------------------
+// Watcher
+// ---------------------------------------------------------------------------
+
+const watcher = new Watcher({
+  wsUrl: config.nano.ws[0],
+  rpcUrl: config.nano.rpc[0],
+  accounts: [],
+  sink: runtime,
+  pollIntervalMs: 5000,
+});
+
+// Seed watcher with existing accounts
+const existingAccounts = await accountStore.list();
+for (const acc of existingAccounts) {
+  watcher.addAccount(acc.address);
+}
+
+runtime.watcher = watcher;
+watcher.start();
+logger.info('watcher started', `accounts=${existingAccounts.length}`);
+
 runtime.start();
 logger.info('runtime started');
 

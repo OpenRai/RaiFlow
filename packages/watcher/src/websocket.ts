@@ -244,8 +244,8 @@ export class NanoWebSocketClient {
     const recipient = block.link_as_account;
     if (!recipient) return;
 
-    // Filter to only the accounts we're watching.
-    if (!this.watchedAccounts.has(recipient)) return;
+    // Filter to only the accounts we're watching (incoming or outgoing).
+    if (!this.watchedAccounts.has(recipient) && !this.watchedAccounts.has(msg.account)) return;
 
     const confirmedBlock: ConfirmedBlock = {
       blockHash: msg.hash,

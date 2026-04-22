@@ -175,6 +175,9 @@ importers:
       '@openrai/config':
         specifier: workspace:*
         version: link:../config
+      '@openrai/custody':
+        specifier: workspace:*
+        version: link:../custody
       '@openrai/events':
         specifier: workspace:*
         version: link:../events
@@ -184,6 +187,9 @@ importers:
       '@openrai/nano-core':
         specifier: 2.1.0
         version: 2.1.0
+      '@openrai/rpc':
+        specifier: workspace:*
+        version: link:../rpc
       '@openrai/storage':
         specifier: workspace:*
         version: link:../storage

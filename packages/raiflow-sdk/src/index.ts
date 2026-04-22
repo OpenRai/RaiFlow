@@ -1,10 +1,20 @@
 export { RaiFlowClient, type RaiFlowClientOptions } from './client.js';
 export {
+  AccountsResource,
+  type CreateManagedAccountOptions,
+  type CreateWatchedAccountOptions,
+  type ListAccountsOptions,
+} from './resources/Accounts.js';
+export {
   InvoicesResource,
   type CreateInvoiceOptions,
   type ListInvoicesOptions,
   type ListEventsOptions,
 } from './resources/Invoices.js';
+export {
+  SendsResource,
+  type QueueSendOptions,
+} from './resources/Sends.js';
 export {
   WebhooksResource,
   type CreateWebhookOptions,
@@ -27,6 +37,8 @@ export type {
   WebhookEndpoint,
   CreateInvoiceRequest,
   CreateAccountRequest,
+  WatchAccountRequest,
+  UpdateAccountRequest,
   SendRequest,
   PublishBlockRequest,
   WorkGenerateRequest,

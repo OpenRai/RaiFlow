@@ -13,8 +13,18 @@ import type {
   LegacyEventStore,
   LegacyRaiFlowEvent,
   WebhookEndpointStore,
+  Account,
+  AccountStore,
+  AccountType,
+  Send,
+  SendStore,
+  RaiFlowEvent,
+  EventStore,
 } from '@openrai/model';
 import { RaiFlowError } from '@openrai/model';
+import { NanoAddress } from '@openrai/nano-core';
+import type { CustodyEngine } from '@openrai/custody';
+import type { RpcPool } from '@openrai/rpc';
 import {
   createWebhookDelivery,
   createWebhookEndpointStore,
@@ -25,12 +35,18 @@ import {
   createPaymentStore,
   createEventStore,
 } from './stores.js';
+import { SendOrchestrator } from './send-orchestrator.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type EventListener = (event: LegacyRaiFlowEvent) => void | Promise<void>;
+
+export interface WatcherLike {
+  addAccount(account: string): void;
+  removeAccount(account: string): void;
+}
 
 // ---------------------------------------------------------------------------
 // XNO → raw conversion
@@ -88,10 +104,16 @@ export interface RuntimeConfig {
   invoiceStore?: LegacyInvoiceStore;
   paymentStore?: LegacyPaymentStore;
   eventStore?: LegacyEventStore;
+  v2EventStore?: EventStore;
   webhookEndpointStore?: WebhookEndpointStore;
   webhookDelivery?: WebhookDelivery;
   /** Interval in ms for the expiry checker. Default 10000 (10s). */
   expiryIntervalMs?: number;
+  accountStore?: AccountStore;
+  sendStore?: SendStore;
+  custodyEngine?: CustodyEngine;
+  rpcPool?: RpcPool;
+  watcher?: WatcherLike;
 }
 
 /** States that cannot be transitioned out of. */
@@ -106,27 +128,50 @@ export class Runtime implements WatcherSink {
   readonly paymentStore: LegacyPaymentStore;
   readonly eventStore: LegacyEventStore;
   readonly webhookEndpointStore: WebhookEndpointStore;
+  readonly accountStore?: AccountStore;
+  readonly sendStore?: SendStore;
+  readonly custodyEngine?: CustodyEngine;
+  readonly rpcPool?: RpcPool;
 
+  private readonly v2EventStore?: EventStore;
   private readonly webhookDelivery: WebhookDelivery;
   private readonly expiryIntervalMs: number;
   private expiryTimer: ReturnType<typeof setInterval> | undefined;
   private readonly listeners = new Map<string, Set<EventListener>>();
+  private readonly sendOrchestrator?: SendOrchestrator;
+  watcher?: WatcherLike;
 
   constructor(config: RuntimeConfig = {}) {
     this.invoiceStore = config.invoiceStore ?? createInvoiceStore();
     this.paymentStore = config.paymentStore ?? createPaymentStore();
     this.eventStore = config.eventStore ?? createEventStore();
+    this.v2EventStore = config.v2EventStore;
     this.webhookEndpointStore =
       config.webhookEndpointStore ?? createWebhookEndpointStore();
     this.webhookDelivery = config.webhookDelivery ?? createWebhookDelivery();
     this.expiryIntervalMs = config.expiryIntervalMs ?? 10_000;
+    this.accountStore = config.accountStore;
+    this.sendStore = config.sendStore;
+    this.custodyEngine = config.custodyEngine;
+    this.rpcPool = config.rpcPool;
+    this.watcher = config.watcher;
+
+    if (this.sendStore && this.accountStore && this.custodyEngine && this.rpcPool) {
+      this.sendOrchestrator = new SendOrchestrator(
+        this.sendStore,
+        this.accountStore,
+        this.custodyEngine,
+        this.rpcPool,
+        (event) => this.emitV2Event(event),
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  /** Start the expiry scheduler. */
+  /** Start the expiry scheduler and send orchestrator. */
   start(): void {
     if (this.expiryTimer !== undefined) return;
     this.expiryTimer = setInterval(() => {
@@ -136,14 +181,16 @@ export class Runtime implements WatcherSink {
     if (typeof this.expiryTimer === 'object' && this.expiryTimer !== null && 'unref' in this.expiryTimer) {
       (this.expiryTimer as NodeJS.Timeout).unref();
     }
+    this.sendOrchestrator?.start();
   }
 
-  /** Stop the expiry scheduler and shut down webhook delivery. */
+  /** Stop the expiry scheduler, send orchestrator, and shut down webhook delivery. */
   stop(): void {
     if (this.expiryTimer !== undefined) {
       clearInterval(this.expiryTimer);
       this.expiryTimer = undefined;
     }
+    this.sendOrchestrator?.stop();
     this.webhookDelivery.shutdown();
   }
 
@@ -238,6 +285,204 @@ export class Runtime implements WatcherSink {
   }
 
   // -------------------------------------------------------------------------
+  // Account management
+  // -------------------------------------------------------------------------
+
+  async createManagedAccount(params: {
+    label?: string;
+    representative?: string;
+    idempotencyKey?: string;
+  }): Promise<Account> {
+    if (!this.custodyEngine) {
+      throw RaiFlowError.badRequest('Custody engine not configured');
+    }
+    if (!this.accountStore) {
+      throw RaiFlowError.badRequest( 'Account store not configured');
+    }
+
+    const nextIndex = await this.getNextManagedDerivationIndex();
+    const address = this.custodyEngine.deriveManagedAccount({ index: nextIndex });
+
+    const account: Account = {
+      id: randomUUID(),
+      type: 'managed',
+      address,
+      label: params.label ?? null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: params.representative ?? null,
+      derivationIndex: nextIndex,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.accountStore.create(account);
+    this.watcher?.addAccount(account.address);
+
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'account.created',
+      timestamp: new Date().toISOString(),
+      data: { account },
+      resourceId: account.id,
+      resourceType: 'account',
+    });
+
+    return account;
+  }
+
+  async createWatchedAccount(params: {
+    address: string;
+    label?: string;
+  }): Promise<Account> {
+    if (!this.accountStore) {
+      throw RaiFlowError.badRequest( 'Account store not configured');
+    }
+
+    // Validate address format
+    try {
+      NanoAddress.parse(params.address);
+    } catch {
+      throw RaiFlowError.badRequest( `Invalid Nano address: ${params.address}`);
+    }
+
+    // Idempotency by address
+    const existing = await this.accountStore.getByAddress(params.address);
+    if (existing) {
+      return existing;
+    }
+
+    const account: Account = {
+      id: randomUUID(),
+      type: 'watched',
+      address: params.address,
+      label: params.label ?? null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.accountStore.create(account);
+    this.watcher?.addAccount(account.address);
+
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'account.created',
+      timestamp: new Date().toISOString(),
+      data: { account },
+      resourceId: account.id,
+      resourceType: 'account',
+    });
+
+    return account;
+  }
+
+  async listAccounts(filter?: { type?: AccountType }): Promise<Account[]> {
+    if (!this.accountStore) return [];
+    return this.accountStore.list(filter);
+  }
+
+  async getAccount(id: string): Promise<Account | undefined> {
+    if (!this.accountStore) return undefined;
+    return this.accountStore.get(id);
+  }
+
+  async updateAccount(id: string, patch: { label?: string; representative?: string }): Promise<Account> {
+    if (!this.accountStore) {
+      throw RaiFlowError.badRequest( 'Account store not configured');
+    }
+    const existing = await this.accountStore.get(id);
+    if (!existing) {
+      throw RaiFlowError.notFound('Account', id);
+    }
+    const updated = await this.accountStore.update(id, patch);
+    return updated;
+  }
+
+  // -------------------------------------------------------------------------
+  // Send management
+  // -------------------------------------------------------------------------
+
+  async queueSend(params: {
+    accountId: string;
+    destination: string;
+    amountRaw: string;
+    idempotencyKey: string;
+  }): Promise<Send> {
+    if (!this.accountStore || !this.sendStore) {
+      throw RaiFlowError.badRequest( 'Send store not configured');
+    }
+
+    // Look up account
+    const account = await this.accountStore.get(params.accountId);
+    if (!account) {
+      throw RaiFlowError.notFound('Account', params.accountId);
+    }
+    if (account.type !== 'managed') {
+      throw RaiFlowError.conflict('Only managed accounts can queue sends');
+    }
+
+    // Validate destination address
+    try {
+      NanoAddress.parse(params.destination);
+    } catch {
+      throw RaiFlowError.badRequest( `Invalid destination address: ${params.destination}`);
+    }
+
+    // Validate amount
+    if (!/^\d+$/.test(params.amountRaw) || BigInt(params.amountRaw) <= 0n) {
+      throw RaiFlowError.badRequest( 'amountRaw must be a positive numeric string');
+    }
+
+    // Check idempotency
+    const existing = await this.sendStore.getByIdempotencyKey(params.idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
+    const send: Send = {
+      id: randomUUID(),
+      accountId: params.accountId,
+      destination: params.destination,
+      amountRaw: params.amountRaw,
+      status: 'queued',
+      blockHash: null,
+      idempotencyKey: params.idempotencyKey,
+      createdAt: new Date().toISOString(),
+      publishedAt: null,
+      confirmedAt: null,
+    };
+
+    await this.sendStore.create(send);
+
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'send.queued',
+      timestamp: new Date().toISOString(),
+      data: { send },
+      resourceId: send.id,
+      resourceType: 'send',
+    });
+
+    return send;
+  }
+
+  async listSendsByAccount(accountId: string): Promise<Send[]> {
+    if (!this.sendStore) return [];
+    return this.sendStore.listByAccount(accountId);
+  }
+
+  async getSend(id: string): Promise<Send | undefined> {
+    if (!this.sendStore) return undefined;
+    return this.sendStore.get(id);
+  }
+
+  // -------------------------------------------------------------------------
   // Payment / event queries
   // -------------------------------------------------------------------------
 
@@ -271,7 +516,47 @@ export class Runtime implements WatcherSink {
   // -------------------------------------------------------------------------
 
   async handleConfirmedBlock(block: ConfirmedBlock): Promise<void> {
-    // Idempotency guard: if we already processed this block, skip.
+    // --- Send confirmation tracking ---
+    if (this.sendStore) {
+      const send = await this.sendStore.getByBlockHash(block.blockHash);
+      if (send && send.status === 'published') {
+        const confirmed = await this.sendStore.update(send.id, {
+          status: 'confirmed',
+          confirmedAt: block.confirmedAt,
+        });
+
+        await this.emitV2Event({
+          id: randomUUID(),
+          type: 'send.confirmed',
+          timestamp: new Date().toISOString(),
+          data: { send: confirmed },
+          resourceId: confirmed.id,
+          resourceType: 'send',
+        });
+      }
+    }
+
+    // --- Account balance update for incoming receives ---
+    if (this.accountStore) {
+      const account = await this.accountStore.getByAddress(block.recipientAccount);
+      if (account) {
+        const newBalanceRaw = (BigInt(account.balanceRaw) + BigInt(block.amountRaw)).toString();
+        const updated = await this.accountStore.update(account.id, {
+          balanceRaw: newBalanceRaw,
+        });
+
+        await this.emitV2Event({
+          id: randomUUID(),
+          type: 'account.balance_updated',
+          timestamp: new Date().toISOString(),
+          data: { account: updated, previousBalanceRaw: account.balanceRaw },
+          resourceId: updated.id,
+          resourceType: 'account',
+        });
+      }
+    }
+
+    // Idempotency guard: if we already processed this block for invoice matching, skip.
     const existingPayment = await this.paymentStore.getByBlockHash(block.blockHash);
     if (existingPayment !== undefined) {
       return;
@@ -387,5 +672,41 @@ export class Runtime implements WatcherSink {
 
     const endpoints = await this.webhookEndpointStore.getByEventType(event.type);
     await this.webhookDelivery.deliver(event, endpoints);
+  }
+
+  private async emitV2Event(event: RaiFlowEvent): Promise<void> {
+    if (this.v2EventStore) {
+      await this.v2EventStore.append(event);
+    }
+
+    // Notify local listeners (fire-and-forget).
+    const targets = [
+      ...(this.listeners.get(event.type as RaiFlowEventType) ?? []),
+      ...(this.listeners.get('*') ?? []),
+    ];
+    for (const fn of targets) {
+      try {
+        void Promise.resolve(fn(event as unknown as LegacyRaiFlowEvent)).catch(() => {});
+      } catch {
+        // Swallow sync throws from listener
+      }
+    }
+
+    const endpoints = await this.webhookEndpointStore.getByEventType(event.type);
+    await this.webhookDelivery.deliver(event, endpoints);
+  }
+
+  // -------------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------------
+
+  private async getNextManagedDerivationIndex(): Promise<number> {
+    if (!this.accountStore) return 0;
+    const managed = await this.accountStore.list({ type: 'managed' });
+    const maxIndex = managed.reduce((max, acc) =>
+      acc.derivationIndex !== null && acc.derivationIndex > max ? acc.derivationIndex : max,
+      -1,
+    );
+    return maxIndex + 1;
   }
 }

@@ -57,16 +57,17 @@ packages/
 **M3 — Wallet Domain** — *in progress*
 
 Building in order:
-1. Accounts service (managed + watched)
-2. Sends service (idempotent, state machine)
+1. ✅ Accounts service (managed + watched)
+2. ✅ Sends service (idempotent, state machine)
 3. Publish service (pre-signed blocks)
 4. Work generation API
 
 Current frontier:
-- RaiFlow `packages/rpc` now consumes the local `@openrai/nano-core` transport pools instead of maintaining its own HTTP/WebSocket transport primitives.
-- RaiFlow `packages/watcher` RPC polling and WebSocket observation now also consume the local `@openrai/nano-core` transport pools.
-- `nano-core` defaults now reflect the April 2026 endpoint policy: four default RPC endpoints, `wss://rpc.nano.to` for WS, and `https://rpc.nano.to` as the only default public work endpoint.
-- `packages/rpc` now derives `connected` and `failover` state changes from the shared transport foundation rather than maintaining a disconnected placeholder view of active node state.
+- Account and Send resources are exposed through the runtime HTTP API and the `@openrai/raiflow-sdk` package.
+- `SendOrchestrator` drives the non-anemic send lifecycle: `queued` → `published` → `confirmed`/`failed`.
+- The runtime wires `accountStore`, `sendStore`, `custodyEngine`, `rpcPool`, and `Watcher` together in `main.ts`.
+- `Watcher` now forwards confirmations for both incoming (recipient match) and outgoing (sender match) blocks.
+- `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
 - Next transport follow-up is to persist and surface infrastructure events like `rpc.connected` and `rpc.failover` through the runtime once the legacy event adapter no longer constrains non-invoice event types.
 
 Exit criterion: can create a managed account, derive addresses, send XNO, query send status.

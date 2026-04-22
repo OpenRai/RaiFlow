@@ -553,8 +553,18 @@ export function createSqliteSendStore(db: Database): SendStore {
       return row ? rowToSend(row) : undefined;
     },
 
+    async getByBlockHash(hash: string): Promise<Send | undefined> {
+      const row = db.prepare('SELECT * FROM sends WHERE block_hash = ?').get(hash) as Record<string, unknown> | undefined;
+      return row ? rowToSend(row) : undefined;
+    },
+
     async listByAccount(accountId: string): Promise<Send[]> {
       const rows = db.prepare('SELECT * FROM sends WHERE account_id = ? ORDER BY created_at DESC').all(accountId) as Record<string, unknown>[];
+      return rows.map(rowToSend);
+    },
+
+    async listByStatus(status: SendStatus): Promise<Send[]> {
+      const rows = db.prepare('SELECT * FROM sends WHERE status = ? ORDER BY created_at DESC').all(status) as Record<string, unknown>[];
       return rows.map(rowToSend);
     },
 

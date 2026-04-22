@@ -87,6 +87,162 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   }
 
   // ---------------------------------------------------------------------------
+  // Accounts
+  // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'accounts') {
+    // POST /accounts
+    if (method === 'POST' && parts.length === 1) {
+      const body = await req.json() as Record<string, unknown>;
+      const { type, label, representative, address, idempotencyKey } = body;
+
+      if (type !== 'managed' && type !== 'watched') {
+        return errorResponse('Missing or invalid field: type (must be "managed" or "watched")', 'bad_request', 400);
+      }
+
+      try {
+        if (type === 'managed') {
+          const account = await runtime.createManagedAccount({
+            label: typeof label === 'string' ? label : undefined,
+            representative: typeof representative === 'string' ? representative : undefined,
+            idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+          });
+          return json(account, 201);
+        } else {
+          if (typeof address !== 'string') {
+            return errorResponse('Missing required field for watched account: address', 'bad_request', 400);
+          }
+          const account = await runtime.createWatchedAccount({
+            address,
+            label: typeof label === 'string' ? label : undefined,
+          });
+          return json(account, 201);
+        }
+      } catch (err) {
+        if (isErrorWithCode(err)) {
+          if (err.code === 'bad_request') {
+            return errorResponse(err.message, 'bad_request', 400);
+          }
+          if (err.code === 'conflict') {
+            return errorResponse(err.message, 'conflict', 409);
+          }
+        }
+        throw err;
+      }
+    }
+
+    // GET /accounts
+    if (method === 'GET' && parts.length === 1) {
+      const typeParam = url.searchParams.get('type') ?? undefined;
+      const filter = typeParam !== undefined
+        ? { type: typeParam as 'managed' | 'watched' }
+        : undefined;
+      const accounts = await runtime.listAccounts(filter);
+      return json({ data: accounts });
+    }
+
+    if (parts.length >= 2) {
+      const accountId = parts[1]!;
+
+      // GET /accounts/:id
+      if (method === 'GET' && parts.length === 2) {
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        return json(account);
+      }
+
+      // PATCH /accounts/:id
+      if (method === 'PATCH' && parts.length === 2) {
+        const body = await req.json() as Record<string, unknown>;
+        const patch: { label?: string; representative?: string } = {};
+        if (typeof body.label === 'string') patch.label = body.label;
+        if (typeof body.representative === 'string') patch.representative = body.representative;
+
+        try {
+          const account = await runtime.updateAccount(accountId, patch);
+          return json(account);
+        } catch (err) {
+          if (isErrorWithCode(err)) {
+            if (err.code === 'not_found') {
+              return errorResponse(err.message, 'not_found', 404);
+            }
+            if (err.code === 'bad_request') {
+              return errorResponse(err.message, 'bad_request', 400);
+            }
+          }
+          throw err;
+        }
+      }
+
+      // POST /accounts/:id/sends
+      if (method === 'POST' && parts.length === 3 && parts[2] === 'sends') {
+        const body = await req.json() as Record<string, unknown>;
+        const { destination, amountRaw, idempotencyKey } = body;
+
+        if (typeof destination !== 'string' || typeof amountRaw !== 'string' || typeof idempotencyKey !== 'string') {
+          return errorResponse(
+            'Missing required fields: destination, amountRaw, idempotencyKey',
+            'bad_request',
+            400,
+          );
+        }
+
+        try {
+          const send = await runtime.queueSend({
+            accountId,
+            destination,
+            amountRaw,
+            idempotencyKey,
+          });
+          return json(send, 201);
+        } catch (err) {
+          if (isErrorWithCode(err)) {
+            if (err.code === 'not_found') {
+              return errorResponse(err.message, 'not_found', 404);
+            }
+            if (err.code === 'bad_request') {
+              return errorResponse(err.message, 'bad_request', 400);
+            }
+            if (err.code === 'conflict') {
+              return errorResponse(err.message, 'conflict', 409);
+            }
+          }
+          throw err;
+        }
+      }
+
+      // GET /accounts/:id/sends
+      if (method === 'GET' && parts.length === 3 && parts[2] === 'sends') {
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        const sends = await runtime.listSendsByAccount(accountId);
+        return json({ data: sends });
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sends (global)
+  // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'sends' && parts.length === 2) {
+    const sendId = parts[1]!;
+
+    // GET /sends/:id
+    if (method === 'GET') {
+      const send = await runtime.getSend(sendId);
+      if (send === undefined) {
+        return errorResponse(`Send not found: ${sendId}`, 'not_found', 404);
+      }
+      return json(send);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Invoices
   // ---------------------------------------------------------------------------
 

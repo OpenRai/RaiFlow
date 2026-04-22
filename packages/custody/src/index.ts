@@ -34,17 +34,20 @@ export interface CustodyEngine {
     destination: string,
     amountRaw: string,
     previousFrontier: string,
+    derivationIndex?: number,
   ): Promise<SignedBlock>;
   signReceive(
     account: string,
     sourceHash: string,
     amountRaw: string,
     previousFrontier: string,
+    derivationIndex?: number,
   ): Promise<SignedBlock>;
   signChange(
     account: string,
     representative: string,
     previousFrontier: string,
+    derivationIndex?: number,
   ): Promise<SignedBlock>;
   generateWork(hash: string): Promise<string>;
 }
@@ -114,9 +117,10 @@ export function createCustodyEngine(
       destination: string,
       amountRaw: string,
       previousFrontier: string,
+      derivationIndex?: number,
     ): Promise<SignedBlock> {
       if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, nextManagedIndex);
+      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
 
       const block = createBlock(secretKey, {
         previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,
@@ -140,9 +144,10 @@ export function createCustodyEngine(
       sourceHash: string,
       amountRaw: string,
       previousFrontier: string,
+      derivationIndex?: number,
     ): Promise<SignedBlock> {
       if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, nextManagedIndex);
+      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
 
       const block = createBlock(secretKey, {
         previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,
@@ -165,9 +170,10 @@ export function createCustodyEngine(
       _account: string,
       representative: string,
       previousFrontier: string,
+      derivationIndex?: number,
     ): Promise<SignedBlock> {
       if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, nextManagedIndex);
+      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
 
       const block = createBlock(secretKey, {
         previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,

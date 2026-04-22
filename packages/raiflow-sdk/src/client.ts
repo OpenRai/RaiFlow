@@ -1,4 +1,6 @@
+import { AccountsResource } from './resources/Accounts.js';
 import { InvoicesResource } from './resources/Invoices.js';
+import { SendsResource } from './resources/Sends.js';
 import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
 
@@ -10,7 +12,9 @@ export interface RaiFlowClientOptions {
 }
 
 export class RaiFlowClient {
+  public accounts: AccountsResource;
   public invoices: InvoicesResource;
+  public sends: SendsResource;
   public system: SystemResource;
   public webhooks: WebhooksResource;
 
@@ -20,7 +24,9 @@ export class RaiFlowClient {
   private constructor(options: RaiFlowClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
+    this.accounts = new AccountsResource(this);
     this.invoices = new InvoicesResource(this);
+    this.sends = new SendsResource(this);
     this.system = new SystemResource(this);
     this.webhooks = new WebhooksResource(this);
   }

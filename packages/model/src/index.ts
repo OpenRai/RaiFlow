@@ -375,7 +375,9 @@ export interface AccountStore {
 export interface SendStore {
   create(send: Send): Promise<Send>;
   get(id: string): Promise<Send | undefined>;
+  getByBlockHash(hash: string): Promise<Send | undefined>;
   listByAccount(accountId: string): Promise<Send[]>;
+  listByStatus(status: SendStatus): Promise<Send[]>;
   getByIdempotencyKey(key: string): Promise<Send | undefined>;
   update(id: string, patch: Partial<Send>): Promise<Send>;
 }
