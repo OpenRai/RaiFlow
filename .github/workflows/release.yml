@@ -29,8 +29,8 @@ jobs:
 
       - name: Upgrade npm for OIDC support
         run: |
-          npm install -g npm@latest
-          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
+          pnpm add -g npm@latest
+          echo "$(pnpm bin -g)" >> $GITHUB_PATH
 
       - name: Verify npm version
         run: npm --version
