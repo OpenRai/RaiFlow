@@ -12,6 +12,7 @@ rfcs
 .github
 coverage
 /raiflow.yml
+!packages/runtime/docker/raiflow.yml
 *.tgz
 .DS_Store
 .turbo
