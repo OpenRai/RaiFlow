@@ -28,7 +28,9 @@ jobs:
           cache: pnpm
 
       - name: Upgrade npm for OIDC support
-        run: npm install -g npm@latest
+        run: |
+          corepack enable
+          corepack prepare npm@latest --activate
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
