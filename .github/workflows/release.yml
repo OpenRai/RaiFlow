@@ -29,8 +29,11 @@ jobs:
 
       - name: Upgrade npm for OIDC support
         run: |
-          sudo npm install -g npm@latest
-          npm --version
+          npm install -g npm@latest
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
+
+      - name: Verify npm version
+        run: npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
