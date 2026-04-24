@@ -29,8 +29,14 @@ jobs:
 
       - name: Upgrade npm for OIDC support
         run: |
-          corepack enable
-          corepack prepare npm@latest --activate
+          sudo npm install -g npm@latest
+          npm --version
+
+      - name: Configure npm for OIDC
+        run: |
+          npm config set //registry.npmjs.org/:aud=https://github.com/OpenRai
+          # Ensure no lingering auth config exists that might block OIDC
+          npm config delete //registry.npmjs.org/:_authToken
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -59,9 +65,6 @@ jobs:
               exit 1
               ;;
           esac
-
-      - name: Verify npm version for OIDC
-        run: npm --version
 
       - name: Publish tagged package
         working-directory: ${{ steps.package.outputs.dir }}
