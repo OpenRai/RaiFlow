@@ -290,6 +290,8 @@ RaiFlow uses a solo-developer Changesets flow for the public packages in this wo
 - `@openrai/webhook`
 - `@openrai/raiflow-sdk`
 
+Those three published packages release in lockstep and share the same version on each repo release. `@openrai/nano-core` remains separate in its own repository and release line.
+
 Local package development stays on `workspace:*` links, including the examples, so in-repo changes are exercised without publishing prereleases.
 
 Typical release steps:
