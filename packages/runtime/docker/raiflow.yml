@@ -1,0 +1,28 @@
+daemon:
+  host: "0.0.0.0"
+  port: 3100
+  # apiKey: auto-generated if RAIFLOW_API_KEY is unset
+
+nano:
+  rpc:
+    - "env:NANO_RPC_URL"
+  ws: []
+  work: []
+
+invoices:
+  defaultExpirySeconds: 3600
+  autoSweep: false
+
+storage:
+  driver: "sqlite"
+  path: "/data/raiflow.db"
+
+webhooks: []
+
+logging:
+  level: "info"
+  format: "json"
+
+# custody:
+#   seed: "env:RAIFLOW_CUSTODY_SEED"
+#   representative: "env:RAIFLOW_CUSTODY_REP"
