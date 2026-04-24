@@ -1,6 +1,7 @@
 {
   "name": "@openrai/raiflow-sdk",
   "version": "1.2.0",
+  "private": false,
   "description": "Business runtime SDK for RaiFlow",
   "repository": "https://github.com/OpenRai/RaiFlow",
   "type": "module",
@@ -11,6 +12,12 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",

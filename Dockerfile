@@ -2,17 +2,32 @@
 FROM node:22-bookworm AS builder
 RUN corepack enable && corepack prepare pnpm@10 --activate
 WORKDIR /app
-# Copy workspace root files first (layer caching)
+
+# Copy workspace root files
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
-# Copy all package.json files for dependency install
-COPY packages/*/package.json ./packages/*/
-# Install all dependencies (including dev for build)
+
+# Copy all package.json files to maintain workspace structure for dependency install
+COPY packages/config/package.json ./packages/config/
+COPY packages/custody/package.json ./packages/custody/
+COPY packages/events/package.json ./packages/events/
+COPY packages/model/package.json ./packages/model/
+COPY packages/raiflow-sdk/package.json ./packages/raiflow-sdk/
+COPY packages/rpc/package.json ./packages/rpc/
+COPY packages/runtime/package.json ./packages/runtime/
+COPY packages/storage/package.json ./packages/storage/
+COPY packages/watcher/package.json ./packages/watcher/
+COPY packages/webhook/package.json ./packages/webhook/
+
+# Install all dependencies
 RUN pnpm install --frozen-lockfile
+
 # Copy source
 COPY packages/ ./packages/
+
 # Build all packages
 RUN pnpm -r build
-# Remove dev dependencies for production image
+
+# Remove dev dependencies
 RUN pnpm prune --prod
 
 # Stage 2: Runtime
