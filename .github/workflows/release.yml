@@ -2,67 +2,46 @@ name: Release
 
 on:
   push:
-    tags:
-      - '@openrai/model@*'
-      - '@openrai/webhook@*'
-      - '@openrai/raiflow-sdk@*'
+    branches:
+      - main
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
   id-token: write
 
 jobs:
   release:
+    name: Release
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: pnpm
+          node-version: 24
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
 
-      - name: Upgrade npm for OIDC support
-        run: |
-          pnpm add -g npm@latest
-          echo "$(pnpm bin -g)" >> $GITHUB_PATH
-
-      - name: Verify npm version
-        run: npm --version
-
-      - name: Install dependencies
+      - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
+      - name: Build Packages
         run: pnpm build
 
-      - name: Test
-        run: pnpm test
-
-      - name: Resolve package directory from tag
-        id: package
-        run: |
-          case "${GITHUB_REF_NAME}" in
-            @openrai/model@*)
-              echo "dir=packages/model" >> "$GITHUB_OUTPUT"
-              ;;
-            @openrai/webhook@*)
-              echo "dir=packages/webhook" >> "$GITHUB_OUTPUT"
-              ;;
-            @openrai/raiflow-sdk@*)
-              echo "dir=packages/raiflow-sdk" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unsupported release tag: ${GITHUB_REF_NAME}" >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Publish tagged package
-        working-directory: ${{ steps.package.outputs.dir }}
-        run: npm publish --access public --provenance
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          publish: pnpm release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

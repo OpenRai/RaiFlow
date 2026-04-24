@@ -13,18 +13,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": [
-    "@openrai/config",
-    "@openrai/custody",
-    "@openrai/events",
-    "@openrai/rpc",
-    "@openrai/runtime",
-    "@openrai/storage",
-    "@openrai/watcher",
-    "@openrai/site",
-    "express-api-example",
-    "htmx-wallet-demo",
-    "next-checkout-example",
-    "webhook-consumer-example"
-  ]
+  "ignore": []
 }
