@@ -1,8 +1,8 @@
 # RaiFlow
 
-RaiFlow is the runtime layer Nano app developers should have had from the start.
+RaiFlow is the runtime layer [Nano](https://nano.org/) app developers should have had from the start.
 
-Your app should not be hand-rolling around raw Nano JSON-RPC. It should not be tracking confirmations itself, juggling WebSocket state, building blocks, managing frontiers, generating work, sweeping receivables, or inventing its own event plumbing every time.
+Your app should not have to be thinking in terms of library calls that just map to raw Nano JSON-RPC. It should not be tracking confirmations itself, juggling WebSocket state, building blocks, managing frontiers, generating work, sweeping receivables, or inventing its own event plumbing every time.
 
 RaiFlow sits between your app and one or more Nano nodes and turns that low-level mess into an application-facing runtime.
 
