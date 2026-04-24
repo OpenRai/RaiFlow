@@ -24,6 +24,10 @@ RUN pnpm install --frozen-lockfile
 # Copy source
 COPY packages/ ./packages/
 
+# Copy the docker-specific config explicitly to ensure it is in the builder context
+# (This helps verify it exists and makes it available for stage 2 if we use --from=builder)
+COPY packages/runtime/docker/raiflow.yml ./packages/runtime/docker/raiflow.yml
+
 # Build all packages
 RUN pnpm -r build
 
@@ -38,7 +42,7 @@ COPY --from=builder /app/node_modules/ ./node_modules/
 COPY --from=builder /app/packages/ ./packages/
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
 # Embedded default config for Docker (all secrets via env:)
-COPY packages/runtime/docker/raiflow.yml /app/raiflow.yml
+COPY --from=builder /app/packages/runtime/docker/raiflow.yml /app/raiflow.yml
 # Data volume for SQLite and API key
 VOLUME /data
 ENV NODE_ENV=production
