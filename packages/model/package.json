@@ -1,6 +1,6 @@
 {
   "name": "@openrai/model",
-  "version": "0.1.4",
+  "version": "1.2.0",
   "private": false,
   "description": "Canonical shared types and schemas for RaiFlow",
   "repository": "https://github.com/OpenRai/RaiFlow",
