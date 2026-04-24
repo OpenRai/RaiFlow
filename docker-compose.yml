@@ -1,0 +1,16 @@
+services:
+  raiflow:
+    image: ghcr.io/openrai/raiflow:latest
+    restart: unless-stopped
+    environment:
+      NANO_RPC_URL: "https://rpc.nano.org"
+      # RAIFLOW_API_KEY:        # optional; auto-generated if unset
+      # RAIFLOW_CUSTODY_SEED:   # required only for managed accounts
+      # RAIFLOW_CUSTODY_REP:    # required only for managed accounts
+    volumes:
+      - raiflow-data:/data
+    ports:
+      - "127.0.0.1:3100:3100"  # Bind to localhost only — do NOT expose to public internet
+
+volumes:
+  raiflow-data:

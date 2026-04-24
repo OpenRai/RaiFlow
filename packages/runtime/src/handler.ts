@@ -49,9 +49,32 @@ function getPathSegment(
  * const response = await handler(request);
  * ```
  */
-export function createHandler(runtime: Runtime): (req: Request) => Promise<Response> {
+function checkAuth(req: Request, apiKey?: string): Response | undefined {
+  if (!apiKey) return undefined;
+
+  const url = new URL(req.url, 'http://localhost');
+  const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
+  const method = req.method.toUpperCase();
+
+  if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
+    return undefined;
+  }
+
+  const authHeader = req.headers.get('authorization') ?? '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match || match[1] !== apiKey) {
+    return errorResponse('Unauthorized', 'unauthorized', 401);
+  }
+
+  return undefined;
+}
+
+export function createHandler(runtime: Runtime, apiKey?: string): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
+      const authFailure = checkAuth(req, apiKey);
+      if (authFailure) return authFailure;
+
       return await route(req, runtime);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';

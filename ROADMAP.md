@@ -94,8 +94,8 @@ Current active build focus:
 - [ ] Restart recovery and in-flight operation resumption
 - [ ] Integration tests against a Nano test environment
 - [ ] Security review for seed handling, auth, webhook verification, and send safety
-- [ ] Docker image
-- [ ] Deployment documentation
+- [x] Docker image
+- [x] Deployment documentation
 
 ## Replacement Note
 

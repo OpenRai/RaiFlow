@@ -85,8 +85,8 @@ nano:
   # work: ["env:NANO_WORK_URL"]
 
 # custody:
-#   seed: "env:RAIFLOW_SEED"
-#   representative: "env:RAIFLOW_REPRESENTATIVE"
+#   seed: "env:RAIFLOW_CUSTODY_SEED"
+#   representative: "env:RAIFLOW_CUSTODY_REP"
 
 storage:
   driver: "sqlite"

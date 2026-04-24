@@ -44,6 +44,69 @@ async function parseJson(res: Response): Promise<unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+describe('auth middleware', () => {
+  it('allows all requests when apiKey is not provided', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const res = await handler(req('GET', '/invoices'));
+    expect(res.status).toBe(200);
+  });
+
+  it('exempts GET /health from auth', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/health'));
+    expect(res.status).toBe(200);
+    expect(await parseJson(res)).toEqual({ status: 'ok' });
+  });
+
+  it('returns 401 for missing Authorization header when apiKey is set', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/invoices'));
+    expect(res.status).toBe(401);
+    const body = await parseJson(res) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('unauthorized');
+  });
+
+  it('returns 401 for invalid Bearer token', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/invoices', {
+      headers: { Authorization: 'Bearer wrong-key' },
+    }));
+    expect(res.status).toBe(401);
+    const body = await parseJson(res) as { error: { code: string } };
+    expect(body.error.code).toBe('unauthorized');
+  });
+
+  it('allows authenticated requests with correct Bearer token', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/invoices', {
+      headers: { Authorization: 'Bearer secret-key' },
+    }));
+    expect(res.status).toBe(200);
+  });
+
+  it('protects dashboard route when apiKey is set', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/'));
+    expect(res.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 

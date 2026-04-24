@@ -68,6 +68,7 @@ Current frontier:
 - The runtime wires `accountStore`, `sendStore`, `custodyEngine`, `rpcPool`, and `Watcher` together in `main.ts`.
 - `Watcher` now forwards confirmations for both incoming (recipient match) and outgoing (sender match) blocks.
 - `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
+- Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime auto-generates and enforces API keys.
 - Next transport follow-up is to persist and surface infrastructure events like `rpc.connected` and `rpc.failover` through the runtime once the legacy event adapter no longer constrains non-invoice event types.
 
 Exit criterion: can create a managed account, derive addresses, send XNO, query send status.

@@ -19,6 +19,7 @@ import { Watcher } from '@openrai/watcher';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
 import { createRuntimeMetrics } from './monitoring.js';
+import { resolveApiKey } from './auth.js';
 import {
   createLegacySqliteEventStore,
   createLegacySqliteInvoiceStore,
@@ -204,10 +205,23 @@ runtime.start();
 logger.info('runtime started');
 
 // ---------------------------------------------------------------------------
+// API Key
+// ---------------------------------------------------------------------------
+
+const { apiKey, source } = resolveApiKey(config);
+if (source === 'config') {
+  logger.info('api key loaded from config');
+} else if (source === 'file') {
+  logger.info('api key loaded from file');
+} else {
+  logger.info('api key auto-generated');
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
-const handle = createHandler(runtime);
+const handle = createHandler(runtime, apiKey);
 
 // ---------------------------------------------------------------------------
 // HTTP server

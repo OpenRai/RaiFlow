@@ -35,6 +35,6 @@ logging:
 
 # Optional custody config for managed-account features:
 # custody:
-#   seed: "env:RAIFLOW_SEED"
+#   seed: "env:RAIFLOW_CUSTODY_SEED"
 #   # Required when custody is enabled. RaiFlow does not default this from nano-core.
-#   representative: "env:RAIFLOW_REPRESENTATIVE"
+#   representative: "env:RAIFLOW_CUSTODY_REP"

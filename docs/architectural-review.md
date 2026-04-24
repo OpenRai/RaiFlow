@@ -239,7 +239,7 @@ nano:
   work: []
 
 custody:
-  seed: "env:RAIFLOW_SEED"
+  seed: "env:RAIFLOW_CUSTODY_SEED"
   representative: "nano_1rep..."
 
 invoices:
