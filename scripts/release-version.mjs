@@ -35,14 +35,14 @@ function getSingleReleaseVersion(versions, label) {
 }
 
 const before = readVersions();
-const beforeVersion = getSingleReleaseVersion(before, 'before versioning');
+const beforeVersions = [...new Set(before.values())];
 
 run('pnpm', ['changeset', 'version']);
 
 const after = readVersions();
 const afterVersion = getSingleReleaseVersion(after, 'after versioning');
 
-if (beforeVersion === afterVersion) {
+if (beforeVersions.length === 1 && beforeVersions[0] === afterVersion) {
   console.log('[release-version] No package versions changed.');
   process.exit(0);
 }
