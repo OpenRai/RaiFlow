@@ -11,7 +11,7 @@ rfcs
 .kilo
 .github
 coverage
-/raiflow.yml
+raiflow.yml
 !packages/runtime/docker/raiflow.yml
 *.tgz
 .DS_Store
