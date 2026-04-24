@@ -60,6 +60,9 @@ jobs:
               ;;
           esac
 
+      - name: Verify npm version for OIDC
+        run: npm --version
+
       - name: Publish tagged package
         working-directory: ${{ steps.package.outputs.dir }}
-        run: npm publish --access public --provenance
+        run: pnpm publish --access public --provenance --no-git-checks
