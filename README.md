@@ -1,3 +1,6 @@
+> [!IMPORTANT]  
+> This project is still under heavy development. The vision is set, but the API & SDK is still not stable. Please don't use for production quite yet. 
+
 # RaiFlow
 
 RaiFlow is the runtime layer [Nano](https://nano.org/) app developers should have had from the start.
