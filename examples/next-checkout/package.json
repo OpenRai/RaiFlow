@@ -1,6 +1,6 @@
 {
   "name": "next-checkout-example",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reference Next.js checkout integration for RaiFlow",
   "type": "module",
   "scripts": {
