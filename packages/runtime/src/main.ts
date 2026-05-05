@@ -7,8 +7,9 @@
 // Configuration via YAML file (default: ./raiflow.yml) or RAIFLOW_CONFIG_PATH env var.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
 import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, type Database } from '@openrai/storage';
@@ -74,15 +75,7 @@ if (!config.daemon.mode) {
 
 const mode = config.daemon.mode;
 
-if (mode === 'custodial' && !config.custody) {
-  console.error(
-    [
-      '[raiflow] CUSTODIAL mode requires custody.seed and custody.representative.',
-      'Set RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP, or add them to raiflow.yml.',
-    ].join('\n'),
-  );
-  process.exit(1);
-}
+// Custody auto-generation happens after dbPath is resolved (below).
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -145,6 +138,40 @@ logger.info('migrations applied', appliedMigrations.join(', '));
 
 const metrics = createRuntimeMetrics({ dbPath, migrations: appliedMigrations });
 (globalThis as { __RAIFLOW_METRICS__?: ReturnType<typeof createRuntimeMetrics> }).__RAIFLOW_METRICS__ = metrics;
+
+// ---------------------------------------------------------------------------
+// Custody auto-generation (custodial mode)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_REPRESENTATIVE = 'nano_3kqdiqmqiojr1aqqj51aq8bzz5jtwnkmhb38qwf3ppngo8uhhzkdkn7up7rp';
+
+if (mode === 'custodial' && !config.custody) {
+  const seedPath = resolve(dirname(dbPath), 'custody-seed.txt');
+  let seed: string;
+
+  if (existsSync(seedPath)) {
+    seed = readFileSync(seedPath, 'utf-8').trim();
+    logger.info('custody seed loaded from', seedPath);
+  } else {
+    seed = randomBytes(32).toString('hex');
+    const seedDir = dirname(seedPath);
+    if (!existsSync(seedDir)) {
+      mkdirSync(seedDir, { recursive: true });
+    }
+    writeFileSync(seedPath, seed, { encoding: 'utf-8', mode: 0o600 });
+    logger.info('custody seed generated and saved to', seedPath);
+  }
+
+  config = {
+    ...config,
+    custody: {
+      seed,
+      representative: DEFAULT_REPRESENTATIVE,
+    },
+  };
+  (globalThis as { __RAIFLOW_CONFIG__?: RaiFlowConfig }).__RAIFLOW_CONFIG__ = config;
+  logger.info('using default representative', DEFAULT_REPRESENTATIVE);
+}
 
 // ---------------------------------------------------------------------------
 // Stores (wire through events system)
