@@ -25,6 +25,7 @@ import { RaiFlowError } from '@openrai/model';
 import { NanoAddress } from '@openrai/nano-core';
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
+import type { RunMode } from '@openrai/config';
 import {
   createWebhookDelivery,
   createWebhookEndpointStore,
@@ -114,6 +115,7 @@ export interface RuntimeConfig {
   custodyEngine?: CustodyEngine;
   rpcPool?: RpcPool;
   watcher?: WatcherLike;
+  mode?: RunMode;
 }
 
 /** States that cannot be transitioned out of. */
@@ -132,6 +134,7 @@ export class Runtime implements WatcherSink {
   readonly sendStore?: SendStore;
   readonly custodyEngine?: CustodyEngine;
   readonly rpcPool?: RpcPool;
+  readonly mode: RunMode;
 
   private readonly v2EventStore?: EventStore;
   private readonly webhookDelivery: WebhookDelivery;
@@ -142,6 +145,7 @@ export class Runtime implements WatcherSink {
   watcher?: WatcherLike;
 
   constructor(config: RuntimeConfig = {}) {
+    this.mode = config.mode ?? 'custodial';
     this.invoiceStore = config.invoiceStore ?? createInvoiceStore();
     this.paymentStore = config.paymentStore ?? createPaymentStore();
     this.eventStore = config.eventStore ?? createEventStore();
@@ -211,6 +215,12 @@ export class Runtime implements WatcherSink {
     },
     idempotencyKey?: string,
   ): Promise<LegacyInvoice> {
+    if (this.mode === 'non-custodial') {
+      throw RaiFlowError.badRequest(
+        'Invoices are not available in non-custodial mode',
+      );
+    }
+
     const resolvedAmountRaw =
       params.expectedAmountRaw ??
       (params.expectedAmount !== undefined ? xnoToRaw(params.expectedAmount) : undefined);
@@ -293,6 +303,11 @@ export class Runtime implements WatcherSink {
     representative?: string;
     idempotencyKey?: string;
   }): Promise<Account> {
+    if (this.mode === 'non-custodial') {
+      throw RaiFlowError.badRequest(
+        'Managed accounts are not available in non-custodial mode',
+      );
+    }
     if (!this.custodyEngine) {
       throw RaiFlowError.badRequest('Custody engine not configured');
     }
@@ -414,6 +429,11 @@ export class Runtime implements WatcherSink {
     amountRaw: string;
     idempotencyKey: string;
   }): Promise<Send> {
+    if (this.mode === 'non-custodial') {
+      throw RaiFlowError.badRequest(
+        'Sends are not available in non-custodial mode. Use POST /blocks to publish pre-signed blocks.',
+      );
+    }
     if (!this.accountStore || !this.sendStore) {
       throw RaiFlowError.badRequest( 'Send store not configured');
     }

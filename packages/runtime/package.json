@@ -13,8 +13,7 @@
     }
   },
   "bin": {
-    "raiflow": "./dist/main.js",
-    "show-api-key": "./dist/show-api-key.js"
+    "raiflow": "./dist/main.js"
   },
   "scripts": {
     "build": "tsc",

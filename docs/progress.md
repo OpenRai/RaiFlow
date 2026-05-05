@@ -90,6 +90,9 @@ These decisions are settled and should not be re-litigated without strong new ev
 9. **SQLite default, PostgreSQL later** — single-file zero-dependency default, swap via adapter.
 10. **YAML config with `env:` references** — no hardcoded values, no surprising runtime env var injection.
 11. **Web standard Request/Response** — framework-agnostic HTTP handler. No Express/Hono/Fastify dependency in the core runtime.
+12. **Startup mode enforcement** — `RAIFLOW_MODE` is required at boot (`custodial` or `non-custodial`). Mode gates which features are available. Custodial mode requires custody config.
+13. **API key is developer-provided** — `RAIFLOW_API_KEY` is required. No auto-generation, no hidden files. The developer picks their own key.
+14. **PoW is invisible to the developer** — RaiFlow absorbs work generation, signing, and frontier management. Low-level escape hatches (`WorkResource`, `BlocksResource`) exist only for non-custodial pre-signed flows.
 
 ---
 

@@ -1,34 +1,40 @@
 import { AccountsResource } from './resources/Accounts.js';
+import { BlocksResource } from './resources/Blocks.js';
 import { InvoicesResource } from './resources/Invoices.js';
 import { SendsResource } from './resources/Sends.js';
 import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
+import { WorkResource } from './resources/Work.js';
 
 export interface RaiFlowClientOptions {
   /** Base URL of the RaiFlow runtime (e.g. "http://localhost:3000") */
   baseUrl: string;
-  /** Optional API key for authentication (sent as Bearer token) */
-  apiKey?: string;
+  /** API key for authentication (sent as Bearer token) */
+  apiKey: string;
 }
 
 export class RaiFlowClient {
   public accounts: AccountsResource;
+  public blocks: BlocksResource;
   public invoices: InvoicesResource;
   public sends: SendsResource;
   public system: SystemResource;
   public webhooks: WebhooksResource;
+  public work: WorkResource;
 
   private readonly baseUrl: string;
-  private readonly apiKey?: string;
+  private readonly apiKey: string;
 
   private constructor(options: RaiFlowClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
     this.accounts = new AccountsResource(this);
+    this.blocks = new BlocksResource(this);
     this.invoices = new InvoicesResource(this);
     this.sends = new SendsResource(this);
     this.system = new SystemResource(this);
     this.webhooks = new WebhooksResource(this);
+    this.work = new WorkResource(this);
   }
 
   public static initialize(options: RaiFlowClientOptions): RaiFlowClient {
@@ -47,7 +53,7 @@ export class RaiFlowClient {
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        Authorization: `Bearer ${this.apiKey}`,
         ...headers,
       },
     };

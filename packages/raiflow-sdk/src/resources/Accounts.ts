@@ -1,4 +1,4 @@
-import type { Account, UpdateAccountRequest } from '@openrai/model';
+import type { Account, Receivable, UpdateAccountRequest } from '@openrai/model';
 import type { RaiFlowClient } from '../client.js';
 
 export interface CreateManagedAccountOptions {
@@ -47,5 +47,9 @@ export class AccountsResource {
 
   async update(id: string, patch: UpdateAccountRequest): Promise<Account> {
     return this.client.request<Account>('PATCH', `/accounts/${id}`, patch);
+  }
+
+  async receivable(id: string): Promise<{ data: Receivable[] }> {
+    return this.client.request<{ data: Receivable[] }>('GET', `/accounts/${id}/receivable`);
   }
 }

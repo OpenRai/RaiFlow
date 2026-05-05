@@ -1,7 +1,8 @@
 daemon:
   host: "0.0.0.0"
   port: 3100
-  # apiKey: auto-generated if RAIFLOW_API_KEY is unset
+  mode: "env:RAIFLOW_MODE"
+  apiKey: "env:RAIFLOW_API_KEY"
 
 nano:
   rpc:
