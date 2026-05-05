@@ -1,22 +1,21 @@
 # RaiFlow Configuration
 #
-# This file is intentionally minimal and should boot locally as-is.
-# Optional subsystems like custody, webhooks, and auto-sweep can be added later.
-# All string values may use env:VARIABLE_NAME references.
+# REQUIRED: Set RAIFLOW_MODE and RAIFLOW_API_KEY before starting.
+#   RAIFLOW_MODE=custodial or RAIFLOW_MODE=non-custodial
+#   RAIFLOW_API_KEY=your-secret-key
+#
+# This file is intentionally minimal. All values below have sane defaults.
 
 daemon:
   host: "0.0.0.0"
   port: 3100
-  # apiKey: "env:RAIFLOW_API_KEY"
+  # mode: "env:RAIFLOW_MODE"        # required: "custodial" or "non-custodial"
+  # apiKey: "env:RAIFLOW_API_KEY"    # required
 
 nano:
-  rpc: []
+  rpc: ["env:NANO_RPC_URL"]          # required: at least one Nano node RPC
   ws: []
   work: []
-  # Optional overrides. When omitted, RaiFlow falls back to nano-core defaults for RPC/WS/work.
-  # rpc: ["env:NANO_RPC_URL"]
-  # ws: ["env:NANO_WS_URL"]
-  # work: ["env:NANO_WORK_URL"]
 
 invoices:
   defaultExpirySeconds: 3600
@@ -33,8 +32,7 @@ logging:
   level: "info"
   format: "pretty"
 
-# Optional custody config for managed-account features:
+# Required for custodial mode:
 # custody:
 #   seed: "env:RAIFLOW_CUSTODY_SEED"
-#   # Required when custody is enabled. RaiFlow does not default this from nano-core.
 #   representative: "env:RAIFLOW_CUSTODY_REP"

@@ -123,6 +123,14 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         return errorResponse('Missing or invalid field: type (must be "managed" or "watched")', 'bad_request', 400);
       }
 
+      if (type === 'managed' && runtime.mode === 'non-custodial') {
+        return errorResponse(
+          'Managed accounts are not available in non-custodial mode. Use type "watched" instead.',
+          'not_implemented',
+          501,
+        );
+      }
+
       try {
         if (type === 'managed') {
           const account = await runtime.createManagedAccount({
@@ -201,6 +209,14 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
 
       // POST /accounts/:id/sends
       if (method === 'POST' && parts.length === 3 && parts[2] === 'sends') {
+        if (runtime.mode === 'non-custodial') {
+          return errorResponse(
+            'Sends are not available in non-custodial mode. Use POST /blocks to publish pre-signed blocks.',
+            'not_implemented',
+            501,
+          );
+        }
+
         const body = await req.json() as Record<string, unknown>;
         const { destination, amountRaw, idempotencyKey } = body;
 
@@ -245,7 +261,51 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         const sends = await runtime.listSendsByAccount(accountId);
         return json({ data: sends });
       }
+
+      // GET /accounts/:id/receivable
+      if (method === 'GET' && parts.length === 3 && parts[2] === 'receivable') {
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        const client = runtime.rpcPool?.getClient();
+        if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
+        const receivable = await client.accountsReceivable(account.address);
+        return json({ data: receivable });
+      }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Blocks
+  // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'blocks' && method === 'POST' && parts.length === 1) {
+    const body = await req.json() as Record<string, unknown>;
+    const { block } = body;
+    if (typeof block !== 'string') {
+      return errorResponse('Missing required field: block (JSON string)', 'bad_request', 400);
+    }
+    const client = runtime.rpcPool?.getClient();
+    if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
+    const result = await client.process(block);
+    return json(result, 201);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Work
+  // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'work' && method === 'POST' && parts.length === 1) {
+    const body = await req.json() as Record<string, unknown>;
+    const { hash, difficulty } = body;
+    if (typeof hash !== 'string') {
+      return errorResponse('Missing required field: hash', 'bad_request', 400);
+    }
+    const client = runtime.rpcPool?.getClient();
+    if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
+    const result = await client.workGenerate(hash, typeof difficulty === 'string' ? difficulty : undefined);
+    return json(result);
   }
 
   // ---------------------------------------------------------------------------
@@ -272,6 +332,14 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   if (parts[0] === 'invoices') {
     // POST /invoices
     if (method === 'POST' && parts.length === 1) {
+      if (runtime.mode === 'non-custodial') {
+        return errorResponse(
+          'Invoices are not available in non-custodial mode.',
+          'not_implemented',
+          501,
+        );
+      }
+
       const body = await req.json() as Record<string, unknown>;
       const { recipientAccount, expectedAmountRaw, expiresAt, metadata, completionPolicy } = body;
 

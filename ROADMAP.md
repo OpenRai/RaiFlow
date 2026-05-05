@@ -34,7 +34,8 @@ Mostly implemented:
 - [x] Persisted event log base implementation
 - [x] In-process event bus
 - [x] Daemon bootstrap from config and storage
-- [ ] API key authentication on all mutating endpoints
+- [x] API key authentication on all mutating endpoints
+- [x] Startup mode enforcement (custodial / non-custodial)
 - [ ] Request correlation IDs and stronger readiness semantics
 - [ ] Complete removal of prototype-era domain wiring from the runtime
 

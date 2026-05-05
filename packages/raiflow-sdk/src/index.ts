@@ -5,6 +5,11 @@ export {
   type CreateWatchedAccountOptions,
   type ListAccountsOptions,
 } from './resources/Accounts.js';
+/** Escape hatch for non-custodial pre-signed block flows. Use SendsResource for custodial flows. */
+export {
+  BlocksResource,
+  type PublishBlockResult,
+} from './resources/Blocks.js';
 export {
   InvoicesResource,
   type CreateInvoiceOptions,
@@ -20,6 +25,11 @@ export {
   type CreateWebhookOptions,
 } from './resources/Webhooks.js';
 export { SystemResource, type RuntimeHealth } from './resources/System.js';
+/** Low-level work generation. If you need this directly, it indicates a missing SDK feature. */
+export {
+  WorkResource,
+  type WorkGenerateResult,
+} from './resources/Work.js';
 
 // Re-export canonical types from model
 export type {
@@ -29,6 +39,7 @@ export type {
   PaymentStatus,
   Account,
   AccountType,
+  Receivable,
   Send,
   SendStatus,
   RaiFlowEvent,

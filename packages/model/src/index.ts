@@ -88,6 +88,12 @@ export interface Send {
   confirmedAt: string | null;
 }
 
+export interface Receivable {
+  hash: string;
+  amount: string;
+  sender: string;
+}
+
 export interface WebhookEndpoint {
   id: string;
   url: string;

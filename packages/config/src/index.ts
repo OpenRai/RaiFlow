@@ -3,10 +3,13 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 
+export type RunMode = 'custodial' | 'non-custodial';
+
 export interface DaemonConfig {
   host: string;
   port: number;
   apiKey?: string;
+  mode?: RunMode;
 }
 
 export interface NanoConfig {
@@ -147,10 +150,27 @@ function resolveStringArray(value: unknown, key: string): string[] {
 function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
   const daemon = isObject(obj.daemon) ? obj.daemon : {};
   const apiKey = optionalString(daemon, 'apiKey');
+
+  // Mode resolution: RAIFLOW_MODE env var > daemon.mode in YAML > undefined
+  let mode: RunMode | undefined;
+  const envMode = process.env['RAIFLOW_MODE'];
+  const yamlMode = optionalString(daemon, 'mode');
+  const rawMode = envMode ?? yamlMode;
+  if (rawMode !== undefined) {
+    const normalized = rawMode.toLowerCase().trim();
+    if (normalized !== 'custodial' && normalized !== 'non-custodial') {
+      throw new Error(
+        `config.daemon.mode must be "custodial" or "non-custodial", got "${rawMode}"`,
+      );
+    }
+    mode = normalized;
+  }
+
   return {
     host: optionalString(daemon, 'host') ?? '0.0.0.0',
     port: optionalNumber(daemon, 'port') ?? 3100,
     apiKey: apiKey ? resolveEnv(apiKey) : undefined,
+    mode,
   };
 }
 

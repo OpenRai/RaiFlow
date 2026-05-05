@@ -56,6 +56,35 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Mode validation
+// ---------------------------------------------------------------------------
+
+if (!config.daemon.mode) {
+  console.error(
+    [
+      '[raiflow] RAIFLOW_MODE is required. Set it to "custodial" or "non-custodial".',
+      '  custodial:      RaiFlow manages keys, derives accounts, signs blocks, generates PoW.',
+      '                  Requires RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP.',
+      '  non-custodial:  RaiFlow acts as a relay and monitor. All signing happens client-side.',
+      '                  Some features (invoices, managed accounts, sends) are unavailable.',
+    ].join('\n'),
+  );
+  process.exit(1);
+}
+
+const mode = config.daemon.mode;
+
+if (mode === 'custodial' && !config.custody) {
+  console.error(
+    [
+      '[raiflow] CUSTODIAL mode requires custody.seed and custody.representative.',
+      'Set RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP, or add them to raiflow.yml.',
+    ].join('\n'),
+  );
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
 
@@ -90,6 +119,8 @@ const logger = {
   warn: (msg: string, ...args: unknown[]) => log('warn', 'raiflow', msg, ...args),
   error: (msg: string, ...args: unknown[]) => log('error', 'raiflow', msg, ...args),
 };
+
+logger.info(`starting in ${mode === 'custodial' ? 'CUSTODIAL' : 'NON-CUSTODIAL'} mode`);
 
 // ---------------------------------------------------------------------------
 // Database
@@ -177,6 +208,7 @@ const runtime = new Runtime({
   custodyEngine,
   rpcPool,
   expiryIntervalMs: 10_000,
+  mode,
 });
 
 // ---------------------------------------------------------------------------
@@ -209,13 +241,7 @@ logger.info('runtime started');
 // ---------------------------------------------------------------------------
 
 const { apiKey, source } = resolveApiKey(config);
-if (source === 'config') {
-  logger.info('api key loaded from config');
-} else if (source === 'file') {
-  logger.info('api key loaded from file');
-} else {
-  logger.info('api key auto-generated');
-}
+logger.info(`api key loaded from ${source}`);
 
 // ---------------------------------------------------------------------------
 // Handler

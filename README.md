@@ -136,6 +136,22 @@ These are deliberate constraints, not marketing copy:
 - framework-agnostic runtime API built on web `Request`/`Response`
 - Nano protocol primitives delegated to `@openrai/nano-core`
 
+## Developer Experience Philosophy
+
+RaiFlow is designed so that Nano protocol mechanics are invisible to the developer:
+
+- **PoW is not your problem.** RaiFlow generates work internally. You never call `work_generate` in normal usage.
+- **Signing is not your problem.** In custodial mode, RaiFlow signs blocks using the managed seed. Your app sends high-level intents like "send 1 XNO to this address."
+- **Frontiers are not your problem.** RaiFlow tracks account frontiers and constructs blocks correctly.
+- **Confirmations are not your problem.** RaiFlow watches for confirmations via WebSocket and updates send status automatically.
+
+If you find yourself reaching for `WorkResource` or `BlocksResource` in the SDK, it indicates one of two things:
+
+1. You are building a non-custodial flow where blocks are signed client-side (e.g., a browser wallet). This is the intended use case for `BlocksResource`.
+2. You are working around a missing feature in RaiFlow. Please open an issue describing your use case.
+
+For custodial flows, use `SendsResource` — RaiFlow handles signing and PoW automatically.
+
 ## Repository Layout
 
 ```text
@@ -167,43 +183,44 @@ The fastest way to run RaiFlow is with Docker Compose.
 cp docker-compose.yml docker-compose.override.yml
 ```
 
-2. Start the container:
+2. Edit `docker-compose.override.yml` and set the required environment variables:
+
+```yaml
+environment:
+  NANO_RPC_URL: "https://rpc.nano.org"
+  RAIFLOW_MODE: "custodial"           # or "non-custodial"
+  RAIFLOW_API_KEY: "your-secret-key"  # required
+```
+
+3. Start the container:
 
 ```bash
 docker compose up -d
 ```
 
-RaiFlow will boot, run SQLite migrations, and auto-generate an API key if you do not provide one.
+RaiFlow will boot, run SQLite migrations, and start in the configured mode.
 
 ### Required Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `NANO_RPC_URL` | **Yes** | Nano node RPC endpoint (e.g. `https://rpc.nano.org`) |
-| `RAIFLOW_API_KEY` | No | API key for Bearer auth. Auto-generated if omitted. |
-| `RAIFLOW_CUSTODY_SEED` | No | BIP39 seed for managed accounts. Only needed for wallet features. |
-| `RAIFLOW_CUSTODY_REP` | No | Default representative for managed accounts. Only needed with custody. |
+| `RAIFLOW_MODE` | **Yes** | `"custodial"` or `"non-custodial"` — see [Modes](#modes) |
+| `RAIFLOW_API_KEY` | **Yes** | API key for Bearer auth. You set this yourself. |
+| `RAIFLOW_CUSTODY_SEED` | Custodial only | BIP39 seed for managed accounts. |
+| `RAIFLOW_CUSTODY_REP` | Custodial only | Default representative for managed accounts. |
+
+### Modes
+
+RaiFlow operates in one of two modes, set at startup via `RAIFLOW_MODE`:
+
+**Custodial mode** — RaiFlow manages keys, derives accounts, signs blocks, and generates PoW. Requires `RAIFLOW_CUSTODY_SEED` and `RAIFLOW_CUSTODY_REP`. This is the full-featured mode where your app delegates all Nano protocol mechanics to the runtime.
+
+**Non-custodial mode** — RaiFlow acts as a relay and monitor. All signing happens client-side. Watched accounts, block publishing, and work generation are available. Managed accounts, sends, and invoices are not — those require custody.
 
 ### Persistent Data
 
-The `/data` volume persists two files across restarts:
-
-- `raiflow.db` — SQLite database (WAL mode)
-- `.api-key` — Auto-generated API key (only written when `RAIFLOW_API_KEY` is not set)
-
-### Retrieving Your API Key
-
-If you did not set `RAIFLOW_API_KEY`, the container generates one on first boot. Retrieve it with:
-
-```bash
-docker exec <container> show-api-key
-```
-
-Or read the file directly:
-
-```bash
-docker exec <container> cat /data/.api-key
-```
+The `/data` volume persists the SQLite database (`raiflow.db`) across restarts.
 
 ### Port Binding & Security
 
@@ -226,6 +243,45 @@ services:
 
 ```bash
 pnpm install
+```
+
+2. Create a config file:
+
+```bash
+cp raiflow.yml.example raiflow.yml
+```
+
+3. Set the required environment variables:
+
+```bash
+export RAIFLOW_MODE=custodial          # or non-custodial
+export RAIFLOW_API_KEY=your-secret-key
+export NANO_RPC_URL=https://rpc.nano.org
+```
+
+4. If using custodial mode, also set:
+
+```bash
+export RAIFLOW_CUSTODY_SEED=your-bip39-seed
+export RAIFLOW_CUSTODY_REP=nano_1...
+```
+
+5. Build the workspace:
+
+```bash
+pnpm -r build
+```
+
+6. Run tests:
+
+```bash
+pnpm -r test
+```
+
+7. Start the runtime:
+
+```bash
+pnpm --filter @openrai/runtime start
 ```
 
 2. Create a config file:

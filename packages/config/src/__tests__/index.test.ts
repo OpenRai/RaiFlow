@@ -17,6 +17,7 @@ afterEach(() => {
   for (const path of tempPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
+  delete process.env['RAIFLOW_MODE'];
 });
 
 describe('loadConfig nano transport arrays', () => {
@@ -49,5 +50,47 @@ describe('loadConfig nano transport arrays', () => {
     tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
 
     expect(() => loadConfig(path)).toThrow('config.nano.rpc must be an array of strings');
+  });
+});
+
+describe('loadConfig daemon.mode', () => {
+  it('parses mode from YAML', () => {
+    const path = writeConfig('daemon:\n  mode: "custodial"\nnano: {}\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    const config = loadConfig(path);
+    expect(config.daemon.mode).toBe('custodial');
+  });
+
+  it('normalizes mode to lowercase', () => {
+    const path = writeConfig('daemon:\n  mode: "Non-Custodial"\nnano: {}\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    const config = loadConfig(path);
+    expect(config.daemon.mode).toBe('non-custodial');
+  });
+
+  it('RAIFLOW_MODE env var takes precedence over YAML', () => {
+    process.env['RAIFLOW_MODE'] = 'non-custodial';
+    const path = writeConfig('daemon:\n  mode: "custodial"\nnano: {}\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    const config = loadConfig(path);
+    expect(config.daemon.mode).toBe('non-custodial');
+  });
+
+  it('mode is undefined when neither env var nor YAML is set', () => {
+    const path = writeConfig('nano: {}\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    const config = loadConfig(path);
+    expect(config.daemon.mode).toBeUndefined();
+  });
+
+  it('rejects invalid mode value', () => {
+    const path = writeConfig('daemon:\n  mode: "invalid"\nnano: {}\n');
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    expect(() => loadConfig(path)).toThrow('config.daemon.mode must be "custodial" or "non-custodial"');
   });
 });

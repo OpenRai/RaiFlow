@@ -1,6 +1,6 @@
 {
   "name": "@openrai/raiflow-sdk",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": false,
   "description": "Business runtime SDK for RaiFlow",
   "repository": "https://github.com/OpenRai/RaiFlow",
