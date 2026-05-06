@@ -52,24 +52,36 @@ describe('auth middleware', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('GET', '/invoices'));
+    const res = await handler(req('GET', '/api/invoices'));
     expect(res.status).toBe(200);
   });
 
-  it('exempts GET /health from auth', async () => {
+  it('exempts GET /api/health from auth', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime, 'secret-key');
 
-    const res = await handler(req('GET', '/health'));
+    const res = await handler(req('GET', '/api/health'));
     expect(res.status).toBe(200);
     expect(await parseJson(res)).toEqual({ status: 'ok' });
+  });
+
+  it('exempts GET / (wayfinder) from auth', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, 'secret-key');
+
+    const res = await handler(req('GET', '/'));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('RaiFlow');
+    expect(html).toContain('/dashboard');
+    expect(html).toContain('/api/health');
   });
 
   it('returns 401 for missing Authorization header when apiKey is set', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime, 'secret-key');
 
-    const res = await handler(req('GET', '/invoices'));
+    const res = await handler(req('GET', '/api/invoices'));
     expect(res.status).toBe(401);
     const body = await parseJson(res) as { error: { code: string; message: string } };
     expect(body.error.code).toBe('unauthorized');
@@ -79,7 +91,7 @@ describe('auth middleware', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime, 'secret-key');
 
-    const res = await handler(req('GET', '/invoices', {
+    const res = await handler(req('GET', '/api/invoices', {
       headers: { Authorization: 'Bearer wrong-key' },
     }));
     expect(res.status).toBe(401);
@@ -91,7 +103,7 @@ describe('auth middleware', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime, 'secret-key');
 
-    const res = await handler(req('GET', '/invoices', {
+    const res = await handler(req('GET', '/api/invoices', {
       headers: { Authorization: 'Bearer secret-key' },
     }));
     expect(res.status).toBe(200);
@@ -101,27 +113,46 @@ describe('auth middleware', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime, 'secret-key');
 
-    const res = await handler(req('GET', '/'));
+    const res = await handler(req('GET', '/dashboard'));
     expect(res.status).toBe(401);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Health
+// Wayfinder (GET /)
 // ---------------------------------------------------------------------------
 
-describe('GET /health', () => {
-  it('returns 200 with { status: ok }', async () => {
+describe('GET / (wayfinder)', () => {
+  it('returns static HTML with links to /dashboard and /api/health', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('GET', '/health'));
-
+    const res = await handler(req('GET', '/'));
     expect(res.status).toBe(200);
-    expect(await parseJson(res)).toEqual({ status: 'ok' });
+    const html = await res.text();
+    expect(html).toContain('RaiFlow');
+    expect(html).toContain('href="/dashboard"');
+    expect(html).toContain('href="/api/health"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dashboard (GET /dashboard)
+// ---------------------------------------------------------------------------
+
+describe('GET /dashboard', () => {
+  it('returns dashboard HTML', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const res = await handler(req('GET', '/dashboard'));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('RaiFlow Runtime Dashboard');
+    expect(html).toContain('href="/dashboard?view=config"');
   });
 
-  it('renders upstream RPC pill on dashboard home', async () => {
+  it('renders config view with ?view=config', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
     (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ = {
@@ -134,7 +165,27 @@ describe('GET /health', () => {
       logging: { level: 'info', format: 'pretty' },
     };
 
-    const res = await handler(req('GET', '/'));
+    const res = await handler(req('GET', '/dashboard?view=config'));
+    const html = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(html).toContain('Effective Non-Secret Configuration');
+  });
+
+  it('renders upstream RPC pill on dashboard', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+    (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ = {
+      daemon: { host: '0.0.0.0', port: 3100 },
+      nano: { rpc: [], ws: [], work: [] },
+      custody: null,
+      invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
+      storage: { driver: 'sqlite', path: './raiflow.db' },
+      webhooks: [],
+      logging: { level: 'info', format: 'pretty' },
+    };
+
+    const res = await handler(req('GET', '/dashboard'));
     const html = await res.text();
 
     expect(res.status).toBe(200);
@@ -145,15 +196,31 @@ describe('GET /health', () => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /invoices
+// GET /api/health
 // ---------------------------------------------------------------------------
 
-describe('POST /invoices', () => {
+describe('GET /api/health', () => {
+  it('returns 200 with { status: ok }', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime);
+
+    const res = await handler(req('GET', '/api/health'));
+
+    expect(res.status).toBe(200);
+    expect(await parseJson(res)).toEqual({ status: 'ok' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/invoices
+// ---------------------------------------------------------------------------
+
+describe('POST /api/invoices', () => {
   it('returns 201 with invoice on valid body', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/invoices', {
+    const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
     }));
 
@@ -167,7 +234,7 @@ describe('POST /invoices', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/invoices', {
+    const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT },
     }));
 
@@ -182,11 +249,11 @@ describe('POST /invoices', () => {
 
     const idemKey = 'test-idem-key';
 
-    const res1 = await handler(req('POST', '/invoices', {
+    const res1 = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
-    const res2 = await handler(req('POST', '/invoices', {
+    const res2 = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
@@ -201,7 +268,7 @@ describe('POST /invoices', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/invoices', {
+    const res = await handler(req('POST', '/api/invoices', {
       body: {
         recipientAccount: TEST_ACCOUNT,
         expectedAmountRaw: ONE_XNO,
@@ -218,7 +285,7 @@ describe('POST /invoices', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/invoices', {
+    const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
     }));
 
@@ -229,10 +296,10 @@ describe('POST /invoices', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /invoices
+// GET /api/invoices
 // ---------------------------------------------------------------------------
 
-describe('GET /invoices', () => {
+describe('GET /api/invoices', () => {
   it('returns list of invoices', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -240,7 +307,7 @@ describe('GET /invoices', () => {
     await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
     await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
 
-    const res = await handler(req('GET', '/invoices'));
+    const res = await handler(req('GET', '/api/invoices'));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };
@@ -258,7 +325,7 @@ describe('GET /invoices', () => {
     await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
     await runtime.cancelInvoice(inv.id);
 
-    const res = await handler(req('GET', '/invoices?status=open'));
+    const res = await handler(req('GET', '/api/invoices?status=open'));
 
     const body = await parseJson(res) as { data: unknown[] };
     expect(body.data).toHaveLength(1);
@@ -266,10 +333,10 @@ describe('GET /invoices', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /invoices/:id
+// GET /api/invoices/:id
 // ---------------------------------------------------------------------------
 
-describe('GET /invoices/:id', () => {
+describe('GET /api/invoices/:id', () => {
   it('returns the invoice', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -279,7 +346,7 @@ describe('GET /invoices/:id', () => {
       expectedAmountRaw: ONE_XNO,
     });
 
-    const res = await handler(req('GET', `/invoices/${invoice.id}`));
+    const res = await handler(req('GET', `/api/invoices/${invoice.id}`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { id: string };
@@ -290,17 +357,17 @@ describe('GET /invoices/:id', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('GET', '/invoices/does-not-exist'));
+    const res = await handler(req('GET', '/api/invoices/does-not-exist'));
 
     expect(res.status).toBe(404);
   });
 });
 
 // ---------------------------------------------------------------------------
-// POST /invoices/:id/cancel
+// POST /api/invoices/:id/cancel
 // ---------------------------------------------------------------------------
 
-describe('POST /invoices/:id/cancel', () => {
+describe('POST /api/invoices/:id/cancel', () => {
   it('returns updated invoice with status canceled', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -310,7 +377,7 @@ describe('POST /invoices/:id/cancel', () => {
       expectedAmountRaw: ONE_XNO,
     });
 
-    const res = await handler(req('POST', `/invoices/${invoice.id}/cancel`));
+    const res = await handler(req('POST', `/api/invoices/${invoice.id}/cancel`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { status: string };
@@ -335,17 +402,17 @@ describe('POST /invoices/:id/cancel', () => {
       confirmedAt: new Date().toISOString(),
     });
 
-    const res = await handler(req('POST', `/invoices/${invoice.id}/cancel`));
+    const res = await handler(req('POST', `/api/invoices/${invoice.id}/cancel`));
 
     expect(res.status).toBe(409);
   });
 });
 
 // ---------------------------------------------------------------------------
-// GET /invoices/:id/payments
+// GET /api/invoices/:id/payments
 // ---------------------------------------------------------------------------
 
-describe('GET /invoices/:id/payments', () => {
+describe('GET /api/invoices/:id/payments', () => {
   it('returns payments array', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -363,7 +430,7 @@ describe('GET /invoices/:id/payments', () => {
       confirmedAt: new Date().toISOString(),
     });
 
-    const res = await handler(req('GET', `/invoices/${invoice.id}/payments`));
+    const res = await handler(req('GET', `/api/invoices/${invoice.id}/payments`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };
@@ -372,10 +439,10 @@ describe('GET /invoices/:id/payments', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /invoices/:id/events
+// GET /api/invoices/:id/events
 // ---------------------------------------------------------------------------
 
-describe('GET /invoices/:id/events', () => {
+describe('GET /api/invoices/:id/events', () => {
   it('returns events array', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -385,7 +452,7 @@ describe('GET /invoices/:id/events', () => {
       expectedAmountRaw: ONE_XNO,
     });
 
-    const res = await handler(req('GET', `/invoices/${invoice.id}/events`));
+    const res = await handler(req('GET', `/api/invoices/${invoice.id}/events`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };
@@ -402,11 +469,11 @@ describe('GET /invoices/:id/events', () => {
       expectedAmountRaw: ONE_XNO,
     });
 
-    const eventsRes = await handler(req('GET', `/invoices/${invoice.id}/events`));
+    const eventsRes = await handler(req('GET', `/api/invoices/${invoice.id}/events`));
     const eventsBody = await parseJson(eventsRes) as { data: { id: string }[] };
     const firstEventId = eventsBody.data[0]!.id;
 
-    const res = await handler(req('GET', `/invoices/${invoice.id}/events?after=${firstEventId}`));
+    const res = await handler(req('GET', `/api/invoices/${invoice.id}/events?after=${firstEventId}`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };
@@ -415,15 +482,15 @@ describe('GET /invoices/:id/events', () => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /webhooks
+// POST /api/webhooks
 // ---------------------------------------------------------------------------
 
-describe('POST /webhooks', () => {
+describe('POST /api/webhooks', () => {
   it('creates endpoint with generated secret', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/webhooks', {
+    const res = await handler(req('POST', '/api/webhooks', {
       body: {
         url: 'https://example.com/hook',
         eventTypes: ['invoice.created'],
@@ -441,7 +508,7 @@ describe('POST /webhooks', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('POST', '/webhooks', {
+    const res = await handler(req('POST', '/api/webhooks', {
       body: { url: 'https://example.com/hook' }, // missing eventTypes
     }));
 
@@ -450,10 +517,10 @@ describe('POST /webhooks', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /webhooks
+// GET /api/webhooks
 // ---------------------------------------------------------------------------
 
-describe('GET /webhooks', () => {
+describe('GET /api/webhooks', () => {
   it('lists endpoints', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -464,7 +531,7 @@ describe('GET /webhooks', () => {
       secret: 'test-secret',
     });
 
-    const res = await handler(req('GET', '/webhooks'));
+    const res = await handler(req('GET', '/api/webhooks'));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };
@@ -473,10 +540,10 @@ describe('GET /webhooks', () => {
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /webhooks/:id
+// DELETE /api/webhooks/:id
 // ---------------------------------------------------------------------------
 
-describe('DELETE /webhooks/:id', () => {
+describe('DELETE /api/webhooks/:id', () => {
   it('returns 204 on successful delete', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
@@ -487,7 +554,7 @@ describe('DELETE /webhooks/:id', () => {
       secret: 'test-secret',
     });
 
-    const res = await handler(req('DELETE', `/webhooks/${endpoint.id}`));
+    const res = await handler(req('DELETE', `/api/webhooks/${endpoint.id}`));
 
     expect(res.status).toBe(204);
   });
@@ -496,7 +563,7 @@ describe('DELETE /webhooks/:id', () => {
     const { runtime } = createTestRuntime();
     const handler = createHandler(runtime);
 
-    const res = await handler(req('DELETE', '/webhooks/non-existent'));
+    const res = await handler(req('DELETE', '/api/webhooks/non-existent'));
 
     expect(res.status).toBe(404);
   });

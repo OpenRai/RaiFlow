@@ -56,7 +56,13 @@ function checkAuth(req: Request, apiKey?: string): Response | undefined {
   const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
   const method = req.method.toUpperCase();
 
-  if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
+  // Exempt wayfinder (GET /)
+  if (method === 'GET' && parts.length === 0) {
+    return undefined;
+  }
+
+  // Exempt health check (GET /api/health)
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'api' && parts[1] === 'health') {
     return undefined;
   }
 
@@ -85,19 +91,48 @@ export function createHandler(runtime: Runtime, apiKey?: string): (req: Request)
 
 async function route(req: Request, runtime: Runtime): Promise<Response> {
   const url = new URL(req.url, 'http://localhost');
-
-  // Strip leading slash and split into parts, ignoring empty segments
   const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
-
   const method = req.method.toUpperCase();
 
-  // GET /health
-  if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
-    return json({ status: 'ok' });
+  // GET / — wayfinder (static landing page)
+  if (method === 'GET' && parts.length === 0) {
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RaiFlow</title>
+  <style>
+    :root { --bg: #0a0a0c; --text: #fff; --muted: #9494a0; --accent: #4a90e2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--text); display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { text-align: center; }
+    h1 { font-size: 2.4rem; margin: 0 0 8px; }
+    p { color: var(--muted); margin: 0 0 32px; }
+    .links { display: flex; gap: 16px; justify-content: center; }
+    a { display: inline-block; padding: 12px 24px; border-radius: 12px; text-decoration: none; font-weight: 600; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); color: var(--text); transition: background 0.15s; }
+    a:hover { background: rgba(74,144,226,0.15); border-color: rgba(74,144,226,0.4); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>RaiFlow</h1>
+    <p>Nano payment runtime</p>
+    <div class="links">
+      <a href="/dashboard">Dashboard</a>
+      <a href="/api/health">API Health</a>
+    </div>
+  </main>
+</body>
+</html>`;
+    return new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
   }
 
-  // GET /
-  if (method === 'GET' && parts.length === 0) {
+  // /dashboard — SSR dashboard
+  if (parts[0] === 'dashboard' && method === 'GET') {
     const html = await renderDashboard(runtime, {
       view: url.searchParams.get('view') ?? undefined,
       config: (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ as import('@openrai/config').RaiFlowConfig | undefined,
@@ -109,12 +144,27 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
     });
   }
 
+  // /api/* — API routes (strip 'api' prefix)
+  if (parts[0] === 'api') {
+    return routeApi(parts.slice(1), url, method, req, runtime);
+  }
+
+  // No route matched
+  return errorResponse('Not found', 'not_found', 404);
+}
+
+async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime): Promise<Response> {
+  // GET /api/health
+  if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
+    return json({ status: 'ok' });
+  }
+
   // ---------------------------------------------------------------------------
   // Accounts
   // ---------------------------------------------------------------------------
 
   if (parts[0] === 'accounts') {
-    // POST /accounts
+    // POST /api/accounts
     if (method === 'POST' && parts.length === 1) {
       const body = await req.json() as Record<string, unknown>;
       const { type, label, representative, address, idempotencyKey } = body;
@@ -162,7 +212,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
       }
     }
 
-    // GET /accounts
+    // GET /api/accounts
     if (method === 'GET' && parts.length === 1) {
       const typeParam = url.searchParams.get('type') ?? undefined;
       const filter = typeParam !== undefined
@@ -175,7 +225,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
     if (parts.length >= 2) {
       const accountId = parts[1]!;
 
-      // GET /accounts/:id
+      // GET /api/accounts/:id
       if (method === 'GET' && parts.length === 2) {
         const account = await runtime.getAccount(accountId);
         if (account === undefined) {
@@ -184,7 +234,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         return json(account);
       }
 
-      // PATCH /accounts/:id
+      // PATCH /api/accounts/:id
       if (method === 'PATCH' && parts.length === 2) {
         const body = await req.json() as Record<string, unknown>;
         const patch: { label?: string; representative?: string } = {};
@@ -207,11 +257,11 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         }
       }
 
-      // POST /accounts/:id/sends
+      // POST /api/accounts/:id/sends
       if (method === 'POST' && parts.length === 3 && parts[2] === 'sends') {
         if (runtime.mode === 'non-custodial') {
           return errorResponse(
-            'Sends are not available in non-custodial mode. Use POST /blocks to publish pre-signed blocks.',
+            'Sends are not available in non-custodial mode. Use POST /api/blocks to publish pre-signed blocks.',
             'not_implemented',
             501,
           );
@@ -252,7 +302,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         }
       }
 
-      // GET /accounts/:id/sends
+      // GET /api/accounts/:id/sends
       if (method === 'GET' && parts.length === 3 && parts[2] === 'sends') {
         const account = await runtime.getAccount(accountId);
         if (account === undefined) {
@@ -262,7 +312,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         return json({ data: sends });
       }
 
-      // GET /accounts/:id/receivable
+      // GET /api/accounts/:id/receivable
       if (method === 'GET' && parts.length === 3 && parts[2] === 'receivable') {
         const account = await runtime.getAccount(accountId);
         if (account === undefined) {
@@ -315,7 +365,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   if (parts[0] === 'sends' && parts.length === 2) {
     const sendId = parts[1]!;
 
-    // GET /sends/:id
+    // GET /api/sends/:id
     if (method === 'GET') {
       const send = await runtime.getSend(sendId);
       if (send === undefined) {
@@ -330,7 +380,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   // ---------------------------------------------------------------------------
 
   if (parts[0] === 'invoices') {
-    // POST /invoices
+    // POST /api/invoices
     if (method === 'POST' && parts.length === 1) {
       if (runtime.mode === 'non-custodial') {
         return errorResponse(
@@ -371,7 +421,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
       return json(invoice, 201);
     }
 
-    // GET /invoices
+    // GET /api/invoices
     if (method === 'GET' && parts.length === 1) {
       const statusParam = url.searchParams.get('status') ?? undefined;
       const filter = statusParam !== undefined
@@ -384,7 +434,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
     if (parts.length >= 2) {
       const invoiceId = parts[1]!;
 
-      // GET /invoices/:id
+      // GET /api/invoices/:id
       if (method === 'GET' && parts.length === 2) {
         const invoice = await runtime.getInvoice(invoiceId);
         if (invoice === undefined) {
@@ -393,7 +443,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         return json(invoice);
       }
 
-      // POST /invoices/:id/cancel
+      // POST /api/invoices/:id/cancel
       if (method === 'POST' && parts.length === 3 && parts[2] === 'cancel') {
         try {
           const invoice = await runtime.cancelInvoice(invoiceId);
@@ -411,7 +461,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         }
       }
 
-      // GET /invoices/:id/payments
+      // GET /api/invoices/:id/payments
       if (method === 'GET' && parts.length === 3 && parts[2] === 'payments') {
         const invoice = await runtime.getInvoice(invoiceId);
         if (invoice === undefined) {
@@ -421,7 +471,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
         return json({ data: payments });
       }
 
-      // GET /invoices/:id/events
+      // GET /api/invoices/:id/events
       if (method === 'GET' && parts.length === 3 && parts[2] === 'events') {
         const invoice = await runtime.getInvoice(invoiceId);
         if (invoice === undefined) {
@@ -439,7 +489,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   // ---------------------------------------------------------------------------
 
   if (parts[0] === 'webhooks') {
-    // POST /webhooks
+    // POST /api/webhooks
     if (method === 'POST' && parts.length === 1) {
       const body = await req.json() as Record<string, unknown>;
       const { url: webhookUrl, eventTypes, secret } = body;
@@ -453,8 +503,6 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
       }
 
       type CreateEndpointInput = Parameters<typeof runtime.webhookEndpointStore.create>[0];
-      // The create() method accepts secret as optional (store auto-generates it).
-      // We build a loose object and cast via unknown to avoid the intersection type issue.
       const createInputRaw: Record<string, unknown> = {
         url: webhookUrl,
         eventTypes: eventTypes as RaiFlowEventType[],
@@ -467,13 +515,13 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
       return json(endpoint, 201);
     }
 
-    // GET /webhooks
+    // GET /api/webhooks
     if (method === 'GET' && parts.length === 1) {
       const endpoints = await runtime.webhookEndpointStore.list();
       return json({ data: endpoints });
     }
 
-    // DELETE /webhooks/:id
+    // DELETE /api/webhooks/:id
     if (method === 'DELETE' && parts.length === 2) {
       const webhookId = parts[1]!;
       const deleted = await runtime.webhookEndpointStore.delete(webhookId);

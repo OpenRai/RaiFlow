@@ -299,10 +299,10 @@ export async function renderDashboard(
 
   const nav = `
     <nav class="tabs">
-      <a class="tab ${view === 'overview' ? 'tab-active' : ''}" href="/">Overview</a>
-      <a class="tab ${view === 'config' ? 'tab-active' : ''}" href="/?view=config">Config</a>
-      <a class="tab ${view === 'process' ? 'tab-active' : ''}" href="/?view=process">Process</a>
-      <a class="tab ${view === 'requests' ? 'tab-active' : ''}" href="/?view=requests">Requests</a>
+      <a class="tab ${view === 'overview' ? 'tab-active' : ''}" href="/dashboard">Overview</a>
+      <a class="tab ${view === 'config' ? 'tab-active' : ''}" href="/dashboard?view=config">Config</a>
+      <a class="tab ${view === 'process' ? 'tab-active' : ''}" href="/dashboard?view=process">Process</a>
+      <a class="tab ${view === 'requests' ? 'tab-active' : ''}" href="/dashboard?view=requests">Requests</a>
     </nav>
   `;
 

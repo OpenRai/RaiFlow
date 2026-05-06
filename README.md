@@ -113,16 +113,18 @@ If you are evaluating the repository today, the safest reading is:
 
 The runtime currently exposes a limited, transitional HTTP surface centered on the earlier invoice prototype:
 
-- `GET /health`
-- `POST /invoices`
-- `GET /invoices`
-- `GET /invoices/:id`
-- `POST /invoices/:id/cancel`
-- `GET /invoices/:id/payments`
-- `GET /invoices/:id/events`
-- `POST /webhooks`
-- `GET /webhooks`
-- `DELETE /webhooks/:id`
+- `GET /` — static wayfinder page (links to dashboard and API health)
+- `GET /dashboard` — SSR operator dashboard
+- `GET /api/health`
+- `POST /api/invoices`
+- `GET /api/invoices`
+- `GET /api/invoices/:id`
+- `POST /api/invoices/:id/cancel`
+- `GET /api/invoices/:id/payments`
+- `GET /api/invoices/:id/events`
+- `POST /api/webhooks`
+- `GET /api/webhooks`
+- `DELETE /api/webhooks/:id`
 
 Treat this as in-progress runtime surface, not final product shape.
 

@@ -11,6 +11,8 @@ export interface RaiFlowClientOptions {
   baseUrl: string;
   /** API key for authentication (sent as Bearer token) */
   apiKey: string;
+  /** Base path for all API requests. Default: "/api" */
+  basePath?: string;
 }
 
 export class RaiFlowClient {
@@ -24,10 +26,12 @@ export class RaiFlowClient {
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly basePath: string;
 
   private constructor(options: RaiFlowClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
+    this.basePath = options.basePath ?? '/api';
     this.accounts = new AccountsResource(this);
     this.blocks = new BlocksResource(this);
     this.invoices = new InvoicesResource(this);
@@ -48,7 +52,7 @@ export class RaiFlowClient {
     body?: unknown,
     headers?: Record<string, string>,
   ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    const url = `${this.baseUrl}${this.basePath}${path}`;
     const init: RequestInit = {
       method,
       headers: {
