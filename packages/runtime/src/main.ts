@@ -215,9 +215,26 @@ if (rpcUrls.length === 0) {
 } else {
   const results = await Promise.allSettled(
     rpcUrls.map(async (url) => {
-      const res = await fetch(url, {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+      // Handle basic auth in URL
+      let cleanUrl = url;
+      try {
+        const parsed = new URL(url);
+        if (parsed.username || parsed.password) {
+          const credentials = btoa(`${parsed.username}:${parsed.password}`);
+          headers['Authorization'] = `Basic ${credentials}`;
+          parsed.username = '';
+          parsed.password = '';
+          cleanUrl = parsed.toString();
+        }
+      } catch {
+        // Ignore URL parsing errors, fetch will catch them
+      }
+
+      const res = await fetch(cleanUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ action: 'version' }),
         signal: AbortSignal.timeout(10_000),
       });
