@@ -418,8 +418,12 @@ const server = createServer(async (req, res) => {
 // ---------------------------------------------------------------------------
 
 const { host, port } = config.daemon;
+const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+
 server.listen(port, host, () => {
-  logger.info(`listening on http://${host}:${port}`);
+  logger.info(`listening on http://${displayHost}:${port}`);
+  logger.info(`  - Dashboard: http://${displayHost}:${port}/dashboard`);
+  logger.info(`  - API:       http://${displayHost}:${port}/api`);
 });
 
 // Graceful shutdown
