@@ -2,12 +2,30 @@
 
 import { describe, it, expect } from 'vitest';
 import type { WebhookDelivery } from '@openrai/webhook';
+import type { RaiFlowConfig } from '@openrai/config';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): RaiFlowConfig {
+  return {
+    daemon: {
+      host: '0.0.0.0',
+      port: 3100,
+      enableDashboardAuth: true,
+      ...overrides,
+    },
+    nano: { rpc: [], ws: [], work: [] },
+    custody: null,
+    invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
+    storage: { driver: 'sqlite', path: './raiflow.db' },
+    webhooks: [],
+    logging: { level: 'info', format: 'pretty' },
+  };
+}
 
 const ONE_XNO = '1000000000000000000000000000000';
 const TEST_ACCOUNT = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
@@ -50,7 +68,8 @@ async function parseJson(res: Response): Promise<unknown> {
 describe('auth middleware', () => {
   it('allows all requests when apiKey is not provided', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const config = createTestConfig({ apiKey: undefined });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/api/invoices'));
     expect(res.status).toBe(200);
@@ -58,7 +77,8 @@ describe('auth middleware', () => {
 
   it('exempts GET /api/health from auth', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/api/health'));
     expect(res.status).toBe(200);
@@ -67,7 +87,8 @@ describe('auth middleware', () => {
 
   it('exempts GET / (wayfinder) from auth', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/'));
     expect(res.status).toBe(200);
@@ -79,7 +100,8 @@ describe('auth middleware', () => {
 
   it('returns 401 for missing Authorization header when apiKey is set', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/api/invoices'));
     expect(res.status).toBe(401);
@@ -89,7 +111,8 @@ describe('auth middleware', () => {
 
   it('returns 401 for invalid Bearer token', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/api/invoices', {
       headers: { Authorization: 'Bearer wrong-key' },
@@ -101,7 +124,8 @@ describe('auth middleware', () => {
 
   it('allows authenticated requests with correct Bearer token', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/api/invoices', {
       headers: { Authorization: 'Bearer secret-key' },
@@ -111,10 +135,20 @@ describe('auth middleware', () => {
 
   it('protects dashboard route when apiKey is set', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, 'secret-key');
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/dashboard'));
     expect(res.status).toBe(401);
+  });
+
+  it('allows dashboard route when apiKey is set but dashboard auth is disabled', async () => {
+    const { runtime } = createTestRuntime();
+    const config = createTestConfig({ apiKey: 'secret-key', enableDashboardAuth: false });
+    const handler = createHandler(runtime, config);
+
+    const res = await handler(req('GET', '/dashboard'));
+    expect(res.status).toBe(200);
   });
 });
 
@@ -125,7 +159,7 @@ describe('auth middleware', () => {
 describe('GET / (wayfinder)', () => {
   it('returns static HTML with links to /dashboard and /api/health', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('GET', '/'));
     expect(res.status).toBe(200);
@@ -143,7 +177,7 @@ describe('GET / (wayfinder)', () => {
 describe('GET /dashboard', () => {
   it('returns dashboard HTML', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig({ apiKey: undefined }));
 
     const res = await handler(req('GET', '/dashboard'));
     expect(res.status).toBe(200);
@@ -154,16 +188,8 @@ describe('GET /dashboard', () => {
 
   it('renders config view with ?view=config', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
-    (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ = {
-      daemon: { host: '0.0.0.0', port: 3100 },
-      nano: { rpc: [], ws: [], work: [] },
-      custody: null,
-      invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
-      storage: { driver: 'sqlite', path: './raiflow.db' },
-      webhooks: [],
-      logging: { level: 'info', format: 'pretty' },
-    };
+    const config = createTestConfig({ apiKey: undefined });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/dashboard?view=config'));
     const html = await res.text();
@@ -174,16 +200,8 @@ describe('GET /dashboard', () => {
 
   it('renders upstream RPC pill on dashboard', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
-    (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ = {
-      daemon: { host: '0.0.0.0', port: 3100 },
-      nano: { rpc: [], ws: [], work: [] },
-      custody: null,
-      invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
-      storage: { driver: 'sqlite', path: './raiflow.db' },
-      webhooks: [],
-      logging: { level: 'info', format: 'pretty' },
-    };
+    const config = createTestConfig({ apiKey: undefined });
+    const handler = createHandler(runtime, config);
 
     const res = await handler(req('GET', '/dashboard'));
     const html = await res.text();
@@ -202,7 +220,7 @@ describe('GET /dashboard', () => {
 describe('GET /api/health', () => {
   it('returns 200 with { status: ok }', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('GET', '/api/health'));
 
@@ -218,7 +236,7 @@ describe('GET /api/health', () => {
 describe('POST /api/invoices', () => {
   it('returns 201 with invoice on valid body', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
@@ -232,7 +250,7 @@ describe('POST /api/invoices', () => {
 
   it('returns 400 when required fields are missing', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT },
@@ -245,7 +263,7 @@ describe('POST /api/invoices', () => {
 
   it('returns same invoice on replay with Idempotency-Key header', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const idemKey = 'test-idem-key';
 
@@ -266,7 +284,7 @@ describe('POST /api/invoices', () => {
 
   it('accepts completionPolicy in request body', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
       body: {
@@ -283,7 +301,7 @@ describe('POST /api/invoices', () => {
 
   it('defaults completionPolicy to at_least when not provided', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
@@ -302,7 +320,7 @@ describe('POST /api/invoices', () => {
 describe('GET /api/invoices', () => {
   it('returns list of invoices', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
     await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
@@ -316,7 +334,7 @@ describe('GET /api/invoices', () => {
 
   it('filters by status=open', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const inv = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -339,7 +357,7 @@ describe('GET /api/invoices', () => {
 describe('GET /api/invoices/:id', () => {
   it('returns the invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -355,7 +373,7 @@ describe('GET /api/invoices/:id', () => {
 
   it('returns 404 for non-existent invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('GET', '/api/invoices/does-not-exist'));
 
@@ -370,7 +388,7 @@ describe('GET /api/invoices/:id', () => {
 describe('POST /api/invoices/:id/cancel', () => {
   it('returns updated invoice with status canceled', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -386,7 +404,7 @@ describe('POST /api/invoices/:id/cancel', () => {
 
   it('returns 409 when canceling a completed invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -415,7 +433,7 @@ describe('POST /api/invoices/:id/cancel', () => {
 describe('GET /api/invoices/:id/payments', () => {
   it('returns payments array', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -445,7 +463,7 @@ describe('GET /api/invoices/:id/payments', () => {
 describe('GET /api/invoices/:id/events', () => {
   it('returns events array', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -462,7 +480,7 @@ describe('GET /api/invoices/:id/events', () => {
 
   it('supports after cursor parameter', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const invoice = await runtime.createInvoice({
       recipientAccount: TEST_ACCOUNT,
@@ -488,7 +506,7 @@ describe('GET /api/invoices/:id/events', () => {
 describe('POST /api/webhooks', () => {
   it('creates endpoint with generated secret', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/webhooks', {
       body: {
@@ -506,7 +524,7 @@ describe('POST /api/webhooks', () => {
 
   it('returns 400 when required fields are missing', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/webhooks', {
       body: { url: 'https://example.com/hook' }, // missing eventTypes
@@ -523,7 +541,7 @@ describe('POST /api/webhooks', () => {
 describe('GET /api/webhooks', () => {
   it('lists endpoints', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     await runtime.webhookEndpointStore.create({
       url: 'https://example.com/hook',
@@ -546,7 +564,7 @@ describe('GET /api/webhooks', () => {
 describe('DELETE /api/webhooks/:id', () => {
   it('returns 204 on successful delete', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const endpoint = await runtime.webhookEndpointStore.create({
       url: 'https://example.com/hook',
@@ -561,7 +579,7 @@ describe('DELETE /api/webhooks/:id', () => {
 
   it('returns 404 for non-existent webhook', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('DELETE', '/api/webhooks/non-existent'));
 
@@ -576,7 +594,7 @@ describe('DELETE /api/webhooks/:id', () => {
 describe('Unknown route', () => {
   it('returns 404 for unknown path', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime);
+    const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('GET', '/this-does-not-exist'));
 
