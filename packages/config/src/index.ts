@@ -156,8 +156,10 @@ function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
   let enableDashboardAuth = true;
   const envDashboardAuth = process.env['RAIFLOW_DASHBOARD_AUTH'];
   const yamlDashboardAuth = optionalBoolean(daemon, 'enableDashboardAuth');
+
   if (envDashboardAuth !== undefined) {
-    enableDashboardAuth = envDashboardAuth.toLowerCase() === 'true';
+    // In env var, we want "false" to mean disable auth.
+    enableDashboardAuth = envDashboardAuth.toLowerCase() !== 'false';
   } else if (yamlDashboardAuth !== undefined) {
     enableDashboardAuth = yamlDashboardAuth;
   }
