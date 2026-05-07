@@ -10,6 +10,7 @@ export interface DaemonConfig {
   port: number;
   apiKey?: string;
   mode?: RunMode;
+  enableDashboardAuth: boolean;
 }
 
 export interface NanoConfig {
@@ -151,6 +152,16 @@ function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
   const daemon = isObject(obj.daemon) ? obj.daemon : {};
   const apiKey = optionalString(daemon, 'apiKey');
 
+  // Dashboard auth resolution: RAIFLOW_DASHBOARD_AUTH env var > daemon.enableDashboardAuth in YAML > true
+  let enableDashboardAuth = true;
+  const envDashboardAuth = process.env['RAIFLOW_DASHBOARD_AUTH'];
+  const yamlDashboardAuth = optionalBoolean(daemon, 'enableDashboardAuth');
+  if (envDashboardAuth !== undefined) {
+    enableDashboardAuth = envDashboardAuth.toLowerCase() === 'true';
+  } else if (yamlDashboardAuth !== undefined) {
+    enableDashboardAuth = yamlDashboardAuth;
+  }
+
   // Mode resolution: RAIFLOW_MODE env var > daemon.mode in YAML > undefined
   let mode: RunMode | undefined;
   const envMode = process.env['RAIFLOW_MODE'];
@@ -171,6 +182,7 @@ function parseDaemon(obj: Record<string, unknown>): DaemonConfig {
     port: optionalNumber(daemon, 'port') ?? 3100,
     apiKey: apiKey ? resolveEnv(apiKey) : undefined,
     mode,
+    enableDashboardAuth,
   };
 }
 

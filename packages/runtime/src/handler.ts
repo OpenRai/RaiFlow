@@ -66,6 +66,12 @@ function checkAuth(req: Request, apiKey?: string): Response | undefined {
     return undefined;
   }
 
+  // Exempt dashboard (GET /dashboard) if configured
+  const config = (globalThis as { __RAIFLOW_CONFIG__?: import('@openrai/config').RaiFlowConfig }).__RAIFLOW_CONFIG__;
+  if (config?.daemon.enableDashboardAuth === false && method === 'GET' && parts.length === 1 && parts[0] === 'dashboard') {
+    return undefined;
+  }
+
   const authHeader = req.headers.get('authorization') ?? '';
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!match || match[1] !== apiKey) {
