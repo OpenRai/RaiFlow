@@ -338,17 +338,10 @@ runtime.start();
 logger.info('runtime started');
 
 // ---------------------------------------------------------------------------
-// API Key
-// ---------------------------------------------------------------------------
-
-const { apiKey, source } = resolveApiKey(config);
-logger.info(`api key loaded from ${source}`);
-
-// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
-const handle = createHandler(runtime, apiKey);
+const handle = createHandler(runtime, config);
 
 // ---------------------------------------------------------------------------
 // HTTP server

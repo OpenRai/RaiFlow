@@ -11,6 +11,7 @@ daemon:
   port: 3100
   # mode: "env:RAIFLOW_MODE"        # required: "custodial" or "non-custodial"
   # apiKey: "env:RAIFLOW_API_KEY"    # required
+  enableDashboardAuth: true          # optional: set to false to disable API key auth for dashboard
 
 nano:
   rpc: ["env:NANO_RPC_URL"]          # required: at least one Nano node RPC

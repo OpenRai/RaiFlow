@@ -2,6 +2,7 @@
 
 import type { InvoiceStatus, RaiFlowEventType } from '@openrai/model';
 import { RaiFlowError, isErrorWithCode } from '@openrai/model';
+import { type RaiFlowConfig } from '@openrai/config';
 import { Runtime } from './runtime.js';
 import { renderDashboard } from './dashboard.js';
 
@@ -49,8 +50,8 @@ function getPathSegment(
  * const response = await handler(request);
  * ```
  */
-function checkAuth(req: Request, apiKey?: string): Response | undefined {
-  if (!apiKey) return undefined;
+function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
+  const apiKey = config.daemon.apiKey;
 
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
@@ -67,10 +68,11 @@ function checkAuth(req: Request, apiKey?: string): Response | undefined {
   }
 
   // Exempt dashboard (GET /dashboard) if configured
-  const config = (globalThis as { __RAIFLOW_CONFIG__?: import('@openrai/config').RaiFlowConfig }).__RAIFLOW_CONFIG__;
-  if (config?.daemon.enableDashboardAuth === false && method === 'GET' && parts.length === 1 && parts[0] === 'dashboard') {
+  if (config.daemon.enableDashboardAuth === false && method === 'GET' && parts.length === 1 && parts[0] === 'dashboard') {
     return undefined;
   }
+
+  if (!apiKey) return undefined;
 
   const authHeader = req.headers.get('authorization') ?? '';
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -81,13 +83,13 @@ function checkAuth(req: Request, apiKey?: string): Response | undefined {
   return undefined;
 }
 
-export function createHandler(runtime: Runtime, apiKey?: string): (req: Request) => Promise<Response> {
+export function createHandler(runtime: Runtime, config: RaiFlowConfig): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
-      const authFailure = checkAuth(req, apiKey);
+      const authFailure = checkAuth(req, config);
       if (authFailure) return authFailure;
 
-      return await route(req, runtime);
+      return await route(req, runtime, config);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
       return errorResponse(message, 'internal_error', 500);
@@ -95,7 +97,7 @@ export function createHandler(runtime: Runtime, apiKey?: string): (req: Request)
   };
 }
 
-async function route(req: Request, runtime: Runtime): Promise<Response> {
+async function route(req: Request, runtime: Runtime, config: RaiFlowConfig): Promise<Response> {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
   const method = req.method.toUpperCase();
@@ -141,7 +143,7 @@ async function route(req: Request, runtime: Runtime): Promise<Response> {
   if (parts[0] === 'dashboard' && method === 'GET') {
     const html = await renderDashboard(runtime, {
       view: url.searchParams.get('view') ?? undefined,
-      config: (globalThis as { __RAIFLOW_CONFIG__?: unknown }).__RAIFLOW_CONFIG__ as import('@openrai/config').RaiFlowConfig | undefined,
+      config,
       metrics: (globalThis as { __RAIFLOW_METRICS__?: unknown }).__RAIFLOW_METRICS__ as import('./monitoring.js').RuntimeMetricsSnapshot | undefined,
     });
     return new Response(html, {
