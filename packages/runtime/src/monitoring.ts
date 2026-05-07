@@ -4,6 +4,7 @@ export interface RuntimeRequestSample {
   status: number;
   durationMs: number;
   at: string;
+  isDashboard?: boolean;
 }
 
 export interface RuntimeMetricsSnapshot {

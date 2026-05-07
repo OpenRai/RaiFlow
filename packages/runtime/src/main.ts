@@ -385,20 +385,29 @@ const server = createServer(async (req, res) => {
   try {
     const webReq = await toWebRequest(req);
     const webRes = await handle(webReq);
+
+    const path = new URL(requestUrl).pathname;
+    const isDashboard = path.startsWith('/dashboard') ||
+      webReq.headers.get('x-raiflow-dashboard') === 'true' ||
+      webReq.headers.get('referer')?.includes('/dashboard');
+
     metrics.recordRequest({
       method: webReq.method,
-      path: new URL(requestUrl).pathname,
+      path,
       status: webRes.status,
       durationMs: Date.now() - startedAt,
+      isDashboard,
     });
     await sendWebResponse(webRes, res);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Internal server error';
+    const path = new URL(requestUrl).pathname;
     metrics.recordRequest({
       method: req.method ?? 'GET',
-      path: new URL(requestUrl).pathname,
+      path,
       status: 500,
       durationMs: Date.now() - startedAt,
+      isDashboard: path.startsWith('/dashboard'),
     });
     logger.error('unhandled request error:', message);
     res.writeHead(500, { 'Content-Type': 'application/json' });

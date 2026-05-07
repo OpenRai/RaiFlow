@@ -162,6 +162,7 @@ export async function renderDashboard(
     view?: string;
     config?: RaiFlowConfig;
     metrics?: RuntimeMetricsSnapshot;
+    showDashboardRequests?: boolean;
   },
 ): Promise<string> {
   const view = options?.view === 'config'
@@ -471,7 +472,13 @@ export async function renderDashboard(
     </section>
 
     <section class="panel">
-      <h2 class="section-title">Recent HTTP Requests</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <h2 class="section-title" style="margin-bottom: 0;">Recent HTTP Requests</h2>
+        <label class="toggle-container">
+          <input type="checkbox" onchange="window.location.search = (window.location.search.includes('showDashboardRequests=true') ? window.location.search.replace('showDashboardRequests=true', 'showDashboardRequests=false') : (window.location.search.includes('showDashboardRequests=false') ? window.location.search.replace('showDashboardRequests=false', 'showDashboardRequests=true') : (window.location.search ? window.location.search + '&showDashboardRequests=true' : '?view=requests&showDashboardRequests=true')))" ${options?.showDashboardRequests ? 'checked' : ''}>
+          <span class="toggle-label">Include Dashboard Requests</span>
+        </label>
+      </div>
       <table>
         <thead>
           <tr>
@@ -482,7 +489,25 @@ export async function renderDashboard(
             <th>Age</th>
           </tr>
         </thead>
-        <tbody>${requestRows}</tbody>
+        <tbody>${(() => {
+          if (!metrics || metrics.recentRequests.length === 0) return '<tr><td colspan="5" class="empty">No recent requests yet</td></tr>';
+          
+          const filtered = options?.showDashboardRequests 
+            ? metrics.recentRequests 
+            : metrics.recentRequests.filter(r => !r.isDashboard);
+
+          if (filtered.length === 0) return '<tr><td colspan="5" class="empty">No non-dashboard requests recorded yet</td></tr>';
+
+          return filtered.map((request) => `
+            <tr>
+              <td><span class="mono">${escapeHtml(request.method)}</span></td>
+              <td><span class="mono">${escapeHtml(request.path)}${request.isDashboard ? ' <span class="muted" style="font-size: 0.7rem;">[dash]</span>' : ''}</span></td>
+              <td><span class="tag ${requestTagClass(request.status)}">${request.status}</span></td>
+              <td>${escapeHtml(formatDuration(request.durationMs))}</td>
+              <td>${escapeHtml(relativeTime(request.at))}</td>
+            </tr>
+          `).join('');
+        })()}</tbody>
       </table>
     </section>
     `;
@@ -769,6 +794,32 @@ export async function renderDashboard(
     .bool-false .bool-led {
       background: #e74c3c;
       box-shadow: 0 0 10px rgba(231,76,60,0.55);
+    }
+    .toggle-container {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.82rem;
+      color: var(--muted);
+      background: rgba(255,255,255,0.04);
+      padding: 6px 12px;
+      border-radius: 99px;
+      border: 1px solid var(--border);
+      transition: all 0.15s;
+    }
+    .toggle-container:hover {
+      background: rgba(255,255,255,0.08);
+      border-color: rgba(255,255,255,0.15);
+      color: var(--text);
+    }
+    .toggle-container input {
+      cursor: pointer;
+      margin: 0;
+    }
+    .toggle-label {
+      font-weight: 600;
     }
     .muted, .empty { color: var(--muted); }
     .footer {
