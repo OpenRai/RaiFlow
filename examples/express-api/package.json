@@ -1,6 +1,6 @@
 {
   "name": "express-api-example",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Reference Express.js API integration for RaiFlow",
   "type": "module",
   "scripts": {

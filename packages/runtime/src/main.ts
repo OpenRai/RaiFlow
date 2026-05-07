@@ -206,6 +206,63 @@ if (config.nano.rpc.length > 0 || config.nano.ws.length > 0 || config.nano.work.
 }
 
 // ---------------------------------------------------------------------------
+// Startup Probe
+// ---------------------------------------------------------------------------
+
+const rpcUrls = config.nano.rpc;
+if (rpcUrls.length === 0) {
+  logger.warn('no nano RPC endpoints configured — runtime will operate in degraded mode');
+} else {
+  const results = await Promise.allSettled(
+    rpcUrls.map(async (url) => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'version' }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json() as any;
+      if (!body.node_vendor) throw new Error('unexpected response shape');
+      return { url, vendor: body.node_vendor };
+    }),
+  );
+
+  const succeeded = results.filter((r): r is PromiseFulfilledResult<{ url: string; vendor: string }> => r.status === 'fulfilled');
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+  if (succeeded.length === 0) {
+    for (let i = 0; i < rpcUrls.length; i++) {
+      const result = results[i];
+      const reason = result?.status === 'rejected'
+        ? (result as PromiseRejectedResult).reason
+        : 'unknown';
+      logger.error(`RPC endpoint unreachable: ${rpcUrls[i]} — ${reason}`);
+    }
+    logger.error(
+      'FATAL: all configured Nano RPC endpoints are unreachable. ' +
+      'The runtime cannot operate without RPC access. Exiting.',
+    );
+    process.exit(1);
+  }
+
+  for (const s of succeeded) {
+    logger.info(`RPC endpoint OK: ${s.value.url} (${s.value.vendor})`);
+  }
+
+  if (failed.length > 0) {
+    for (let i = 0; i < rpcUrls.length; i++) {
+      const result = results[i];
+      if (result?.status === 'rejected') {
+        const reason = (result as PromiseRejectedResult).reason;
+        logger.warn(`RPC endpoint unreachable (degraded): ${rpcUrls[i]} — ${reason}`);
+      }
+    }
+    logger.warn(`${failed.length}/${rpcUrls.length} RPC endpoints unreachable — operating in degraded mode`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Custody engine
 // ---------------------------------------------------------------------------
 

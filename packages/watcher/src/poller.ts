@@ -110,7 +110,8 @@ export class NanoPoller {
     }
 
     for (const [_account, hashes] of Object.entries(receivable)) {
-      for (const hash of hashes) {
+      const hashList = Array.isArray(hashes) ? hashes : Object.keys(hashes);
+      for (const hash of hashList) {
         if (this.seenHashes.has(hash)) continue;
 
         let blockInfo;
