@@ -9,6 +9,7 @@ function createMinimalConfig(overrides?: Partial<RaiFlowConfig['daemon']>): RaiF
     daemon: {
       host: '0.0.0.0',
       port: 3100,
+      enableDashboardAuth: true,
       ...overrides,
     },
     nano: { rpc: [], ws: [], work: [] },
