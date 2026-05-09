@@ -7,7 +7,7 @@ import {
   deriveAddress,
   derivePublicKey,
   deriveSecretKey,
-  signBlock,
+  signBlock as signBlockRaw,
   computeWork,
 } from 'nanocurrency';
 
@@ -81,23 +81,46 @@ export function createCustodyEngine(
     return deriveAddress(publicKey);
   }
 
+  const ZERO_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+
+  function deriveAddressFromPath(path: DerivationPath): string {
+    if (!seed) throw new Error('Seed not loaded');
+    const secretKey = deriveSecretKey(seed, path.index);
+    const publicKey = derivePublicKey(secretKey);
+    return addressFromPublicKey(publicKey);
+  }
+
+  function signAndPackage(
+    link: string,
+    balance: string,
+    representative: string,
+    previousFrontier: string,
+    derivationIndex?: number,
+  ): SignedBlock {
+    if (!seed) throw new Error('Seed not loaded');
+    const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
+    const block = createBlock(secretKey, {
+      previous: previousFrontier === '' ? ZERO_HASH : previousFrontier,
+      link,
+      balance,
+      representative,
+      work: null,
+    });
+    const signature = signBlockRaw({ hash: block.hash, secretKey });
+    return { contents: JSON.stringify(block.block), signature, hash: block.hash };
+  }
+
   return {
     loadSeed(seedHex: string): void {
       seed = seedHex;
     },
 
     deriveInvoiceAddress(path: DerivationPath): string {
-      if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, path.index);
-      const publicKey = derivePublicKey(secretKey);
-      return addressFromPublicKey(publicKey);
+      return deriveAddressFromPath(path);
     },
 
     deriveManagedAccount(path: DerivationPath): string {
-      if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, path.index);
-      const publicKey = derivePublicKey(secretKey);
-      return addressFromPublicKey(publicKey);
+      return deriveAddressFromPath(path);
     },
 
     getNextInvoiceIndex(): number {
@@ -119,24 +142,7 @@ export function createCustodyEngine(
       previousFrontier: string,
       derivationIndex?: number,
     ): Promise<SignedBlock> {
-      if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
-
-      const block = createBlock(secretKey, {
-        previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,
-        link: destination,
-        balance: amountRaw,
-        representative: config.representative,
-        work: null,
-      });
-
-      const signature = signBlock({ hash: block.hash, secretKey });
-
-      return {
-        contents: JSON.stringify(block.block),
-        signature,
-        hash: block.hash,
-      };
+      return signAndPackage(destination, amountRaw, config.representative, previousFrontier, derivationIndex);
     },
 
     async signReceive(
@@ -146,24 +152,7 @@ export function createCustodyEngine(
       previousFrontier: string,
       derivationIndex?: number,
     ): Promise<SignedBlock> {
-      if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
-
-      const block = createBlock(secretKey, {
-        previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,
-        link: sourceHash,
-        balance: amountRaw,
-        representative: config.representative,
-        work: null,
-      });
-
-      const signature = signBlock({ hash: block.hash, secretKey });
-
-      return {
-        contents: JSON.stringify(block.block),
-        signature,
-        hash: block.hash,
-      };
+      return signAndPackage(sourceHash, amountRaw, config.representative, previousFrontier, derivationIndex);
     },
 
     async signChange(
@@ -172,24 +161,7 @@ export function createCustodyEngine(
       previousFrontier: string,
       derivationIndex?: number,
     ): Promise<SignedBlock> {
-      if (!seed) throw new Error('Seed not loaded');
-      const secretKey = deriveSecretKey(seed, derivationIndex ?? nextManagedIndex);
-
-      const block = createBlock(secretKey, {
-        previous: previousFrontier === '' ? '0000000000000000000000000000000000000000000000000000000000000000' : previousFrontier,
-        link: '0000000000000000000000000000000000000000000000000000000000000000',
-        balance: '0',
-        representative,
-        work: null,
-      });
-
-      const signature = signBlock({ hash: block.hash, secretKey });
-
-      return {
-        contents: JSON.stringify(block.block),
-        signature,
-        hash: block.hash,
-      };
+      return signAndPackage(ZERO_HASH, '0', representative, previousFrontier, derivationIndex);
     },
 
     async generateWork(hash: string): Promise<string> {

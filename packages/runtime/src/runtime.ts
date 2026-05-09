@@ -298,6 +298,20 @@ export class Runtime implements WatcherSink {
   // Account management
   // -------------------------------------------------------------------------
 
+  private async persistAccount(account: Account): Promise<Account> {
+    await this.accountStore!.create(account);
+    this.watcher?.addAccount(account.address);
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'account.created',
+      timestamp: new Date().toISOString(),
+      data: { account },
+      resourceId: account.id,
+      resourceType: 'account',
+    });
+    return account;
+  }
+
   async createManagedAccount(params: {
     label?: string;
     representative?: string;
@@ -332,19 +346,7 @@ export class Runtime implements WatcherSink {
       updatedAt: new Date().toISOString(),
     };
 
-    await this.accountStore.create(account);
-    this.watcher?.addAccount(account.address);
-
-    await this.emitV2Event({
-      id: randomUUID(),
-      type: 'account.created',
-      timestamp: new Date().toISOString(),
-      data: { account },
-      resourceId: account.id,
-      resourceType: 'account',
-    });
-
-    return account;
+    return this.persistAccount(account);
   }
 
   async createWatchedAccount(params: {
@@ -355,14 +357,12 @@ export class Runtime implements WatcherSink {
       throw RaiFlowError.badRequest( 'Account store not configured');
     }
 
-    // Validate address format
     try {
       NanoAddress.parse(params.address);
     } catch {
       throw RaiFlowError.badRequest( `Invalid Nano address: ${params.address}`);
     }
 
-    // Idempotency by address
     const existing = await this.accountStore.getByAddress(params.address);
     if (existing) {
       return existing;
@@ -382,19 +382,7 @@ export class Runtime implements WatcherSink {
       updatedAt: new Date().toISOString(),
     };
 
-    await this.accountStore.create(account);
-    this.watcher?.addAccount(account.address);
-
-    await this.emitV2Event({
-      id: randomUUID(),
-      type: 'account.created',
-      timestamp: new Date().toISOString(),
-      data: { account },
-      resourceId: account.id,
-      resourceType: 'account',
-    });
-
-    return account;
+    return this.persistAccount(account);
   }
 
   async listAccounts(filter?: { type?: AccountType }): Promise<Account[]> {

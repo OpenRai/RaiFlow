@@ -1,65 +1,9 @@
 // @openrai/runtime — HTTP handler tests
 
 import { describe, it, expect } from 'vitest';
-import type { WebhookDelivery } from '@openrai/webhook';
-import type { RaiFlowConfig } from '@openrai/config';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): RaiFlowConfig {
-  return {
-    daemon: {
-      host: '0.0.0.0',
-      port: 3100,
-      enableDashboardAuth: true,
-      ...overrides,
-    },
-    nano: { rpc: [], ws: [], work: [] },
-    custody: null,
-    invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
-    storage: { driver: 'sqlite', path: './raiflow.db' },
-    webhooks: [],
-    logging: { level: 'info', format: 'pretty' },
-  };
-}
-
-const ONE_XNO = '1000000000000000000000000000000';
-const TEST_ACCOUNT = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
-
-function createTestRuntime() {
-  const deliveredEvents: { event: unknown; endpoints: unknown[] }[] = [];
-  const fakeDelivery: WebhookDelivery = {
-    deliver: async (event, endpoints) => {
-      deliveredEvents.push({ event, endpoints });
-    },
-    shutdown: () => {},
-  };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery });
-  return { runtime, deliveredEvents };
-}
-
-function req(
-  method: string,
-  path: string,
-  options: { body?: unknown; headers?: Record<string, string> } = {},
-): Request {
-  const init: RequestInit = { method };
-  if (options.body !== undefined) {
-    init.body = JSON.stringify(options.body);
-    init.headers = { 'Content-Type': 'application/json', ...(options.headers ?? {}) };
-  } else if (options.headers) {
-    init.headers = options.headers;
-  }
-  return new Request(`http://localhost${path}`, init);
-}
-
-async function parseJson(res: Response): Promise<unknown> {
-  return res.json() as Promise<unknown>;
-}
+import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Auth

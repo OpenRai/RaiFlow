@@ -12,6 +12,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RaiFlowClient } from '@openrai/raiflow-sdk';
+import { xnoToRaw, xnoDisplay, truncateAddress, RAW_PER_XNO } from '../shared/nano-utils.mjs';
 
 // =============================================================================
 // Configuration
@@ -35,32 +36,8 @@ const raiflow = RaiFlowClient.initialize({ baseUrl: RAIFLOW_URL });
 //
 // 1 XNO = 10^30 raw. Accepts strings like "1.5" or "0.001".
 
-const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n; // 10^30
-
-function xnoToRaw(xno) {
-  const s = String(xno).trim();
-  const dot = s.indexOf('.');
-  const intPart = dot === -1 ? s : s.slice(0, dot);
-  const fracPart = dot === -1 ? '' : s.slice(dot + 1);
-  const padded = (fracPart + '0'.repeat(30)).slice(0, 30);
-  return (BigInt(intPart) * RAW_PER_XNO + BigInt(padded)).toString();
-}
-
-function truncateAddress(addr) {
-  if (!addr || addr.length < 20) return addr ?? '?';
-  return addr.slice(0, 13) + '…' + addr.slice(-6);
-}
-
 function truncateId(id) {
   return id.length > 8 ? id.slice(0, 8) + '…' : id;
-}
-
-function xnoDisplay(raw) {
-  const n = BigInt(raw);
-  const intPart = n / RAW_PER_XNO;
-  const fracPart = (n % RAW_PER_XNO).toString().padStart(30, '0').replace(/0+$/, '');
-  if (fracPart === '') return intPart.toString();
-  return `${intPart}.${fracPart}`.replace(/\.$/, '');
 }
 
 // =============================================================================

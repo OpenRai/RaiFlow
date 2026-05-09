@@ -3,24 +3,9 @@
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
+import { xnoDisplay, truncateAddress, RAW_PER_XNO } from '../../../shared/nano-utils.mjs';
 
 const RAIFLOW_URL = process.env.NEXT_PUBLIC_RAIFLOW_URL ?? 'http://localhost:3100';
-
-const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n;
-
-function xnoDisplay(raw) {
-  if (!raw) return '0';
-  const n = BigInt(raw);
-  const intPart = n / RAW_PER_XNO;
-  const fracPart = (n % RAW_PER_XNO).toString().padStart(30, '0').replace(/0+$/, '');
-  if (fracPart === '') return intPart.toString();
-  return `${intPart}.${fracPart}`.replace(/\.$/, '');
-}
-
-function truncate(addr) {
-  if (!addr || addr.length < 20) return addr ?? '?';
-  return addr.slice(0, 13) + '…' + addr.slice(-6);
-}
 
 export default function CheckoutPage({ params }) {
   const id = params?.id;

@@ -1,46 +1,17 @@
 // @openrai/runtime — Core business logic tests
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import type { LegacyRaiFlowEvent, ConfirmedBlock } from '@openrai/model';
-import type { WebhookDelivery } from '@openrai/webhook';
+import { describe, it, expect } from 'vitest';
+import type { LegacyRaiFlowEvent } from '@openrai/model';
 import { Runtime, xnoToRaw } from '../runtime.js';
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-const ONE_XNO = '1000000000000000000000000000000';
-const HALF_XNO = '500000000000000000000000000000';
-const TWO_XNO = '2000000000000000000000000000000';
-
-const TEST_ACCOUNT_1 = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
-const TEST_ACCOUNT_2 = 'nano_2testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
-
-function createTestRuntime() {
-  const deliveredEvents: { event: LegacyRaiFlowEvent; endpoints: unknown[] }[] = [];
-  const fakeDelivery: WebhookDelivery = {
-    deliver: async (event: unknown, endpoints: unknown[]) => {
-      deliveredEvents.push({ event: event as LegacyRaiFlowEvent, endpoints });
-    },
-    shutdown: () => {},
-  };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery });
-  return { runtime, deliveredEvents };
-}
-
-function makeBlock(
-  overrides: Partial<ConfirmedBlock> & { recipientAccount: string },
-): ConfirmedBlock {
-  const { recipientAccount, ...rest } = overrides;
-  return {
-    blockHash: `hash_${Math.random().toString(36).slice(2)}`,
-    senderAccount: TEST_ACCOUNT_2,
-    recipientAccount,
-    amountRaw: ONE_XNO,
-    confirmedAt: new Date().toISOString(),
-    ...rest,
-  };
-}
+import {
+  ONE_XNO,
+  HALF_XNO,
+  TWO_XNO,
+  TEST_ACCOUNT_1,
+  TEST_ACCOUNT_2,
+  createTestRuntime,
+  makeBlock,
+} from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Invoice creation tests

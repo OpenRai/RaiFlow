@@ -1,19 +1,10 @@
 import { RaiFlowClient } from '@openrai/raiflow-sdk';
+import { xnoToRaw, RAW_PER_XNO } from '../../../shared/nano-utils.mjs';
 
 const RAIFLOW_URL = process.env.RAIFLOW_URL ?? 'http://localhost:3100';
 const DEFAULT_RECIPIENT_ACCOUNT =
   process.env.RAIFLOW_RECIPIENT_ACCOUNT ??
   'nano_3strnmn7h9b7oghxa6h9ckrpf5r454fsobpicixps6xwiwc5q4hat7wjbpqz';
-const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n;
-
-function xnoToRaw(xno) {
-  const s = String(xno).trim();
-  const dot = s.indexOf('.');
-  const intPart = dot === -1 ? s : s.slice(0, dot);
-  const fracPart = dot === -1 ? '' : s.slice(dot + 1);
-  const padded = (fracPart + '0'.repeat(30)).slice(0, 30);
-  return (BigInt(intPart) * RAW_PER_XNO + BigInt(padded)).toString();
-}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {

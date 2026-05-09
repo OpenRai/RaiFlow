@@ -21,6 +21,7 @@ import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
 import { createRuntimeMetrics } from './monitoring.js';
 import { resolveApiKey } from './auth.js';
+import { findWorkspaceRoot } from './workspace.js';
 import {
   createLegacySqliteEventStore,
   createLegacySqliteInvoiceStore,
@@ -31,20 +32,7 @@ import {
 // Config
 // ---------------------------------------------------------------------------
 
-function findWorkspaceRoot(): string {
-  // Walk up from this file (packages/runtime/dist/main.js) to find pnpm-workspace.yaml
-  let dir = dirname(fileURLToPath(import.meta.url));
-  while (true) {
-    if (existsSync(resolve(dir, 'pnpm-workspace.yaml'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  // Fallback: current working directory
-  return process.cwd();
-}
-
-const WORKSPACE_ROOT = findWorkspaceRoot();
+const WORKSPACE_ROOT = findWorkspaceRoot(import.meta.url);
 const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yml');
 
 let config: RaiFlowConfig;

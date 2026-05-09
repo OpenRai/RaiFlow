@@ -25,6 +25,34 @@ function errorResponse(
   return json({ error: { message, code } }, status);
 }
 
+interface ParsedRoute {
+  url: URL;
+  parts: string[];
+  method: string;
+}
+
+function parseRoute(req: Request): ParsedRoute {
+  const url = new URL(req.url, 'http://localhost');
+  const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
+  const method = req.method.toUpperCase();
+  return { url, parts, method };
+}
+
+function handleRaiFlowError(err: unknown): Response | undefined {
+  if (isErrorWithCode(err)) {
+    const statusMap: Record<string, number> = {
+      not_found: 404,
+      bad_request: 400,
+      conflict: 409,
+    };
+    const status = statusMap[err.code];
+    if (status !== undefined) {
+      return errorResponse(err.message, err.code, status);
+    }
+  }
+  return undefined;
+}
+
 /** Extract a path segment from a URL pathname. Returns `undefined` if not present. */
 function getPathSegment(
   parts: string[],
@@ -53,9 +81,7 @@ function getPathSegment(
 function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
   const apiKey = config.daemon.apiKey;
 
-  const url = new URL(req.url, 'http://localhost');
-  const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
-  const method = req.method.toUpperCase();
+  const { parts, method } = parseRoute(req);
 
   // Exempt wayfinder (GET /)
   if (method === 'GET' && parts.length === 0) {
@@ -98,9 +124,7 @@ export function createHandler(runtime: Runtime, config: RaiFlowConfig): (req: Re
 }
 
 async function route(req: Request, runtime: Runtime, config: RaiFlowConfig): Promise<Response> {
-  const url = new URL(req.url, 'http://localhost');
-  const parts = url.pathname.replace(/^\//, '').split('/').filter(Boolean);
-  const method = req.method.toUpperCase();
+  const { url, parts, method } = parseRoute(req);
 
   // GET / — wayfinder (static landing page)
   if (method === 'GET' && parts.length === 0) {
@@ -209,14 +233,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           return json(account, 201);
         }
       } catch (err) {
-        if (isErrorWithCode(err)) {
-          if (err.code === 'bad_request') {
-            return errorResponse(err.message, 'bad_request', 400);
-          }
-          if (err.code === 'conflict') {
-            return errorResponse(err.message, 'conflict', 409);
-          }
-        }
+        const handled = handleRaiFlowError(err);
+        if (handled) return handled;
         throw err;
       }
     }
@@ -254,14 +272,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           const account = await runtime.updateAccount(accountId, patch);
           return json(account);
         } catch (err) {
-          if (isErrorWithCode(err)) {
-            if (err.code === 'not_found') {
-              return errorResponse(err.message, 'not_found', 404);
-            }
-            if (err.code === 'bad_request') {
-              return errorResponse(err.message, 'bad_request', 400);
-            }
-          }
+          const handled = handleRaiFlowError(err);
+          if (handled) return handled;
           throw err;
         }
       }
@@ -296,17 +308,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           });
           return json(send, 201);
         } catch (err) {
-          if (isErrorWithCode(err)) {
-            if (err.code === 'not_found') {
-              return errorResponse(err.message, 'not_found', 404);
-            }
-            if (err.code === 'bad_request') {
-              return errorResponse(err.message, 'bad_request', 400);
-            }
-            if (err.code === 'conflict') {
-              return errorResponse(err.message, 'conflict', 409);
-            }
-          }
+          const handled = handleRaiFlowError(err);
+          if (handled) return handled;
           throw err;
         }
       }
@@ -458,14 +461,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           const invoice = await runtime.cancelInvoice(invoiceId);
           return json(invoice);
         } catch (err) {
-          if (isErrorWithCode(err)) {
-            if (err.code === 'not_found') {
-              return errorResponse(err.message, 'not_found', 404);
-            }
-            if (err.code === 'conflict') {
-              return errorResponse(err.message, 'conflict', 409);
-            }
-          }
+          const handled = handleRaiFlowError(err);
+          if (handled) return handled;
           throw err;
         }
       }
