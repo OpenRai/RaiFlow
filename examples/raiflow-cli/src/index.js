@@ -34,7 +34,7 @@ const API_KEY = env.RAIFLOW_API_KEY ?? '';
 
 const client = RaiFlowClient.initialize({ baseUrl: BASE_URL, apiKey: API_KEY });
 
-async function healthCheck() {
+async function cmdHealth() {
   console.log(chalk.bold('\n  RaiFlow Health Check\n'));
   console.log(chalk.dim(`  Target: ${BASE_URL}\n`));
 
@@ -60,4 +60,14 @@ async function healthCheck() {
   process.exit(ok ? 0 : 1);
 }
 
-healthCheck();
+const [,, subcommand = 'health'] = process.argv;
+
+const commands = { health: cmdHealth };
+
+if (commands[subcommand]) {
+  commands[subcommand]();
+} else {
+  console.log(chalk.red(`Unknown command: ${subcommand}`));
+  console.log(chalk.dim(`Usage: raiflow health`));
+  process.exit(1);
+}
