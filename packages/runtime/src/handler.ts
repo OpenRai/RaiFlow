@@ -169,7 +169,7 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
       view: url.searchParams.get('view') ?? undefined,
       config,
       metrics: (globalThis as { __RAIFLOW_METRICS__?: unknown }).__RAIFLOW_METRICS__ as import('./monitoring.js').RuntimeMetricsSnapshot | undefined,
-      showDashboardRequests: url.searchParams.get('showDashboardRequests') === 'true',
+      showInternal: url.searchParams.get('showInternal') === 'true',
       version,
     });
     return new Response(html, {

@@ -162,7 +162,7 @@ export async function renderDashboard(
     view?: string;
     config?: RaiFlowConfig;
     metrics?: RuntimeMetricsSnapshot;
-    showDashboardRequests?: boolean;
+    showInternal?: boolean;
     version?: string;
   },
 ): Promise<string> {
@@ -307,6 +307,10 @@ export async function renderDashboard(
       <a class="tab ${view === 'requests' ? 'tab-active' : ''}" href="/dashboard?view=requests">Requests</a>
     </nav>
   `;
+
+  const reqList = (options?.showInternal
+    ? metrics?.recentRequests ?? []
+    : (metrics?.recentRequests ?? []).filter((r: { isDashboard?: boolean }) => !r.isDashboard)) as Array<{method:string;path:string;status:number;durationMs:number;at:string;isDashboard?:boolean}>;
 
   const mainContent = view === 'overview'
     ? `
@@ -476,8 +480,8 @@ export async function renderDashboard(
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
         <h2 class="section-title" style="margin-bottom: 0;">Recent HTTP Requests</h2>
         <label class="toggle-container">
-          <input type="checkbox" onchange="window.location.search = (window.location.search.includes('showDashboardRequests=true') ? window.location.search.replace('showDashboardRequests=true', 'showDashboardRequests=false') : (window.location.search.includes('showDashboardRequests=false') ? window.location.search.replace('showDashboardRequests=false', 'showDashboardRequests=true') : (window.location.search ? window.location.search + '&showDashboardRequests=true' : '?view=requests&showDashboardRequests=true')))" ${options?.showDashboardRequests ? 'checked' : ''}>
-          <span class="toggle-label">Include Dashboard Requests</span>
+          <input type="checkbox" onchange="window.location.search = (() => { const p = new URLSearchParams(window.location.search); const k = 'showInternal'; if (this.checked) p.set(k, 'true'); else p.delete(k); return p.toString() ? '?' + p.toString() : ''; })()" ${options?.showInternal ? 'checked' : ''}>
+          <span class="toggle-label">Show internal</span>
         </label>
       </div>
       <table>
@@ -488,24 +492,22 @@ export async function renderDashboard(
             <th>Status</th>
             <th>Latency</th>
             <th>Age</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>${(() => {
-          if (!metrics || metrics.recentRequests.length === 0) return '<tr><td colspan="5" class="empty">No recent requests yet</td></tr>';
-          
-          const filtered = options?.showDashboardRequests 
-            ? metrics.recentRequests 
-            : metrics.recentRequests.filter(r => !r.isDashboard);
+          if (!metrics || metrics.recentRequests.length === 0) return '<tr><td colspan="6" class="empty">No recent requests yet</td></tr>';
 
-          if (filtered.length === 0) return '<tr><td colspan="5" class="empty">No non-dashboard requests recorded yet</td></tr>';
+          if (reqList.length === 0) return '<tr><td colspan="6" class="empty">No non-dashboard requests recorded yet</td></tr>';
 
-          return filtered.map((request) => `
+          return reqList.map((request, idx) => `
             <tr>
               <td><span class="mono">${escapeHtml(request.method)}</span></td>
               <td><span class="mono">${escapeHtml(request.path)}${request.isDashboard ? ' <span class="muted" style="font-size: 0.7rem;">[dash]</span>' : ''}</span></td>
               <td><span class="tag ${requestTagClass(request.status)}">${request.status}</span></td>
               <td>${escapeHtml(formatDuration(request.durationMs))}</td>
               <td>${escapeHtml(relativeTime(request.at))}</td>
+              <td><button class="info-btn" onclick="showReqModal(${idx})" title="Request details">ⓘ</button></td>
             </tr>
           `).join('');
         })()}</tbody>
@@ -828,6 +830,82 @@ export async function renderDashboard(
       font-size: 0.8rem;
       text-align: right;
     }
+    .info-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      transition: all 0.15s;
+    }
+    .info-btn:hover {
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      border-color: rgba(255,255,255,0.2);
+    }
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #141418;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 28px;
+      max-width: 560px;
+      width: 100%;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.5);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+      gap: 16px;
+    }
+    .modal-title {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+    .modal-subtitle {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-top: 4px;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1.4rem;
+      padding: 4px 8px;
+      border-radius: 8px;
+      flex: 0 0 auto;
+      transition: all 0.15s;
+    }
+    .modal-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 12px 16px;
+      font-size: 0.9rem;
+    }
+    .kv-grid dt { color: var(--muted); font-weight: 600; }
+    .kv-grid dd { margin: 0; word-break: break-all; }
+    .kv-grid dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tag-row { display: flex; gap: 8px; flex-wrap: wrap; }
     @media (max-width: 1100px) {
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -856,6 +934,42 @@ export async function renderDashboard(
     ${mainContent}
 
     <div class="footer">${options?.version ?? ''}${options?.version ? ' · ' : ''}Auto-refreshes every 5 seconds · ${new Date().toLocaleTimeString()}</div>
+  </main>
+  <div id="req-modal" class="modal-overlay" onclick="if(event.target===this)closeReqModal()">
+      <div class="modal">
+        <div class="modal-header">
+          <div>
+            <div class="modal-title" id="modal-title">Request Details</div>
+            <div class="modal-subtitle" id="modal-sub"></div>
+          </div>
+          <button class="modal-close" onclick="closeReqModal()">✕</button>
+        </div>
+        <dl class="kv-grid" id="modal-body"></dl>
+      </div>
+    </div>
+    <script>
+      const reqData = ${JSON.stringify(reqList.map(r => ({...r})))};
+      const tagClass = s => s >= 500 ? 'tag-bad' : s >= 400 ? 'tag-warn' : s >= 200 ? 'tag-good' : 'tag-info';
+      function showReqModal(idx) {
+        const r = reqData[idx];
+        if (!r) return;
+        const ts = new Date(r.at).toLocaleString();
+        document.getElementById('modal-title').textContent = r.method + ' ' + r.path;
+        document.getElementById('modal-sub').textContent = ts + ' · ' + r.status + ' · ' + r.durationMs + 'ms';
+        const isDash = r.isDashboard;
+        document.getElementById('modal-body').innerHTML =
+          '<dt>Method</dt><dd class="mono">' + r.method + '</dd>' +
+          '<dt>Path</dt><dd class="mono">' + r.path + '</dd>' +
+          '<dt>Status</dt><dd><span class="tag ' + tagClass(r.status) + '">' + r.status + '</span></dd>' +
+          '<dt>Duration</dt><dd>' + r.durationMs + 'ms</dd>' +
+          '<dt>Timestamp</dt><dd>' + ts + '</dd>' +
+          '<dt>Internal</dt><dd>' + (isDash ? 'yes (dashboard)' : 'no') + '</dd>';
+        document.getElementById('req-modal').classList.add('open');
+      }
+      function closeReqModal() {
+        document.getElementById('req-modal').classList.remove('open');
+      }
+    </script>
   </main>
 </body>
 </html>`;
