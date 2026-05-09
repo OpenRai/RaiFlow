@@ -34,6 +34,13 @@ import {
 
 const WORKSPACE_ROOT = findWorkspaceRoot(import.meta.url);
 const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yml');
+const VERSION_PATH = resolve(WORKSPACE_ROOT, 'packages', 'runtime', 'dist', 'VERSION');
+
+let APP_VERSION = 'dev';
+try {
+  const v = readFileSync(VERSION_PATH, 'utf-8').trim();
+  if (v) APP_VERSION = v;
+} catch { /* fallback to 'dev' */ }
 
 let config: RaiFlowConfig;
 try {
@@ -329,7 +336,7 @@ logger.info('runtime started');
 // Handler
 // ---------------------------------------------------------------------------
 
-const handle = createHandler(runtime, config);
+const handle = createHandler(runtime, config, APP_VERSION);
 
 // ---------------------------------------------------------------------------
 // HTTP server

@@ -109,13 +109,13 @@ function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
   return undefined;
 }
 
-export function createHandler(runtime: Runtime, config: RaiFlowConfig): (req: Request) => Promise<Response> {
+export function createHandler(runtime: Runtime, config: RaiFlowConfig, version?: string): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
       const authFailure = checkAuth(req, config);
       if (authFailure) return authFailure;
 
-      return await route(req, runtime, config);
+      return await route(req, runtime, config, version);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
       return errorResponse(message, 'internal_error', 500);
@@ -123,7 +123,7 @@ export function createHandler(runtime: Runtime, config: RaiFlowConfig): (req: Re
   };
 }
 
-async function route(req: Request, runtime: Runtime, config: RaiFlowConfig): Promise<Response> {
+async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, version?: string): Promise<Response> {
   const { url, parts, method } = parseRoute(req);
 
   // GET / — wayfinder (static landing page)
@@ -170,6 +170,7 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig): Pro
       config,
       metrics: (globalThis as { __RAIFLOW_METRICS__?: unknown }).__RAIFLOW_METRICS__ as import('./monitoring.js').RuntimeMetricsSnapshot | undefined,
       showDashboardRequests: url.searchParams.get('showDashboardRequests') === 'true',
+      version,
     });
     return new Response(html, {
       status: 200,

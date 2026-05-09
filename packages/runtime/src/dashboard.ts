@@ -163,6 +163,7 @@ export async function renderDashboard(
     config?: RaiFlowConfig;
     metrics?: RuntimeMetricsSnapshot;
     showDashboardRequests?: boolean;
+    version?: string;
   },
 ): Promise<string> {
   const view = options?.view === 'config'
@@ -854,7 +855,7 @@ export async function renderDashboard(
 
     ${mainContent}
 
-    <div class="footer">Auto-refreshes every 5 seconds · ${new Date().toLocaleTimeString()}</div>
+    <div class="footer">${options?.version ?? ''}${options?.version ? ' · ' : ''}Auto-refreshes every 5 seconds · ${new Date().toLocaleTimeString()}</div>
   </main>
 </body>
 </html>`;

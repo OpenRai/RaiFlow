@@ -16,7 +16,7 @@
     "raiflow": "./dist/main.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-version.mjs",
     "dev": "node ./scripts/dev.mjs",
     "start": "node dist/main.js",
     "test": "vitest run",
