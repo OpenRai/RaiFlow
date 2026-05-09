@@ -3,7 +3,6 @@ dist
 *.db
 *.db-shm
 *.db-wal
-.git
 .env*
 apps/site
 docs

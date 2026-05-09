@@ -24,6 +24,9 @@ RUN pnpm install --frozen-lockfile
 # Copy source
 COPY packages/ ./packages/
 
+# Copy .git for git describe (used by write-version.mjs)
+COPY .git/ ./.git/
+
 # Copy the docker-specific config explicitly to ensure it is in the builder context
 # (This helps verify it exists and makes it available for stage 2 if we use --from=builder)
 COPY packages/runtime/docker/raiflow.yml ./packages/runtime/docker/raiflow.yml
