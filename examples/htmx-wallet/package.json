@@ -1,6 +1,6 @@
 {
   "name": "htmx-wallet-demo",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "RaiFlow HTMX Demo Wallet",
   "main": "server.js",
   "type": "module",

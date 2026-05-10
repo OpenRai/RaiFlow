@@ -60,14 +60,36 @@ async function cmdHealth() {
   process.exit(ok ? 0 : 1);
 }
 
+async function cmdVersion() {
+  console.log(chalk.bold('\n  RaiFlow Version\n'));
+  console.log(chalk.dim(`  Target: ${BASE_URL}\n`));
+
+  let ok = false;
+
+  try {
+    const runtimeResult = await client.system.version();
+
+    console.log(`  ${chalk.green('●')} Runtime version`);
+    console.log(`    ${chalk.cyan(runtimeResult.version)}`);
+    ok = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  ${chalk.red('●')} Version check failed`);
+    console.log(`    ${chalk.red(msg)}`);
+  }
+
+  console.log(chalk.dim('\n  ─────────────────────\n'));
+  process.exit(ok ? 0 : 1);
+}
+
 const [,, subcommand = 'health'] = process.argv;
 
-const commands = { health: cmdHealth };
+const commands = { health: cmdHealth, version: cmdVersion };
 
 if (commands[subcommand]) {
   commands[subcommand]();
 } else {
   console.log(chalk.red(`Unknown command: ${subcommand}`));
-  console.log(chalk.dim(`Usage: raiflow health`));
+  console.log(chalk.dim(`Usage: raiflow <health|version>`));
   process.exit(1);
 }

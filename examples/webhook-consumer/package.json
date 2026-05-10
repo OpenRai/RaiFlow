@@ -1,6 +1,6 @@
 {
   "name": "webhook-consumer-example",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Reference webhook consumer for RaiFlow",
   "type": "module",
   "scripts": {
