@@ -106,10 +106,12 @@ export async function createHandlerWithInvoice(
 export function createMockRpcClient(overrides?: {
   processError?: Error | null;
   accountsReceivable?: ReturnType<typeof vi.fn>;
+  workGenerate?: ReturnType<typeof vi.fn>;
 }) {
   return {
     process: vi.fn().mockRejectedValue(overrides?.processError ?? null),
     accountsReceivable: overrides?.accountsReceivable ?? vi.fn().mockResolvedValue([]),
+    workGenerate: overrides?.workGenerate ?? vi.fn().mockResolvedValue({ work: 'test-work' }),
   };
 }
 

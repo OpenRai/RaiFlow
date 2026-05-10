@@ -380,12 +380,17 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     }
     const client = runtime.rpcPool?.getClient();
     if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
-    const result = await client.workGenerate(
-      hash,
-      typeof difficulty === 'string' ? difficulty : undefined,
-      blockType === 'receive' ? 'receive' : undefined,
-    );
-    return json(result);
+    try {
+      const result = await client.workGenerate(
+        hash,
+        typeof difficulty === 'string' ? difficulty : undefined,
+        blockType === 'receive' ? 'receive' : undefined,
+      );
+      return json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'RPC error';
+      return errorResponse(message, 'rpc_error', 502);
+    }
   }
 
   // ---------------------------------------------------------------------------

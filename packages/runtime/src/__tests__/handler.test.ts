@@ -635,6 +635,46 @@ describe('GET /api/accounts/:id/receivable', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/work
+// ---------------------------------------------------------------------------
+
+describe('POST /api/work', () => {
+  it('returns 502 (not 500) when RPC fails with "All endpoints exhausted"', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    (runtime as any).rpcPool = {
+      getClient: () => createMockRpcClient({
+        workGenerate: vi.fn().mockRejectedValue(new Error('All endpoints exhausted')),
+      }),
+    };
+
+    const res = await handler(req('POST', '/api/work', { body: { hash: 'ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890' } }));
+
+    expect(res.status).toBe(502);
+    const body = await parseJson(res) as { error: { code: string } };
+    expect(body.error.code).toBe('rpc_error');
+  });
+
+  it('returns 200 with work nonce on success', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    (runtime as any).rpcPool = {
+      getClient: () => createMockRpcClient({
+        workGenerate: vi.fn().mockResolvedValue({ work: 'nonce123' }),
+      }),
+    };
+
+    const res = await handler(req('POST', '/api/work', { body: { hash: 'ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890' } }));
+
+    expect(res.status).toBe(200);
+    const body = await parseJson(res) as { work: string };
+    expect(body.work).toBe('nonce123');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Unknown route
 // ---------------------------------------------------------------------------
 
