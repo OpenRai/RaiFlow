@@ -1,5 +1,7 @@
 # Stage 1: Build
 FROM node:22-bookworm AS builder
+ARG RAIFLOW_VERSION
+ENV RAIFLOW_VERSION=${RAIFLOW_VERSION}
 RUN corepack enable && corepack prepare pnpm@10 --activate
 WORKDIR /app
 

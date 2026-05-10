@@ -25,10 +25,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Compute version
+        id: version
+        run: echo "describe=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            RAIFLOW_VERSION=git:${{ steps.version.outputs.describe }}
           tags: |
             ghcr.io/openrai/raiflow:latest
             ghcr.io/openrai/raiflow:${{ github.sha }}
