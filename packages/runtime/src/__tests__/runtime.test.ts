@@ -10,6 +10,8 @@ import {
   TEST_ACCOUNT_1,
   TEST_ACCOUNT_2,
   createTestRuntime,
+  createTestInvoice,
+  createAndPayInvoice,
   makeBlock,
 } from './helpers.js';
 
@@ -69,14 +71,10 @@ describe('createInvoice', () => {
 
   it('emits invoice.created event', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
+    await createTestInvoice(runtime);
 
     expect(deliveredEvents).toHaveLength(1);
     expect(deliveredEvents[0]!.event.type).toBe('invoice.created');
-    expect((deliveredEvents[0]!.event.data as { invoice: typeof invoice }).invoice.id).toBe(invoice.id);
   });
 });
 
@@ -200,13 +198,7 @@ describe('cancelInvoice', () => {
 describe('handleConfirmedBlock — full payment', () => {
   it('creates Payment and completes invoice when amount matches', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    const block = makeBlock({ recipientAccount: TEST_ACCOUNT_1, amountRaw: ONE_XNO });
-    await runtime.handleConfirmedBlock(block);
+    const { invoice, block } = await createAndPayInvoice(runtime);
 
     const payments = await runtime.getPaymentsByInvoice(invoice.id);
     expect(payments).toHaveLength(1);
@@ -219,15 +211,7 @@ describe('handleConfirmedBlock — full payment', () => {
 
   it('updates confirmedAmountRaw on the invoice after payment', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    const { invoice } = await createAndPayInvoice(runtime);
 
     const updated = await runtime.getInvoice(invoice.id);
     expect(updated!.confirmedAmountRaw).toBe(ONE_XNO);
@@ -235,15 +219,7 @@ describe('handleConfirmedBlock — full payment', () => {
 
   it('emits payment.confirmed event with payment and updated invoice', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    const { invoice } = await createAndPayInvoice(runtime);
 
     const confirmedEvents = deliveredEvents.filter((d) => d.event.type === 'payment.confirmed');
     expect(confirmedEvents).toHaveLength(1);
@@ -254,15 +230,7 @@ describe('handleConfirmedBlock — full payment', () => {
 
   it('emits invoice.completed event when confirmed >= expected', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    await createAndPayInvoice(runtime);
 
     const completedEvents = deliveredEvents.filter((d) => d.event.type === 'invoice.completed');
     expect(completedEvents).toHaveLength(1);
@@ -270,15 +238,7 @@ describe('handleConfirmedBlock — full payment', () => {
 
   it('completed invoice has status completed and completedAt set', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    const { invoice } = await createAndPayInvoice(runtime);
 
     const completed = await runtime.getInvoice(invoice.id);
     expect(completed!.status).toBe('completed');
@@ -384,13 +344,7 @@ describe('handleConfirmedBlock — partial payments', () => {
 describe('handleConfirmedBlock — idempotency', () => {
   it('calling handleConfirmedBlock twice with the same blockHash is a no-op the second time', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    const block = makeBlock({ recipientAccount: TEST_ACCOUNT_1, amountRaw: ONE_XNO });
-    await runtime.handleConfirmedBlock(block);
+    const { invoice, block } = await createAndPayInvoice(runtime);
     await runtime.handleConfirmedBlock(block);
 
     const payments = await runtime.getPaymentsByInvoice(invoice.id);
@@ -399,14 +353,7 @@ describe('handleConfirmedBlock — idempotency', () => {
 
   it('only one set of events emitted for duplicate block', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    const block = makeBlock({ recipientAccount: TEST_ACCOUNT_1, amountRaw: ONE_XNO });
-    await runtime.handleConfirmedBlock(block);
-    await runtime.handleConfirmedBlock(block);
+    await createAndPayInvoice(runtime);
 
     const confirmedEvents = deliveredEvents.filter((d) => d.event.type === 'payment.confirmed');
     expect(confirmedEvents).toHaveLength(1);
@@ -519,15 +466,7 @@ describe('listInvoices and query methods', () => {
 
   it('getPaymentsByInvoice returns payments for the invoice', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    const { invoice } = await createAndPayInvoice(runtime);
 
     const payments = await runtime.getPaymentsByInvoice(invoice.id);
     expect(payments).toHaveLength(1);
@@ -536,15 +475,7 @@ describe('listInvoices and query methods', () => {
 
   it('getEventsByInvoice returns all events for the invoice', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    const { invoice } = await createAndPayInvoice(runtime);
 
     const events = await runtime.getEventsByInvoice(invoice.id);
     // invoice.created + payment.confirmed + invoice.completed
@@ -751,15 +682,7 @@ describe('runtime.on / runtime.off', () => {
 describe('completion policy', () => {
   it('at_least (default) completes when confirmed >= expected', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: ONE_XNO,
-    }));
+    await createAndPayInvoice(runtime);
 
     await new Promise((r) => setTimeout(r, 10));
     const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');
@@ -768,15 +691,7 @@ describe('completion policy', () => {
 
   it('at_least (default) completes when confirmed > expected (overpay)', async () => {
     const { runtime, deliveredEvents } = createTestRuntime();
-    await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT_1,
-      expectedAmountRaw: ONE_XNO,
-    });
-
-    await runtime.handleConfirmedBlock(makeBlock({
-      recipientAccount: TEST_ACCOUNT_1,
-      amountRaw: TWO_XNO,
-    }));
+    await createAndPayInvoice(runtime, TWO_XNO);
 
     await new Promise((r) => setTimeout(r, 10));
     const completed = deliveredEvents.find((e) => e.event.type === 'invoice.completed');

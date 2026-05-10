@@ -79,6 +79,17 @@ export async function createTestInvoice(runtime: Runtime) {
   });
 }
 
+export async function createAndPayInvoice(
+  runtime: Runtime,
+  amountRaw: string = ONE_XNO,
+  recipientAccount: string = TEST_ACCOUNT,
+) {
+  const invoice = await createTestInvoice(runtime);
+  const block = makeBlock({ recipientAccount, amountRaw });
+  await runtime.handleConfirmedBlock(block);
+  return { invoice, block };
+}
+
 export function createHandlerWithRuntime(runtime: Runtime, config: ReturnType<typeof createTestConfig>) {
   return createHandler(runtime, config);
 }

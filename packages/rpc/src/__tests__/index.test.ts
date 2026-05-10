@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createRpcPool, createWsClient } from '../index.js';
+import { setupClientWithDifficultyMocks } from './helpers.js';
 
 describe('@openrai/rpc nano-core defaults', () => {
   it('uses nano-core default RPC endpoints when no nodes are configured', () => {
@@ -72,19 +73,7 @@ describe('@openrai/rpc difficulty caching', () => {
   });
 
   it('calls active_difficulty once for two workGenerate calls without difficulty', async () => {
-    const activeDifficultyCalls: unknown[] = [];
-    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
-
-    const rawClient = (client as any).client;
-    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
-    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
-      if (payload.action === 'active_difficulty') {
-        activeDifficultyCalls.push(payload);
-        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
-      }
-      return originalPostJson(payload);
-    };
-    rawClient.workProvider.generate = workGenerateMock;
+    const { client, activeDifficultyCalls, workGenerateMock } = setupClientWithDifficultyMocks({ trackCalls: true });
 
     await client.workGenerate('hash1');
     await client.workGenerate('hash2');
@@ -106,17 +95,7 @@ describe('@openrai/rpc difficulty caching', () => {
   });
 
   it('workGenerate(hash, undefined, "receive") uses receive difficulty', async () => {
-    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
-
-    const rawClient = (client as any).client;
-    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
-    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
-      if (payload.action === 'active_difficulty') {
-        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
-      }
-      return originalPostJson(payload);
-    };
-    rawClient.workProvider.generate = workGenerateMock;
+    const { client, workGenerateMock } = setupClientWithDifficultyMocks();
 
     await client.workGenerate('hash1', undefined, 'receive');
 
@@ -124,19 +103,7 @@ describe('@openrai/rpc difficulty caching', () => {
   });
 
   it('invalidateDifficultyCache forces a fresh fetch', async () => {
-    const activeDifficultyCalls: unknown[] = [];
-    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
-
-    const rawClient = (client as any).client;
-    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
-    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
-      if (payload.action === 'active_difficulty') {
-        activeDifficultyCalls.push(payload);
-        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
-      }
-      return originalPostJson(payload);
-    };
-    rawClient.workProvider.generate = workGenerateMock;
+    const { pool, client, activeDifficultyCalls, workGenerateMock } = setupClientWithDifficultyMocks({ trackCalls: true });
 
     await pool.getActiveDifficulty();
     expect(activeDifficultyCalls.length).toBe(1);
