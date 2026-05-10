@@ -1,6 +1,6 @@
 {
   "name": "@openrai/runtime",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Payment expectation and event runtime for RaiFlow",
   "type": "module",
