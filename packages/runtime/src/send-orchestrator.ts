@@ -10,6 +10,8 @@ import type {
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
 
+const WORK_REJECTION_MESSAGE = 'Block work is less than threshold';
+
 export class SendOrchestrator {
   private timer: ReturnType<typeof setInterval> | undefined;
 
@@ -36,7 +38,7 @@ export class SendOrchestrator {
     }
   }
 
-  private async tick(): Promise<void> {
+  async tick(): Promise<void> {
     const queued = await this.sendStore.listByStatus('queued');
     for (const send of queued) {
       await this.publishSend(send);
@@ -81,15 +83,29 @@ export class SendOrchestrator {
         account.derivationIndex ?? undefined,
       );
 
-      // 4. Generate work
-      const work = await this.custodyEngine.generateWork(signed.hash);
+      // 4. Generate work using current send difficulty
+      const difficulty = await this.rpcPool.getActiveDifficulty();
+      const work = await this.custodyEngine.generateWork(signed.hash, difficulty.send);
 
       // 5. Build final block JSON with work included
       const blockJson = JSON.parse(signed.contents);
       blockJson.work = work;
 
-      // 6. Publish to network
-      const result = await client.process(JSON.stringify(blockJson));
+      // 6. Publish to network (with retry-once for work rejection)
+      let result;
+      try {
+        result = await client.process(JSON.stringify(blockJson));
+      } catch (processErr) {
+        const message = processErr instanceof Error ? processErr.message : String(processErr);
+        if (!message.includes(WORK_REJECTION_MESSAGE)) throw processErr;
+
+        // Work was rejected — invalidate cache, regenerate at fresh difficulty, retry once
+        this.rpcPool.invalidateDifficultyCache();
+        const freshDifficulty = await this.rpcPool.getActiveDifficulty();
+        const newWork = await this.custodyEngine.generateWork(signed.hash, freshDifficulty.send);
+        blockJson.work = newWork;
+        result = await client.process(JSON.stringify(blockJson));
+      }
 
       // 7. Update send to published
       const published = await this.sendStore.update(send.id, {

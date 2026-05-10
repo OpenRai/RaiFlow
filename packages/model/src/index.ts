@@ -329,6 +329,7 @@ export interface PublishBlockRequest {
 export interface WorkGenerateRequest {
   hash: string;
   difficulty?: string;
+  blockType?: 'send' | 'receive';
 }
 
 export interface CreateWebhookRequest {

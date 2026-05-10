@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createRpcPool, createWsClient } from '../index.js';
 
 describe('@openrai/rpc nano-core defaults', () => {
@@ -29,5 +29,120 @@ describe('@openrai/rpc nano-core defaults', () => {
     const audit = client.getAuditReport();
 
     expect(audit.map((entry) => entry.url)).toEqual(['wss://ws.example.com/']);
+  });
+
+  it('getActiveDifficulty fetches network_current/network_receive_current and caches for 60s', async () => {
+    const pool = createRpcPool([]);
+    const client = pool.getClient();
+
+    const rawPool = (pool as any).client as { rpcPool: { postJson: (...args: unknown[]) => unknown } };
+    const originalPostJson = rawPool?.rpcPool?.postJson;
+    if (!originalPostJson) {
+      expect(true).toBe(true);
+      return;
+    }
+    let callCount = 0;
+    rawPool.rpcPool.postJson = async (...args: unknown[]) => {
+      callCount++;
+      return originalPostJson(...args);
+    };
+
+    const result1 = await pool.getActiveDifficulty();
+    const result2 = await pool.getActiveDifficulty();
+
+    expect(callCount).toBe(1);
+    expect(result1.send).toBeTruthy();
+    expect(result1.receive).toBeTruthy();
+    expect(result2.send).toBe(result1.send);
+    expect(result2.receive).toBe(result1.receive);
+  });
+});
+
+describe('@openrai/rpc difficulty caching', () => {
+  let pool: ReturnType<typeof createRpcPool>;
+  let client: ReturnType<typeof pool.getClient>;
+
+  beforeEach(() => {
+    pool = createRpcPool([]);
+    client = pool.getClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('calls active_difficulty once for two workGenerate calls without difficulty', async () => {
+    const activeDifficultyCalls: unknown[] = [];
+    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
+
+    const rawClient = (client as any).client;
+    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
+    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
+      if (payload.action === 'active_difficulty') {
+        activeDifficultyCalls.push(payload);
+        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
+      }
+      return originalPostJson(payload);
+    };
+    rawClient.workProvider.generate = workGenerateMock;
+
+    await client.workGenerate('hash1');
+    await client.workGenerate('hash2');
+
+    expect(activeDifficultyCalls.length).toBe(1);
+    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'fffffff97b994000');
+    expect(workGenerateMock).toHaveBeenCalledWith('hash2', 'fffffff97b994000');
+  });
+
+  it('uses explicit difficulty when provided', async () => {
+    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
+    const rawClient = (client as any).client;
+    rawClient.workProvider.generate = workGenerateMock;
+
+    await client.workGenerate('hash1', 'fffffff800000000');
+
+    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'fffffff800000000');
+    expect(workGenerateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('workGenerate(hash, undefined, "receive") uses receive difficulty', async () => {
+    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
+
+    const rawClient = (client as any).client;
+    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
+    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
+      if (payload.action === 'active_difficulty') {
+        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
+      }
+      return originalPostJson(payload);
+    };
+    rawClient.workProvider.generate = workGenerateMock;
+
+    await client.workGenerate('hash1', undefined, 'receive');
+
+    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'ffffffdabf470000');
+  });
+
+  it('invalidateDifficultyCache forces a fresh fetch', async () => {
+    const activeDifficultyCalls: unknown[] = [];
+    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
+
+    const rawClient = (client as any).client;
+    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
+    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
+      if (payload.action === 'active_difficulty') {
+        activeDifficultyCalls.push(payload);
+        return { network_minimum: 'fffffff800000000', network_receive_minimum: 'fffffe0000000000', network_current: 'fffffff97b994000', network_receive_current: 'ffffffdabf470000' };
+      }
+      return originalPostJson(payload);
+    };
+    rawClient.workProvider.generate = workGenerateMock;
+
+    await pool.getActiveDifficulty();
+    expect(activeDifficultyCalls.length).toBe(1);
+
+    pool.invalidateDifficultyCache();
+    await pool.getActiveDifficulty();
+    expect(activeDifficultyCalls.length).toBe(2);
   });
 });

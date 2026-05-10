@@ -351,8 +351,16 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     }
     const client = runtime.rpcPool?.getClient();
     if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
-    const result = await client.process(block);
-    return json(result, 201);
+    try {
+      const result = await client.process(block);
+      return json(result, 201);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('Block work is less than threshold')) {
+        return errorResponse(message, 'insufficient_work', 422);
+      }
+      throw err;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -361,13 +369,17 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
   if (parts[0] === 'work' && method === 'POST' && parts.length === 1) {
     const body = await req.json() as Record<string, unknown>;
-    const { hash, difficulty } = body;
+    const { hash, difficulty, blockType } = body;
     if (typeof hash !== 'string') {
       return errorResponse('Missing required field: hash', 'bad_request', 400);
     }
     const client = runtime.rpcPool?.getClient();
     if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
-    const result = await client.workGenerate(hash, typeof difficulty === 'string' ? difficulty : undefined);
+    const result = await client.workGenerate(
+      hash,
+      typeof difficulty === 'string' ? difficulty : undefined,
+      blockType === 'receive' ? 'receive' : undefined,
+    );
     return json(result);
   }
 

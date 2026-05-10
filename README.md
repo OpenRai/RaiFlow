@@ -150,10 +150,10 @@ RaiFlow is designed so that Nano protocol mechanics are invisible to the develop
 - **Frontiers are not your problem.** RaiFlow tracks account frontiers and constructs blocks correctly.
 - **Confirmations are not your problem.** RaiFlow watches for confirmations via WebSocket and updates send status automatically.
 
-If you find yourself reaching for `WorkResource` or `BlocksResource` in the SDK, it indicates one of two things:
+If you find yourself reaching for `WorkResource` or `BlocksResource` in the SDK, it indicates one of these use cases:
 
-1. You are building a non-custodial flow where blocks are signed client-side (e.g., a browser wallet). This is the intended use case for `BlocksResource`.
-2. You are working around a missing feature in RaiFlow. Please open an issue describing your use case.
+1. You are building a non-custodial flow where blocks are signed client-side (e.g., a browser wallet or thin client-side wallet). This is a first-class, supported integration path.
+2. You are building an app-specific protocol layer that needs one-off PoW without external work provider configuration.
 
 For custodial flows, use `SendsResource` — RaiFlow handles signing and PoW automatically.
 

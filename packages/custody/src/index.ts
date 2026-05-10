@@ -49,7 +49,7 @@ export interface CustodyEngine {
     previousFrontier: string,
     derivationIndex?: number,
   ): Promise<SignedBlock>;
-  generateWork(hash: string): Promise<string>;
+  generateWork(hash: string, difficulty?: string): Promise<string>;
 }
 
 export interface SignedBlock {
@@ -164,9 +164,9 @@ export function createCustodyEngine(
       return signAndPackage(ZERO_HASH, '0', representative, previousFrontier, derivationIndex);
     },
 
-    async generateWork(hash: string): Promise<string> {
+    async generateWork(hash: string, difficulty?: string): Promise<string> {
       if (workProvider) {
-        return workProvider.generate(hash, 'fffffff800000000');
+        return workProvider.generate(hash, difficulty ?? 'fffffff800000000');
       }
       const result = await computeWork(hash);
       if (!result) throw new Error('Work generation failed');

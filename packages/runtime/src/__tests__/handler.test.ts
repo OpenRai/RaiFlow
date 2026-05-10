@@ -1,6 +1,6 @@
 // @openrai/runtime — HTTP handler tests
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
 import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT } from './helpers.js';
@@ -528,6 +528,50 @@ describe('DELETE /api/webhooks/:id', () => {
     const res = await handler(req('DELETE', '/api/webhooks/non-existent'));
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/blocks
+// ---------------------------------------------------------------------------
+
+describe('POST /api/blocks', () => {
+  it('returns 422 with insufficient_work code when process throws work error', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+
+    const mockClient = {
+      process: vi.fn().mockRejectedValue(new Error('Block work is less than threshold')),
+    };
+    (runtime as any).rpcPool = {
+      getClient: () => mockClient,
+    };
+
+    const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });
+    const res = await handler(req('POST', '/api/blocks', { body: { block: blockJson } }));
+
+    expect(res.status).toBe(422);
+    const body = await parseJson(res) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('insufficient_work');
+  });
+
+  it('re-throws non-work errors as 500', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+
+    const mockClient = {
+      process: vi.fn().mockRejectedValue(new Error('Fork')),
+    };
+    (runtime as any).rpcPool = {
+      getClient: () => mockClient,
+    };
+
+    const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });
+    const res = await handler(req('POST', '/api/blocks', { body: { block: blockJson } }));
+
+    expect(res.status).toBe(500);
+    const body = await parseJson(res) as { error: { code: string } };
+    expect(body.error.code).toBe('internal_error');
   });
 });
 

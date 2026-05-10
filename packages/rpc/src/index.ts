@@ -14,7 +14,7 @@ export interface RpcClient {
   accountInfo(account: string): Promise<AccountInfoResponse>;
   accountsReceivable(account: string): Promise<Receivable[]>;
   process(block: string): Promise<ProcessResponse>;
-  workGenerate(hash: string, difficulty?: string): Promise<WorkGenerateResponse>;
+  workGenerate(hash: string, difficulty?: string, blockType?: 'send' | 'receive'): Promise<WorkGenerateResponse>;
   getAuditReport(): EndpointAuditRecord[];
 }
 
@@ -46,6 +46,13 @@ export interface RpcPool {
   getActiveNode(): RpcClient | undefined;
   onStateChange(listener: (state: RpcPoolState) => void): () => void;
   getAuditReport(): EndpointAuditRecord[];
+  getActiveDifficulty(): Promise<ActiveDifficulty>;
+  invalidateDifficultyCache(): void;
+}
+
+export interface ActiveDifficulty {
+  send: string;
+  receive: string;
 }
 
 export interface RpcPoolState {
@@ -71,7 +78,10 @@ function configuredWorkUrls(nodes: RpcNodeConfig[]): string[] {
 }
 
 class PooledRpcClient implements RpcClient {
-  constructor(private readonly client: NanoClient) {}
+  constructor(
+    private readonly client: NanoClient,
+    private readonly getDifficulty: () => Promise<ActiveDifficulty>,
+  ) {}
 
   async accountInfo(account: string): Promise<AccountInfoResponse> {
     return this.client.rpcPool.postJson<AccountInfoResponse>({
@@ -101,9 +111,16 @@ class PooledRpcClient implements RpcClient {
     return this.client.rpcPool.postJson<ProcessResponse>({ action: 'process', block });
   }
 
-  async workGenerate(hash: string, difficulty?: string): Promise<WorkGenerateResponse> {
+  async workGenerate(hash: string, difficulty?: string, blockType?: 'send' | 'receive'): Promise<WorkGenerateResponse> {
+    let effectiveDifficulty: string;
+    if (difficulty) {
+      effectiveDifficulty = difficulty;
+    } else {
+      const active = await this.getDifficulty();
+      effectiveDifficulty = blockType === 'receive' ? active.receive : active.send;
+    }
     return {
-      work: await this.client.workProvider.generate(hash, difficulty ?? 'fffffff800000000'),
+      work: await this.client.workProvider.generate(hash, effectiveDifficulty),
     };
   }
 
@@ -117,6 +134,29 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   let currentState: RpcPoolState = { status: 'disconnected' };
   let detachEndpointListener = () => {};
   let client = NanoClient.initialize(buildClientOptions(nodes));
+
+  const DIFFICULTY_CACHE_TTL_MS = 60_000;
+  let difficultyCache: { send: string; receive: string; fetchedAt: number } | null = null;
+
+  async function getActiveDifficulty(): Promise<ActiveDifficulty> {
+    const now = Date.now();
+    if (difficultyCache && now - difficultyCache.fetchedAt < DIFFICULTY_CACHE_TTL_MS) {
+      return { send: difficultyCache.send, receive: difficultyCache.receive };
+    }
+    const raw = await client.rpcPool.postJson<{
+      network_minimum: string;
+      network_receive_minimum: string;
+      network_current: string;
+      network_receive_current: string;
+    }>({ action: 'active_difficulty' });
+
+    difficultyCache = { send: raw.network_current, receive: raw.network_receive_current, fetchedAt: now };
+    return { send: raw.network_current, receive: raw.network_receive_current };
+  }
+
+  function invalidateDifficultyCache(): void {
+    difficultyCache = null;
+  }
 
   function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
     const rpc = configuredRpcUrls(configuredNodes);
@@ -149,7 +189,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   refreshClient();
 
   function buildClient(): RpcClient {
-    return new PooledRpcClient(client);
+    return new PooledRpcClient(client, getActiveDifficulty);
   }
 
   return {
@@ -188,6 +228,9 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     getAuditReport(): EndpointAuditRecord[] {
       return client.rpcPool.getAuditReport();
     },
+
+    getActiveDifficulty,
+    invalidateDifficultyCache,
   };
 }
 
