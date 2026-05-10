@@ -3,23 +3,21 @@
 
 # RaiFlow
 
-RaiFlow is the runtime layer [Nano](https://nano.org/) app developers should have had from the start.
+**RaiFlow** is the **runtime layer** [Nano](https://nano.org/) app developers should have had from the start.
 
-Your app should not have to be thinking in terms of library calls that just map to raw Nano JSON-RPC. It should not be tracking confirmations itself, juggling WebSocket state, building blocks, managing frontiers, generating work, sweeping receivables, or inventing its own event plumbing every time.
-
-RaiFlow sits between your app and one or more Nano nodes and turns that low-level mess into an application-facing runtime.
-
-![Adnan showing the move from raw Nano JSON-RPC to the RaiFlow runtime layer](docs/images/adnan-before-after-raiflow.jpg)
+RaiFlow sits **between your app and one or more Nano nodes** and turns that low-level mess into an application-facing runtime.
 
 ```text
-YOUR APP -> RAIFLOW RUNTIME -> NANO NODE(S)
-              |
-              |- invoice domain
-              |- wallet domain
-              |- custody engine
-              |- persisted events
-              `- RPC failover + confirmations
+Your app -(RaiFlow SDK)-> Runtime -(JSON-RPC)-> Nano node(s)
+                          |
+                          |- invoice domain
+                          |- wallet domain
+                          |- custody engine
+                          |- persisted events
+                          `- RPC failover + confirmations
 ```
+
+![Adnan showing the move from raw Nano JSON-RPC to the RaiFlow runtime layer](docs/images/adnan-before-after-raiflow.jpg)
 
 ## The Pitch
 
@@ -33,7 +31,7 @@ Without RaiFlow, applications often ends up owning too much Nano-specific machin
 - receivable detection and receive flow
 - payment matching and webhook plumbing
 
-With RaiFlow, your app talks to a runtime that already understands those concerns:
+*With RaiFlow* (through [its SDK](#typed-client-sdk)) your app talks to a runtime that already understands those concerns:
 
 - create invoices
 - operate managed or watched accounts
@@ -42,13 +40,13 @@ With RaiFlow, your app talks to a runtime that already understands those concern
 - subscribe to persisted events
 - deliver webhooks from one place
 
-The idea is simple: you build app logic. RaiFlow absorbs Nano runtime logic.
+The idea is simple: you build app logic. RaiFlow carries the Nano runtime logic for you.
 
 Adnan (عدنان), the Nano camel above, is the repo mascot for that shift.
 
-## What RaiFlow Is
+## What RaiFlow IS
 
-RaiFlow is a self-hostable Nano runtime for two jobs that belong together:
+RaiFlow is a self-hostable Nano runtime (typically deployed as an app container) for two jobs that instinsically belong together:
 
 - getting paid
 - operating a wallet
@@ -60,9 +58,9 @@ Those jobs map to two domains in one runtime:
 
 Both domains share the same storage, event system, RPC layer, and custody engine.
 
-RaiFlow is intentionally thin. It adds orchestration, persistence, event routing, and reliability guarantees. It does not try to become your catalog, checkout, customer database, or business logic layer.
+RaiFlow, just like a trusty camel, intentionally tries to stay as thin but also _fit_ as possible. It adds orchestration, persistence, event routing, and reliability guarantees. It does not try to become your catalog, checkout, customer database, or business logic layer.
 
-## What It Is Not
+## What it IS NOT
 
 RaiFlow is not:
 
@@ -72,109 +70,19 @@ RaiFlow is not:
 - a block explorer
 - a fiat payments platform
 - an e-commerce framework
+- something you deploy externally as a public service
 
-## Why This Repo Exists
+## Typed Client SDK
 
-Nano has good settlement properties. What it does not have is an application runtime that cleanly separates:
+Use `@openrai/raiflow-sdk` when your application talks to RaiFlow over HTTP:
 
-- Nano protocol mechanics
-- runtime orchestration
-- application business logic
-
-`@openrai/nano-core` handles Nano protocol primitives. RaiFlow handles the runtime concerns above that layer. Your app stays above both.
-
-## Status
-
-RaiFlow is in the middle of a v2 rebuild.
-
-What is true today:
-
-- The v2 foundation packages exist and build: `config`, `storage`, `events`, `rpc`, `custody`
-- The daemon boots from `raiflow.yml`
-- SQLite migrations run on startup
-- The event store and event bus are implemented
-- The RPC package has multi-node client/failover primitives
-- The custody package has seed loading, derivation, signing, and work-generation primitives
-- Account and send services are being wired through the runtime and SDK
-- The current HTTP runtime still has some prototype-era route shape mixed into it
-
-What is not true yet:
-
-- The wallet domain is not fully exposed through the final runtime API
-- The invoice domain has not yet been fully rebuilt on the new storage/custody stack
-- The documented v2 route surface is not fully implemented end-to-end
-- Hardening work like complete auth enforcement, restart recovery, and integration coverage is still ahead
-
-If you are evaluating the repository today, the safest reading is:
-
-> The runtime direction is set, the core packages are real, and the remaining work is connecting domain behavior cleanly through the public API.
-
-## Current Runtime Surface
-
-The runtime currently exposes a limited, transitional HTTP surface centered on the earlier invoice prototype:
-
-- `GET /` — static wayfinder page (links to dashboard and API health)
-- `GET /dashboard` — SSR operator dashboard
-- `GET /api/health`
-- `POST /api/invoices`
-- `GET /api/invoices`
-- `GET /api/invoices/:id`
-- `POST /api/invoices/:id/cancel`
-- `GET /api/invoices/:id/payments`
-- `GET /api/invoices/:id/events`
-- `POST /api/webhooks`
-- `GET /api/webhooks`
-- `DELETE /api/webhooks/:id`
-
-Treat this as in-progress runtime surface, not final product shape.
-
-## Design Constraints
-
-These are deliberate constraints, not marketing copy:
-
-- self-hostable first
-- idempotency on mutating operations
-- persist-first events
-- one runtime for invoice and wallet domains
-- multi-node RPC instead of single-node dependence
-- namespace separation for invoice and managed-account derivation
-- framework-agnostic runtime API built on web `Request`/`Response`
-- Nano protocol primitives delegated to `@openrai/nano-core`
-
-## Developer Experience Philosophy
-
-RaiFlow is designed so that Nano protocol mechanics are invisible to the developer:
-
-- **PoW is not your problem.** RaiFlow generates work internally. You never call `work_generate` in normal usage.
-- **Signing is not your problem.** In custodial mode, RaiFlow signs blocks using the managed seed. Your app sends high-level intents like "send 1 XNO to this address."
-- **Frontiers are not your problem.** RaiFlow tracks account frontiers and constructs blocks correctly.
-- **Confirmations are not your problem.** RaiFlow watches for confirmations via WebSocket and updates send status automatically.
-
-If you find yourself reaching for `WorkResource` or `BlocksResource` in the SDK, it indicates one of these use cases:
-
-1. You are building a non-custodial flow where blocks are signed client-side (e.g., a browser wallet or thin client-side wallet). This is a first-class, supported integration path.
-2. You are building an app-specific protocol layer that needs one-off PoW without external work provider configuration.
-
-For custodial flows, use `SendsResource` — RaiFlow handles signing and PoW automatically.
-
-## Repository Layout
-
-```text
-apps/site/            documentation site
-packages/
-  model/              canonical types and contracts
-  config/             YAML config loader with env resolution
-  storage/            SQLite adapter and migrations
-  rpc/                Nano RPC + WebSocket primitives
-  events/             event bus and persisted event access
-  custody/            derivation, signing, PoW, frontier-related logic
-  runtime/            HTTP runtime and orchestration
-  webhook/            webhook signing and delivery
-  raiflow-sdk/        typed JS/TS client
-examples/             reference integrations
-rfcs/                 architecture decisions
-docs/                 progress and implementation notes
+```bash
+pnpm add @openrai/raiflow-sdk
 ```
+
+The SDK provides a typed `RaiFlowClient` with resource classes for accounts, sends, invoices, webhooks, blocks, and work, plus re-exports of all canonical types from `@openrai/model`.
+
+See [`packages/raiflow-sdk/README.md`](packages/raiflow-sdk/README.md) for the full API reference.
 
 ## Deployment Quickstart
 
@@ -289,34 +197,126 @@ pnpm -r test
 pnpm --filter @openrai/runtime start
 ```
 
-2. Create a config file:
+## Status
 
-```bash
-cp raiflow.yml.example raiflow.yml
-```
+RaiFlow is actively developed. The v2 foundation is solid and the wallet domain is coming online.
 
-3. Fill in any environment variables referenced by the features you enable in `raiflow.yml`
+| Capability | Status |
+|---|---|
+| Multi-node RPC with failover | Shipped |
+| WebSocket confirmation tracking | Shipped |
+| Custody engine (seed, derivation, signing, PoW) | Shipped |
+| Persisted event store & bus | Shipped |
+| Managed accounts (derive, sign, track) | Shipped |
+| Watched accounts (monitor external addresses) | Shipped |
+| Sends (idempotent queue → publish → confirm) | Shipped |
+| Invoices (create, detect, complete) | Shipped |
+| Webhooks (HMAC signed delivery) | Shipped |
+| Operator dashboard (SSR) | Shipped |
+| Block publish escape hatch | Shipped |
+| Work generation escape hatch | Shipped |
+| Pre-signed block flows | In progress |
+| Restart recovery & hardening | In progress |
 
-   For the default example, none are required just to boot locally. `NANO_RPC_URL`,
-   `NANO_WS_URL`, and `NANO_WORK_URL` are optional endpoint overrides. `RAIFLOW_CUSTODY_SEED` and
-   `RAIFLOW_CUSTODY_REP` are only needed when you enable custody-backed features.
+What is not fully wired yet:
 
-4. Build the workspace:
+- The invoice domain is operational but still runs partially on the legacy storage adapter while being migrated to the new event-native stack.
+- Some hardening (auth edge cases, deep restart recovery, full integration coverage) is still ahead.
 
-```bash
-pnpm -r build
-```
+If you are evaluating the repository today, the safest reading is:
 
-5. Run tests:
+> The runtime direction is set, the core packages are real, and the public API surface now covers accounts, sends, invoices, and webhooks.
 
-```bash
-pnpm -r test
-```
+## Current Runtime Surface
 
-6. Start the runtime:
+The runtime exposes the following HTTP surface:
 
-```bash
-pnpm --filter @openrai/runtime start
+**Static & Dashboard**
+- `GET /` — wayfinder page
+- `GET /dashboard` — SSR operator dashboard (with `?view=` and `?showInternal=` toggles)
+
+**System**
+- `GET /api/health`
+
+**Accounts**
+- `POST /api/accounts` — create managed or watched account
+- `GET /api/accounts` — list accounts (optional `?type=managed|watched`)
+- `GET /api/accounts/:id`
+- `PATCH /api/accounts/:id`
+- `GET /api/accounts/:id/receivable` — pending receivable blocks from the node
+- `POST /api/accounts/:id/sends` — queue a send from this account
+- `GET /api/accounts/:id/sends` — list sends for this account
+
+**Sends**
+- `GET /api/sends/:id` — global send lookup
+
+**Blocks** (escape hatch for pre-signed flows)
+- `POST /api/blocks` — publish a pre-signed block JSON string
+
+**Work** (escape hatch for non-custodial flows)
+- `POST /api/work` — generate PoW for a hash
+
+**Invoices**
+- `POST /api/invoices`
+- `GET /api/invoices` (optional `?status=`)
+- `GET /api/invoices/:id`
+- `POST /api/invoices/:id/cancel`
+- `GET /api/invoices/:id/payments`
+- `GET /api/invoices/:id/events` (optional `?after=`)
+
+**Webhooks**
+- `POST /api/webhooks`
+- `GET /api/webhooks`
+- `DELETE /api/webhooks/:id`
+
+> All mutating operations require an `Idempotency-Key` header where documented. Sends **require** an idempotency key — rejection is correct behavior if missing.
+
+## Design Constraints
+
+These are deliberate constraints, not marketing copy:
+
+- self-hostable first
+- idempotency on mutating operations
+- persist-first events
+- one runtime for invoice and wallet domains
+- multi-node RPC instead of single-node dependence
+- namespace separation for invoice and managed-account derivation
+- framework-agnostic runtime API built on web `Request`/`Response`
+- Nano protocol primitives delegated to `@openrai/nano-core`
+
+## Developer Experience Philosophy
+
+RaiFlow is designed so that Nano protocol mechanics are invisible to the developer:
+
+- **PoW is not your problem.** RaiFlow generates work internally. You never call `work_generate` in normal usage.
+- **Signing is not your problem.** In custodial mode, RaiFlow signs blocks using the managed seed. Your app sends high-level intents like "send 1 XNO to this address."
+- **Frontiers are not your problem.** RaiFlow tracks account frontiers and constructs blocks correctly.
+- **Confirmations are not your problem.** RaiFlow watches for confirmations via WebSocket and updates send status automatically.
+
+If you find yourself reaching for `WorkResource` or `BlocksResource` in the SDK, it indicates one of these use cases:
+
+1. You are building a non-custodial flow where blocks are signed client-side (e.g., a browser wallet or thin client-side wallet). This is a first-class, supported integration path.
+2. You are building an app-specific protocol layer that needs one-off PoW without external work provider configuration.
+
+For custodial flows, use `SendsResource` — RaiFlow handles signing and PoW automatically.
+
+## Repository Layout
+
+```text
+apps/site/            documentation site
+packages/
+  model/              canonical types and contracts
+  config/             YAML config loader with env resolution
+  storage/            SQLite adapter and migrations
+  rpc/                Nano RPC + WebSocket primitives
+  events/             event bus and persisted event access
+  custody/            derivation, signing, PoW, frontier-related logic
+  runtime/            HTTP runtime and orchestration
+  webhook/            webhook signing and delivery
+  raiflow-sdk/        typed JS/TS client
+examples/             reference integrations
+rfcs/                 architecture decisions
+docs/                 progress and implementation notes
 ```
 
 ## Repository Truth Sources
@@ -327,21 +327,6 @@ If you want the current state rather than the intended end state, read these fir
 - `ROADMAP.md` — milestone map
 - `rfcs/0001-project-framing.md` — project framing and scope
 - `rfcs/0003-event-model.md` — current v2 resource/event model
-
-## Blunt Assessment
-
-RaiFlow is no longer just an observe-mode prototype, but it is not yet a finished production runtime either.
-
-The repo already contains the foundation needed for that runtime:
-
-- typed config loading
-- SQLite persistence
-- migrations
-- persisted events
-- RPC primitives
-- custody primitives
-
-What remains is the hard part that matters most to users: finishing the domain services and exposing them coherently through the runtime API.
 
 ## Release Flow
 
