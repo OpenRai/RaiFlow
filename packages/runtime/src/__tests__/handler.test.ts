@@ -3,7 +3,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
-import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT } from './helpers.js';
+import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT, createTestInvoice, createHandlerWithRuntime, createHandlerWithInvoice, createMockRpcClient } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -245,7 +245,7 @@ describe('POST /api/invoices', () => {
 
   it('defaults completionPolicy to at_least when not provided', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
       body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
@@ -257,17 +257,13 @@ describe('POST /api/invoices', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/invoices
-// ---------------------------------------------------------------------------
-
 describe('GET /api/invoices', () => {
   it('returns list of invoices', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
-    await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
+    await createTestInvoice(runtime);
+    await createTestInvoice(runtime);
 
     const res = await handler(req('GET', '/api/invoices'));
 
@@ -278,13 +274,10 @@ describe('GET /api/invoices', () => {
 
   it('filters by status=open', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const inv = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
-    await runtime.createInvoice({ recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO });
+    const inv = await createTestInvoice(runtime);
+    await createTestInvoice(runtime);
     await runtime.cancelInvoice(inv.id);
 
     const res = await handler(req('GET', '/api/invoices?status=open'));
@@ -301,12 +294,9 @@ describe('GET /api/invoices', () => {
 describe('GET /api/invoices/:id', () => {
   it('returns the invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
     const res = await handler(req('GET', `/api/invoices/${invoice.id}`));
 
@@ -317,7 +307,7 @@ describe('GET /api/invoices/:id', () => {
 
   it('returns 404 for non-existent invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     const res = await handler(req('GET', '/api/invoices/does-not-exist'));
 
@@ -332,12 +322,9 @@ describe('GET /api/invoices/:id', () => {
 describe('POST /api/invoices/:id/cancel', () => {
   it('returns updated invoice with status canceled', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
     const res = await handler(req('POST', `/api/invoices/${invoice.id}/cancel`));
 
@@ -348,14 +335,10 @@ describe('POST /api/invoices/:id/cancel', () => {
 
   it('returns 409 when canceling a completed invoice', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
-    // Complete the invoice
     await runtime.handleConfirmedBlock({
       blockHash: 'hash-complete',
       senderAccount: 'nano_2testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
@@ -377,12 +360,9 @@ describe('POST /api/invoices/:id/cancel', () => {
 describe('GET /api/invoices/:id/payments', () => {
   it('returns payments array', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
     await runtime.handleConfirmedBlock({
       blockHash: 'hash-pay-1',
@@ -407,12 +387,9 @@ describe('GET /api/invoices/:id/payments', () => {
 describe('GET /api/invoices/:id/events', () => {
   it('returns events array', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
     const res = await handler(req('GET', `/api/invoices/${invoice.id}/events`));
 
@@ -424,12 +401,9 @@ describe('GET /api/invoices/:id/events', () => {
 
   it('supports after cursor parameter', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const invoice = await runtime.createInvoice({
-      recipientAccount: TEST_ACCOUNT,
-      expectedAmountRaw: ONE_XNO,
-    });
+    const invoice = await createTestInvoice(runtime);
 
     const eventsRes = await handler(req('GET', `/api/invoices/${invoice.id}/events`));
     const eventsBody = await parseJson(eventsRes) as { data: { id: string }[] };
@@ -538,13 +512,10 @@ describe('DELETE /api/webhooks/:id', () => {
 describe('POST /api/blocks', () => {
   it('returns 422 with insufficient_work code when process throws work error', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const mockClient = {
-      process: vi.fn().mockRejectedValue(new Error('Block work is less than threshold')),
-    };
     (runtime as any).rpcPool = {
-      getClient: () => mockClient,
+      getClient: () => createMockRpcClient(new Error('Block work is less than threshold')),
     };
 
     const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });
@@ -557,13 +528,10 @@ describe('POST /api/blocks', () => {
 
   it('re-throws non-work errors as 500', async () => {
     const { runtime } = createTestRuntime();
-    const handler = createHandler(runtime, createTestConfig());
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
-    const mockClient = {
-      process: vi.fn().mockRejectedValue(new Error('Fork')),
-    };
     (runtime as any).rpcPool = {
-      getClient: () => mockClient,
+      getClient: () => createMockRpcClient(new Error('Fork')),
     };
 
     const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });

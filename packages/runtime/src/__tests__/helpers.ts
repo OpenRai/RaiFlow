@@ -3,7 +3,9 @@
 import type { WebhookDelivery } from '@openrai/webhook';
 import type { RaiFlowConfig } from '@openrai/config';
 import type { LegacyRaiFlowEvent, ConfirmedBlock } from '@openrai/model';
+import { vi } from 'vitest';
 import { Runtime } from '../runtime.js';
+import { createHandler } from '../handler.js';
 
 export const ONE_XNO = '1000000000000000000000000000000';
 export const HALF_XNO = '500000000000000000000000000000';
@@ -68,6 +70,32 @@ export function req(
     init.headers = options.headers;
   }
   return new Request(`http://localhost${path}`, init);
+}
+
+export async function createTestInvoice(runtime: Runtime) {
+  return runtime.createInvoice({
+    recipientAccount: TEST_ACCOUNT,
+    expectedAmountRaw: ONE_XNO,
+  });
+}
+
+export function createHandlerWithRuntime(runtime: Runtime, config: ReturnType<typeof createTestConfig>) {
+  return createHandler(runtime, config);
+}
+
+export async function createHandlerWithInvoice(
+  runtime: Runtime,
+  config: ReturnType<typeof createTestConfig>,
+) {
+  const invoice = await createTestInvoice(runtime);
+  const handler = createHandler(runtime, config);
+  return { handler, invoice };
+}
+
+export function createMockRpcClient(processError: Error | null) {
+  return {
+    process: vi.fn().mockRejectedValue(processError),
+  };
 }
 
 export async function parseJson(res: Response): Promise<unknown> {

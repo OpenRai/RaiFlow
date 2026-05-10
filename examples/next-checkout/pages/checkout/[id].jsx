@@ -1,6 +1,6 @@
 // Checkout page — shows invoice status and polls for payment completion
 // force-dynamic: this page always renders on-demand, never statically
-export const dynamic = 'force-dynamic';
+const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
 import { xnoDisplay, truncateAddress, RAW_PER_XNO } from '../../../shared/nano-utils.mjs';

@@ -1,6 +1,6 @@
 // Shared Nano currency utilities for RaiFlow examples
 
-export const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n; // 10^30
+const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n; // 10^30
 
 export function xnoToRaw(xno) {
   const s = String(xno).trim();
@@ -20,7 +20,7 @@ export function xnoDisplay(raw) {
   return `${intPart}.${fracPart}`.replace(/\.$/, '');
 }
 
-export function truncateAddress(addr) {
+function truncateAddress(addr) {
   if (!addr || addr.length < 20) return addr ?? '?';
   return addr.slice(0, 13) + '…' + addr.slice(-6);
 }
