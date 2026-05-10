@@ -24,7 +24,7 @@ export {
   WebhooksResource,
   type CreateWebhookOptions,
 } from './resources/Webhooks.js';
-export { SystemResource, type RuntimeHealth } from './resources/System.js';
+export { SystemResource, type RuntimeHealth, type RuntimeVersion } from './resources/System.js';
 /** Low-level work generation. If you need this directly, it indicates a missing SDK feature. */
 export {
   WorkResource,

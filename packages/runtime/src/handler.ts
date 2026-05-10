@@ -88,8 +88,8 @@ function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
     return undefined;
   }
 
-  // Exempt health check (GET /api/health)
-  if (method === 'GET' && parts.length === 2 && parts[0] === 'api' && parts[1] === 'health') {
+  // Exempt health check (GET /api/health) and version (GET /api/version)
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'api' && (parts[1] === 'health' || parts[1] === 'version')) {
     return undefined;
   }
 
@@ -180,17 +180,22 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
 
   // /api/* — API routes (strip 'api' prefix)
   if (parts[0] === 'api') {
-    return routeApi(parts.slice(1), url, method, req, runtime);
+    return routeApi(parts.slice(1), url, method, req, runtime, version);
   }
 
   // No route matched
   return errorResponse('Not found', 'not_found', 404);
 }
 
-async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime): Promise<Response> {
+async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime, version?: string): Promise<Response> {
   // GET /api/health
   if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
     return json({ status: 'ok' });
+  }
+
+  // GET /api/version
+  if (method === 'GET' && parts.length === 1 && parts[0] === 'version') {
+    return json({ version: version ?? 'dev' });
   }
 
   // ---------------------------------------------------------------------------

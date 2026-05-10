@@ -174,6 +174,41 @@ describe('GET /api/health', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/version
+// ---------------------------------------------------------------------------
+
+describe('GET /api/version', () => {
+  it('returns 200 with { version: dev } when no version arg is passed', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+
+    const res = await handler(req('GET', '/api/version'));
+
+    expect(res.status).toBe(200);
+    expect(await parseJson(res)).toEqual({ version: 'dev' });
+  });
+
+  it('returns the passed version string', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig(), 'v1.2.3-test');
+
+    const res = await handler(req('GET', '/api/version'));
+
+    expect(res.status).toBe(200);
+    expect(await parseJson(res)).toEqual({ version: 'v1.2.3-test' });
+  });
+
+  it('is exempt from auth', async () => {
+    const { runtime } = createTestRuntime();
+    const config = createTestConfig({ apiKey: 'secret-key' });
+    const handler = createHandler(runtime, config);
+
+    const res = await handler(req('GET', '/api/version'));
+    expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/invoices
 // ---------------------------------------------------------------------------
 

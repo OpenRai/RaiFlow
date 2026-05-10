@@ -333,3 +333,42 @@ describe('WebhooksResource', () => {
     expect(call[1]?.method).toBe('DELETE');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SystemResource
+// ---------------------------------------------------------------------------
+
+describe('SystemResource', () => {
+  let mockFetch: ReturnType<typeof createMockFetch>;
+
+  beforeEach(() => {
+    mockFetch = createMockFetch();
+    vi.stubGlobal('fetch', mockFetch);
+  });
+
+  it('health sends GET to /api/health', async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ status: 'ok' }));
+
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
+    const result = await client.system.health();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
+    expect(call[0]).toBe('http://localhost:3000/api/health');
+    expect(call[1]?.method).toBe('GET');
+    expect(result.status).toBe('ok');
+  });
+
+  it('version sends GET to /api/version', async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ version: 'v1.2.3' }));
+
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
+    const result = await client.system.version();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
+    expect(call[0]).toBe('http://localhost:3000/api/version');
+    expect(call[1]?.method).toBe('GET');
+    expect(result.version).toBe('v1.2.3');
+  });
+});
