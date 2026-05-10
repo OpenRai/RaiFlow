@@ -386,12 +386,22 @@ const server = createServer(async (req, res) => {
       webReq.headers.get('x-raiflow-dashboard') === 'true' ||
       webReq.headers.get('referer')?.includes('/dashboard');
 
+    const debugHeaders: Record<string, string> = {};
+    for (const h of ['host', 'user-agent', 'x-forwarded-for', 'x-real-ip',
+                     'x-forwarded-proto', 'x-forwarded-host', 'x-request-id',
+                     'accept', 'referer', 'origin']) {
+      const val = req.headers[h];
+      if (typeof val === 'string') debugHeaders[h] = val;
+    }
+
     metrics.recordRequest({
       method: webReq.method,
       path,
       status: webRes.status,
       durationMs: Date.now() - startedAt,
       isDashboard,
+      remoteAddr: req.socket?.remoteAddress ?? undefined,
+      headers: debugHeaders,
     });
     await sendWebResponse(webRes, res);
   } catch (err) {
@@ -403,6 +413,8 @@ const server = createServer(async (req, res) => {
       status: 500,
       durationMs: Date.now() - startedAt,
       isDashboard: path.startsWith('/dashboard'),
+      remoteAddr: req.socket?.remoteAddress ?? undefined,
+      headers: {},
     });
     logger.error('unhandled request error:', message);
     res.writeHead(500, { 'Content-Type': 'application/json' });

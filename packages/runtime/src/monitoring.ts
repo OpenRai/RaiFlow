@@ -5,6 +5,8 @@ export interface RuntimeRequestSample {
   durationMs: number;
   at: string;
   isDashboard?: boolean;
+  remoteAddr?: string;
+  headers?: Record<string, string>;
 }
 
 export interface RuntimeMetricsSnapshot {

@@ -310,7 +310,7 @@ export async function renderDashboard(
 
   const reqList = (options?.showInternal
     ? metrics?.recentRequests ?? []
-    : (metrics?.recentRequests ?? []).filter((r: { isDashboard?: boolean }) => !r.isDashboard)) as Array<{method:string;path:string;status:number;durationMs:number;at:string;isDashboard?:boolean}>;
+    : (metrics?.recentRequests ?? []).filter((r: { isDashboard?: boolean; path?: string }) => !r.isDashboard && r.path !== '/api/health')) as Array<{method:string;path:string;status:number;durationMs:number;at:string;isDashboard?:boolean;remoteAddr?:string;headers?:Record<string,string>}>;
 
   const mainContent = view === 'overview'
     ? `
@@ -480,7 +480,7 @@ export async function renderDashboard(
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
         <h2 class="section-title" style="margin-bottom: 0;">Recent HTTP Requests</h2>
         <label class="toggle-container">
-          <input type="checkbox" onchange="window.location.search = (() => { const p = new URLSearchParams(window.location.search); const k = 'showInternal'; if (this.checked) p.set(k, 'true'); else p.delete(k); return p.toString() ? '?' + p.toString() : ''; })()" ${options?.showInternal ? 'checked' : ''}>
+          <input type="checkbox" onchange="const p=new URLSearchParams(window.location.search);const k='showInternal';if(this.checked)p.set(k,'true');else p.delete(k);const qs=p.toString()?'?'+p.toString():'';history.replaceState(null,'',window.location.pathname+qs);if(window.__refreshDashboard)window.__refreshDashboard();" ${options?.showInternal ? 'checked' : ''}>
           <span class="toggle-label">Show internal</span>
         </label>
       </div>
@@ -521,7 +521,92 @@ export async function renderDashboard(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RaiFlow Runtime Dashboard</title>
-  <meta http-equiv="refresh" content="5">
+  <script>
+(function(){
+  let reqData = [];
+  let currentModalIdx = null;
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+  function tagClass(s) { return s >= 500 ? 'tag-bad' : s >= 400 ? 'tag-warn' : s >= 200 ? 'tag-good' : 'tag-info'; }
+  function showReqModal(idx) {
+    const r = reqData[idx];
+    if (!r) { closeReqModal(); return; }
+    const ts = new Date(r.at).toLocaleString();
+    document.getElementById('modal-title').textContent = r.method + ' ' + r.path;
+    document.getElementById('modal-sub').textContent = ts + ' \u00b7 ' + r.status + ' \u00b7 ' + r.durationMs + 'ms';
+    let html =
+      '<dt>Method</dt><dd class="mono">' + escapeHtml(r.method) + '</dd>' +
+      '<dt>Path</dt><dd class="mono">' + escapeHtml(r.path) + '</dd>' +
+      '<dt>Status</dt><dd><span class="tag ' + tagClass(r.status) + '">' + r.status + '</span></dd>' +
+      '<dt>Duration</dt><dd>' + r.durationMs + 'ms</dd>' +
+      '<dt>Timestamp</dt><dd>' + ts + '</dd>' +
+      '<dt>Internal</dt><dd>' + (r.isDashboard ? 'yes (dashboard)' : 'no') + '</dd>';
+    if (r.remoteAddr) {
+      html += '<dt>Remote Addr</dt><dd class="mono">' + escapeHtml(r.remoteAddr) + '</dd>';
+    }
+    if (r.headers) {
+      for (const [k, v] of Object.entries(r.headers)) {
+        html += '<dt>' + escapeHtml(k) + '</dt><dd class="mono">' + escapeHtml(v) + '</dd>';
+      }
+    }
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('req-modal').classList.add('open');
+    currentModalIdx = idx;
+  }
+  function closeReqModal() {
+    document.getElementById('req-modal').classList.remove('open');
+    currentModalIdx = null;
+  }
+  window.showReqModal = showReqModal;
+  window.closeReqModal = closeReqModal;
+
+  async function refreshDashboard() {
+    try {
+      const res = await fetch(window.location.href);
+      const text = await res.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(text, 'text/html');
+      const newMain = doc.querySelector('main.shell');
+      const liveMain = document.querySelector('main.shell');
+      if (newMain && liveMain) {
+        liveMain.innerHTML = newMain.innerHTML;
+      }
+      const newScript = doc.querySelector('script[data-req-data]');
+      if (newScript) {
+        const json = (newScript.textContent || '').replace(/^\s*const\s+reqData\s*=\s*/, '').replace(/;\s*$/, '').trim();
+        if (json) reqData = JSON.parse(json);
+      }
+      if (currentModalIdx !== null) {
+        if (reqData[currentModalIdx]) {
+          showReqModal(currentModalIdx);
+        } else {
+          closeReqModal();
+        }
+      }
+    } catch (e) {
+      // Silent fail — next interval will retry
+    }
+  }
+  window.__refreshDashboard = refreshDashboard;
+
+  document.addEventListener('DOMContentLoaded', function() {
+    const script = document.querySelector('script[data-req-data]');
+    if (script) {
+      const json = (script.textContent || '').replace(/^\s*const\s+reqData\s*=\s*/, '').replace(/;\s*$/, '').trim();
+      if (json) {
+        try { reqData = JSON.parse(json); } catch (e) {}
+      }
+    }
+    setInterval(refreshDashboard, 5000);
+  });
+})();
+  </script>
   <style>
     :root {
       --bg: #0a0a0c;
@@ -947,30 +1032,9 @@ export async function renderDashboard(
         <dl class="kv-grid" id="modal-body"></dl>
       </div>
     </div>
-    <script>
+    <script data-req-data>
       const reqData = ${JSON.stringify(reqList.map(r => ({...r})))};
-      const tagClass = s => s >= 500 ? 'tag-bad' : s >= 400 ? 'tag-warn' : s >= 200 ? 'tag-good' : 'tag-info';
-      function showReqModal(idx) {
-        const r = reqData[idx];
-        if (!r) return;
-        const ts = new Date(r.at).toLocaleString();
-        document.getElementById('modal-title').textContent = r.method + ' ' + r.path;
-        document.getElementById('modal-sub').textContent = ts + ' · ' + r.status + ' · ' + r.durationMs + 'ms';
-        const isDash = r.isDashboard;
-        document.getElementById('modal-body').innerHTML =
-          '<dt>Method</dt><dd class="mono">' + r.method + '</dd>' +
-          '<dt>Path</dt><dd class="mono">' + r.path + '</dd>' +
-          '<dt>Status</dt><dd><span class="tag ' + tagClass(r.status) + '">' + r.status + '</span></dd>' +
-          '<dt>Duration</dt><dd>' + r.durationMs + 'ms</dd>' +
-          '<dt>Timestamp</dt><dd>' + ts + '</dd>' +
-          '<dt>Internal</dt><dd>' + (isDash ? 'yes (dashboard)' : 'no') + '</dd>';
-        document.getElementById('req-modal').classList.add('open');
-      }
-      function closeReqModal() {
-        document.getElementById('req-modal').classList.remove('open');
-      }
     </script>
-  </main>
 </body>
 </html>`;
 }
