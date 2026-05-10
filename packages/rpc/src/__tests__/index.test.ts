@@ -113,3 +113,85 @@ describe('@openrai/rpc difficulty caching', () => {
     expect(activeDifficultyCalls.length).toBe(2);
   });
 });
+
+describe('@openrai/rpc accountsReceivable', () => {
+  let pool: ReturnType<typeof createRpcPool>;
+  let client: ReturnType<typeof pool.getClient>;
+
+  beforeEach(() => {
+    pool = createRpcPool([]);
+    client = pool.getClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockPostJson(handler: (payload: Record<string, unknown>) => unknown) {
+    const rawClient = (client as any).client;
+    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
+    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
+      if (payload.action === 'accounts_receivable') {
+        return handler(payload);
+      }
+      return originalPostJson(payload);
+    };
+  }
+
+  it('returns empty array when node reports Account not found', async () => {
+    mockPostJson(() => {
+      throw new Error('Account not found');
+    });
+
+    const result = await client.accountsReceivable('nano_1unopenedaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+
+    expect(result).toEqual([]);
+  });
+
+  it('sends accounts (plural) parameter as an array', async () => {
+    let capturedPayload: Record<string, unknown> | undefined;
+    mockPostJson((payload) => {
+      capturedPayload = payload;
+      return { blocks: {} };
+    });
+
+    await client.accountsReceivable('nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+
+    expect(capturedPayload).toBeDefined();
+    expect(capturedPayload!['accounts']).toEqual(['nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx']);
+    expect(capturedPayload!['account']).toBeUndefined();
+  });
+
+  it('returns empty array when response has no blocks field', async () => {
+    mockPostJson(() => {
+      return {} as any; // node returns empty object (no blocks key)
+    });
+
+    const result = await client.accountsReceivable('nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+
+    expect(result).toEqual([]);
+  });
+
+  it('maps blocks to Receivable objects on success', async () => {
+    mockPostJson(() => ({
+      blocks: {
+        block_hash_1: { amount: '1000000000000000000000000000000', sender: 'nano_1sender' },
+        block_hash_2: { amount: '500000000000000000000000000000', sender: 'nano_2sender' },
+      },
+    }));
+
+    const result = await client.accountsReceivable('nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+
+    expect(result).toHaveLength(2);
+    expect(result).toContainEqual({
+      hash: 'block_hash_1',
+      amount: '1000000000000000000000000000000',
+      sender: 'nano_1sender',
+    });
+    expect(result).toContainEqual({
+      hash: 'block_hash_2',
+      amount: '500000000000000000000000000000',
+      sender: 'nano_2sender',
+    });
+  });
+});

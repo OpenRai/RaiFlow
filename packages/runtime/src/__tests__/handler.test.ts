@@ -515,7 +515,7 @@ describe('POST /api/blocks', () => {
     const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     (runtime as any).rpcPool = {
-      getClient: () => createMockRpcClient(new Error('Block work is less than threshold')),
+      getClient: () => createMockRpcClient({ processError: new Error('Block work is less than threshold') }),
     };
 
     const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });
@@ -531,7 +531,7 @@ describe('POST /api/blocks', () => {
     const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     (runtime as any).rpcPool = {
-      getClient: () => createMockRpcClient(new Error('Fork')),
+      getClient: () => createMockRpcClient({ processError: new Error('Fork') }),
     };
 
     const blockJson = JSON.stringify({ type: 'send', hash: 'abc123' });
@@ -540,6 +540,97 @@ describe('POST /api/blocks', () => {
     expect(res.status).toBe(500);
     const body = await parseJson(res) as { error: { code: string } };
     expect(body.error.code).toBe('internal_error');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/accounts/:id/receivable
+// ---------------------------------------------------------------------------
+
+describe('GET /api/accounts/:id/receivable', () => {
+  const FAKE_ACCOUNT_ID = 'e0b330c7-6505-4130-97ea-ecfac3621934';
+  const FAKE_ADDRESS = 'nano_3testing123456789abcdefghijklmnopqrstuvwxyz0123456789abcdef';
+
+  function setupReceivableTest(rpcMock: ReturnType<typeof createMockRpcClient>) {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    vi.spyOn(runtime, 'getAccount').mockResolvedValue({
+      id: FAKE_ACCOUNT_ID,
+      type: 'watched',
+      address: FAKE_ADDRESS,
+      label: null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    (runtime as any).rpcPool = {
+      getClient: () => rpcMock,
+    };
+
+    return { handler, runtime };
+  }
+
+  it('returns 502 (not 500) when RPC client throws Account not found', async () => {
+    // In production, the rpc layer catches "Account not found" and returns [].
+    // But if ANY error still propagates from the rpc client, the handler must
+    // catch it and return 502 — never let it bubble to a 500.
+    const rpcMock = createMockRpcClient({
+      accountsReceivable: vi.fn().mockRejectedValue(new Error('Account not found')),
+    });
+    const { handler } = setupReceivableTest(rpcMock);
+
+    const res = await handler(req('GET', `/api/accounts/${FAKE_ACCOUNT_ID}/receivable`));
+
+    expect(res.status).toBe(502);
+    const body = await parseJson(res) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('rpc_error');
+    expect(body.error.message).toBe('Account not found');
+  });
+
+  it('returns 200 with receivable data on success', async () => {
+    const receivableData = [
+      { hash: 'block_hash_1', amount: '1000000000000000000000000000000', sender: 'nano_1sender' },
+    ];
+    const rpcMock = createMockRpcClient({
+      accountsReceivable: vi.fn().mockResolvedValue(receivableData),
+    });
+    const { handler } = setupReceivableTest(rpcMock);
+
+    const res = await handler(req('GET', `/api/accounts/${FAKE_ACCOUNT_ID}/receivable`));
+
+    expect(res.status).toBe(200);
+    const body = await parseJson(res) as { data: unknown[] };
+    expect(body.data).toEqual(receivableData);
+  });
+
+  it('returns 502 when RPC fails with a network/infrastructure error', async () => {
+    const rpcMock = createMockRpcClient({
+      accountsReceivable: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+    });
+    const { handler } = setupReceivableTest(rpcMock);
+
+    const res = await handler(req('GET', `/api/accounts/${FAKE_ACCOUNT_ID}/receivable`));
+
+    // Network errors should be 502 Bad Gateway, not 500 Internal Server Error
+    expect(res.status).toBe(502);
+    const body = await parseJson(res) as { error: { code: string } };
+    expect(body.error.code).toBe('rpc_error');
+  });
+
+  it('returns 404 when account does not exist in RaiFlow', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    // Don't mock getAccount — let it return undefined naturally
+    const res = await handler(req('GET', `/api/accounts/non-existent-id/receivable`));
+
+    expect(res.status).toBe(404);
   });
 });
 

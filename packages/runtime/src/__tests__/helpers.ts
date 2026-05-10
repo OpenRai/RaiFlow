@@ -103,9 +103,13 @@ export async function createHandlerWithInvoice(
   return { handler, invoice };
 }
 
-export function createMockRpcClient(processError: Error | null) {
+export function createMockRpcClient(overrides?: {
+  processError?: Error | null;
+  accountsReceivable?: ReturnType<typeof vi.fn>;
+}) {
   return {
-    process: vi.fn().mockRejectedValue(processError),
+    process: vi.fn().mockRejectedValue(overrides?.processError ?? null),
+    accountsReceivable: overrides?.accountsReceivable ?? vi.fn().mockResolvedValue([]),
   };
 }
 

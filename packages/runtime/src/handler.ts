@@ -333,8 +333,13 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         }
         const client = runtime.rpcPool?.getClient();
         if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
-        const receivable = await client.accountsReceivable(account.address);
-        return json({ data: receivable });
+        try {
+          const receivable = await client.accountsReceivable(account.address);
+          return json({ data: receivable });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'RPC error';
+          return errorResponse(message, 'rpc_error', 502);
+        }
       }
     }
   }

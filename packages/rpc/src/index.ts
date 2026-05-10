@@ -93,17 +93,29 @@ class PooledRpcClient implements RpcClient {
   }
 
   async accountsReceivable(account: string): Promise<Receivable[]> {
-    const response = await this.client.rpcPool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
-      action: 'accounts_receivable',
-      account,
-      source: true,
-      include_only_confirmed: false,
-    });
+    let response: { blocks?: Record<string, { amount: string; sender: string }> };
+    try {
+      response = await this.client.rpcPool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
+        action: 'accounts_receivable',
+        accounts: [account],
+        source: true,
+        include_only_confirmed: false,
+      });
+    } catch (err) {
+      // Nano nodes return "Account not found" for unopened accounts.
+      // This is not an error — it simply means there are zero receivable blocks.
+      if (err instanceof Error && err.message === 'Account not found') {
+        return [];
+      }
+      throw err;
+    }
+
+    if (!response.blocks) return [];
 
     return Object.entries(response.blocks).map(([hash, block]) => ({
       hash,
-      amount: (block as { amount: string }).amount,
-      sender: (block as { sender: string }).sender,
+      amount: block.amount,
+      sender: block.sender,
     }));
   }
 
