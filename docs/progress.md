@@ -59,8 +59,9 @@ packages/
 Building in order:
 1. ✅ Accounts service (managed + watched)
 2. ✅ Sends service (idempotent, state machine)
-3. Publish service (pre-signed blocks)
-4. Work generation API
+3. ✅ Account Watch Pool & Real-Time Event Fan-Out
+4. Publish service (pre-signed blocks)
+5. Work generation API
 
 Current frontier:
 - Account and Send resources are exposed through the runtime HTTP API and the `@openrai/raiflow-sdk` package.
@@ -68,6 +69,10 @@ Current frontier:
 - The runtime wires `accountStore`, `sendStore`, `custodyEngine`, `rpcPool`, and `Watcher` together in `main.ts`.
 - `Watcher` now forwards confirmations for both incoming (recipient match) and outgoing (sender match) blocks.
 - `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
+- **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s.
+- **SubscriptionManager** deduplicates SSE connections and fans out `AccountEvent`s to subscribed clients.
+- **SSE stream** (`GET /api/accounts/stream`) with `X-Raiflow-Stream-Id` header, plus `POST/DELETE /api/accounts/:id/watch` for dynamic subscribe/unsubscribe.
+- **SDK** adds `accounts.watch()` returning an `AsyncIterable<AccountEvent>`, backed by a shared `SseConnection` with auto-reconnect.
 - Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime auto-generates and enforces API keys.
 - Next transport follow-up is to persist and surface infrastructure events like `rpc.connected` and `rpc.failover` through the runtime once the legacy event adapter no longer constrains non-invoice event types.
 
