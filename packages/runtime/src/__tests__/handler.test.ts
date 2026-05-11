@@ -3,6 +3,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
+import { AccountStateSync } from '../account-state-sync.js';
+import { SubscriptionManager } from '../subscription-manager.js';
 import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT, createTestInvoice, createHandlerWithRuntime, createHandlerWithInvoice, createMockRpcClient } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -721,5 +723,109 @@ describe('Unknown route', () => {
     const res = await handler(req('GET', '/this-does-not-exist'));
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SSE & Watch endpoints
+// ---------------------------------------------------------------------------
+
+describe('SSE stream', () => {
+  it('returns SSE response with stream ID header', async () => {
+    const { runtime } = createTestRuntime();
+    const subMgr = new SubscriptionManager();
+    const handler = createHandler(runtime, createTestConfig(), undefined, undefined, subMgr);
+
+    const res = await handler(req('GET', '/api/accounts/stream'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
+    expect(res.headers.get('x-raiflow-stream-id')).toBeTruthy();
+  });
+
+  it('accepts ?accounts= query for initial bulk subscribe', async () => {
+    const { runtime } = createTestRuntime();
+    const subMgr = new SubscriptionManager();
+    const handler = createHandler(runtime, createTestConfig(), undefined, undefined, subMgr);
+
+    const res = await handler(req('GET', '/api/accounts/stream?accounts=nano_1a,nano_1b'));
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('Watch / Unwatch', () => {
+  function setup() {
+    const { runtime } = createTestRuntime();
+    const account = {
+      id: 'acc-1',
+      type: 'watched',
+      address: 'nano_1watch1111111111111111111111111111111111111111111111111111',
+      label: null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    (runtime as any).accountStore = {
+      get: vi.fn().mockResolvedValue(account),
+      getByAddress: vi.fn().mockResolvedValue(account),
+      list: vi.fn().mockResolvedValue([account]),
+      update: vi.fn().mockResolvedValue(account),
+      create: vi.fn().mockResolvedValue(account),
+    };
+
+    const subMgr = new SubscriptionManager();
+    const accountSync = new AccountStateSync(
+      { getClient: vi.fn().mockReturnValue({ accountInfo: vi.fn().mockResolvedValue(null) }) } as any,
+      (runtime as any).accountStore,
+      { addAccount: vi.fn(), removeAccount: vi.fn() },
+      (event) => subMgr.publish(event),
+      undefined,
+    );
+
+    const handler = createHandler(runtime, createTestConfig(), undefined, accountSync, subMgr);
+    return { runtime, handler, account, subMgr };
+  }
+
+  it('POST /api/accounts/:id/watch returns 204 with valid stream ID', async () => {
+    const { handler, account } = setup();
+
+    // Open SSE first
+    const sseRes = await handler(req('GET', '/api/accounts/stream'));
+    const streamId = sseRes.headers.get('x-raiflow-stream-id')!;
+
+    const res = await handler(req('POST', `/api/accounts/${account.id}/watch`, {
+      headers: { 'X-Raiflow-Stream-Id': streamId },
+    }));
+
+    expect(res.status).toBe(204);
+  });
+
+  it('POST /api/accounts/:id/watch rejects missing stream ID', async () => {
+    const { handler, account } = setup();
+
+    const res = await handler(req('POST', `/api/accounts/${account.id}/watch`));
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE /api/accounts/:id/watch returns 204', async () => {
+    const { handler, account } = setup();
+
+    const sseRes = await handler(req('GET', '/api/accounts/stream'));
+    const streamId = sseRes.headers.get('x-raiflow-stream-id')!;
+
+    await handler(req('POST', `/api/accounts/${account.id}/watch`, {
+      headers: { 'X-Raiflow-Stream-Id': streamId },
+    }));
+
+    const res = await handler(req('DELETE', `/api/accounts/${account.id}/watch`, {
+      headers: { 'X-Raiflow-Stream-Id': streamId },
+    }));
+
+    expect(res.status).toBe(204);
   });
 });

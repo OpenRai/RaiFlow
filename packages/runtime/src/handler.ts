@@ -1,10 +1,13 @@
 // @openrai/runtime — Framework-agnostic HTTP handler
 
+import { randomUUID } from 'node:crypto';
 import type { InvoiceStatus, RaiFlowEventType } from '@openrai/model';
 import { RaiFlowError, isErrorWithCode } from '@openrai/model';
 import { type RaiFlowConfig } from '@openrai/config';
 import { Runtime } from './runtime.js';
 import { renderDashboard } from './dashboard.js';
+import type { AccountStateSync } from './account-state-sync.js';
+import type { SubscriptionManager, SSEController } from './subscription-manager.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,13 +112,19 @@ function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
   return undefined;
 }
 
-export function createHandler(runtime: Runtime, config: RaiFlowConfig, version?: string): (req: Request) => Promise<Response> {
+export function createHandler(
+  runtime: Runtime,
+  config: RaiFlowConfig,
+  version?: string,
+  accountStateSync?: AccountStateSync,
+  subscriptionManager?: SubscriptionManager,
+): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
       const authFailure = checkAuth(req, config);
       if (authFailure) return authFailure;
 
-      return await route(req, runtime, config, version);
+      return await route(req, runtime, config, version, accountStateSync, subscriptionManager);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
       return errorResponse(message, 'internal_error', 500);
@@ -123,7 +132,7 @@ export function createHandler(runtime: Runtime, config: RaiFlowConfig, version?:
   };
 }
 
-async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, version?: string): Promise<Response> {
+async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, version?: string, accountStateSync?: AccountStateSync, subscriptionManager?: SubscriptionManager): Promise<Response> {
   const { url, parts, method } = parseRoute(req);
 
   // GET / — wayfinder (static landing page)
@@ -180,14 +189,14 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
 
   // /api/* — API routes (strip 'api' prefix)
   if (parts[0] === 'api') {
-    return routeApi(parts.slice(1), url, method, req, runtime, version);
+    return routeApi(parts.slice(1), url, method, req, runtime, version, accountStateSync, subscriptionManager);
   }
 
   // No route matched
   return errorResponse('Not found', 'not_found', 404);
 }
 
-async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime, version?: string): Promise<Response> {
+async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime, version?: string, accountStateSync?: AccountStateSync, subscriptionManager?: SubscriptionManager): Promise<Response> {
   // GET /api/health
   if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
     return json({ status: 'ok' });
@@ -203,6 +212,68 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
   // ---------------------------------------------------------------------------
 
   if (parts[0] === 'accounts') {
+    // GET /api/accounts/stream — SSE endpoint
+    if (method === 'GET' && parts.length === 2 && parts[1] === 'stream') {
+      if (!subscriptionManager) {
+        return errorResponse('Streaming not configured', 'bad_request', 400);
+      }
+
+      const streamId = randomUUID();
+      const accountsParam = url.searchParams.get('accounts') ?? undefined;
+
+      const stream = new ReadableStream({
+        start: (controller) => {
+          let closed = false;
+
+          const sseController: SSEController = {
+            id: streamId,
+            enqueue(event: string) {
+              if (closed) return;
+              controller.enqueue(new TextEncoder().encode(event));
+            },
+            close() {
+              closed = true;
+              controller.close();
+            },
+            get closed() {
+              return closed;
+            },
+          };
+
+          // Always register the connection so watch/unwatch REST calls can find it
+          subscriptionManager.register(sseController);
+
+          if (accountsParam && accountStateSync) {
+            const addresses = accountsParam.split(',').map((a) => a.trim()).filter(Boolean);
+            for (const addr of addresses) {
+              // Subscribe first — client receives events from reconciliation immediately
+              subscriptionManager.subscribe(addr, sseController);
+              // Add to watcher in background — 30s reconciliation handles retry
+              accountStateSync.addAccount(addr).catch(() => {});
+            }
+          }
+
+          // Send initial comment to establish connection
+          controller.enqueue(new TextEncoder().encode(':ok\n\n'));
+
+          req.signal.addEventListener('abort', () => {
+            closed = true;
+            subscriptionManager.removeConnection(sseController);
+          });
+        },
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-Raiflow-Stream-Id': streamId,
+        },
+      });
+    }
+
     // POST /api/accounts
     if (method === 'POST' && parts.length === 1) {
       const body = await req.json() as Record<string, unknown>;
@@ -282,6 +353,51 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           if (handled) return handled;
           throw err;
         }
+      }
+
+      // POST /api/accounts/:id/watch
+      if (method === 'POST' && parts.length === 3 && parts[2] === 'watch') {
+        if (!accountStateSync || !subscriptionManager) {
+          return errorResponse('Streaming not configured', 'bad_request', 400);
+        }
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        const streamId = req.headers.get('x-raiflow-stream-id');
+        if (!streamId) {
+          return errorResponse('Missing X-Raiflow-Stream-Id header', 'bad_request', 400);
+        }
+        const sseController = subscriptionManager.getConnection(streamId);
+        if (!sseController) {
+          return errorResponse('Invalid or expired stream ID', 'bad_request', 400);
+        }
+        await accountStateSync.addAccount(account.address);
+        subscriptionManager.subscribe(account.address, sseController);
+        return new Response(null, { status: 204 });
+      }
+
+      // DELETE /api/accounts/:id/watch
+      if (method === 'DELETE' && parts.length === 3 && parts[2] === 'watch') {
+        if (!subscriptionManager) {
+          return errorResponse('Streaming not configured', 'bad_request', 400);
+        }
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        const streamId = req.headers.get('x-raiflow-stream-id');
+        if (!streamId) {
+          return errorResponse('Missing X-Raiflow-Stream-Id header', 'bad_request', 400);
+        }
+        const sseController = subscriptionManager.getConnection(streamId);
+        if (sseController) {
+          subscriptionManager.unsubscribe(account.address, sseController);
+        }
+        if (!subscriptionManager.hasSubscribers(account.address)) {
+          accountStateSync?.removeAccount(account.address);
+        }
+        return new Response(null, { status: 204 });
       }
 
       // POST /api/accounts/:id/sends

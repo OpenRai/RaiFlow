@@ -5,6 +5,7 @@ import { SendsResource } from './resources/Sends.js';
 import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
 import { WorkResource } from './resources/Work.js';
+import { SseConnection } from './sse-connection.js';
 
 export interface RaiFlowClientOptions {
   /** Base URL of the RaiFlow runtime (e.g. "http://localhost:3000") */
@@ -27,6 +28,7 @@ export class RaiFlowClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly basePath: string;
+  private _sseConnection?: SseConnection;
 
   private constructor(options: RaiFlowClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -43,6 +45,14 @@ export class RaiFlowClient {
 
   public static initialize(options: RaiFlowClientOptions): RaiFlowClient {
     return new RaiFlowClient(options);
+  }
+
+  /** Internal: lazy-initialized SSE connection */
+  get sseConnection(): SseConnection {
+    if (!this._sseConnection) {
+      this._sseConnection = new SseConnection(this.baseUrl, this.apiKey);
+    }
+    return this._sseConnection;
   }
 
   /** Internal: make an HTTP request to the runtime */

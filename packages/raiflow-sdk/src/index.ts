@@ -1,4 +1,5 @@
 export { RaiFlowClient, type RaiFlowClientOptions } from './client.js';
+export { SseConnection } from './sse-connection.js';
 export {
   AccountsResource,
   type CreateManagedAccountOptions,
@@ -44,6 +45,8 @@ export type {
   SendStatus,
   RaiFlowEvent,
   RaiFlowEventType,
+  AccountEvent,
+  AccountEventType,
   CompletionPolicy,
   WebhookEndpoint,
   CreateInvoiceRequest,
