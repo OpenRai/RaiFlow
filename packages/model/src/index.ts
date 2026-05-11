@@ -286,6 +286,39 @@ export interface RpcFailoverEvent extends RaiFlowEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Account Event System (real-time streaming)
+// ---------------------------------------------------------------------------
+
+export type AccountEventType =
+  | 'account.state_synced'
+  | 'account.payment_received'
+  | 'account.balance_updated'
+  | 'account.frontier_updated';
+
+export interface AccountEvent {
+  id: string;
+  type: AccountEventType;
+  accountId: string;
+  accountAddress: string;
+  timestamp: string;
+  data: {
+    blockHash?: string;
+    senderAccount?: string;
+    amountRaw?: string;
+    previousBalanceRaw?: string;
+    newBalanceRaw?: string;
+    previousFrontier?: string | null;
+    newFrontier?: string | null;
+    snapshot?: {
+      balanceRaw: string;
+      frontier: string | null;
+      representative: string | null;
+      blockCount: number;
+    };
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response DTOs
 // ---------------------------------------------------------------------------
 

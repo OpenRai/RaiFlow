@@ -19,6 +19,8 @@ import { createCustodyEngine } from '@openrai/custody';
 import { Watcher } from '@openrai/watcher';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
+import { AccountStateSync } from './account-state-sync.js';
+import { SubscriptionManager } from './subscription-manager.js';
 import { createRuntimeMetrics } from './monitoring.js';
 import { resolveApiKey } from './auth.js';
 import { findWorkspaceRoot } from './workspace.js';
@@ -308,26 +310,50 @@ const runtime = new Runtime({
 });
 
 // ---------------------------------------------------------------------------
+// Subscription manager & account state sync
+// ---------------------------------------------------------------------------
+
+const subscriptionManager = new SubscriptionManager();
+
+// Mutable reference to break the Watcher <-> AccountStateSync cycle
+let watcher: Watcher | undefined;
+
+const accountStateSync = new AccountStateSync(
+  rpcPool,
+  accountStore,
+  {
+    addAccount: (a: string) => watcher?.addAccount(a),
+    removeAccount: (a: string) => watcher?.removeAccount(a),
+  },
+  (event) => subscriptionManager.publish(event),
+  (block) => runtime.handleConfirmedBlock(block),
+  { reconcileIntervalMs: 30_000 },
+);
+
+// ---------------------------------------------------------------------------
 // Watcher
 // ---------------------------------------------------------------------------
 
-const watcher = new Watcher({
+watcher = new Watcher({
   wsUrl: config.nano.ws[0],
   rpcUrl: config.nano.rpc[0],
   accounts: [],
-  sink: runtime,
+  sink: accountStateSync,
   pollIntervalMs: 5000,
 });
 
-// Seed watcher with existing accounts
+// Seed state sync with existing accounts
 const existingAccounts = await accountStore.list();
 for (const acc of existingAccounts) {
-  watcher.addAccount(acc.address);
+  await accountStateSync.addAccount(acc.address);
 }
 
 runtime.watcher = watcher;
 watcher.start();
 logger.info('watcher started', `accounts=${existingAccounts.length}`);
+
+accountStateSync.start();
+logger.info('account state sync started');
 
 runtime.start();
 logger.info('runtime started');
@@ -336,7 +362,7 @@ logger.info('runtime started');
 // Handler
 // ---------------------------------------------------------------------------
 
-const handle = createHandler(runtime, config, APP_VERSION);
+const handle = createHandler(runtime, config, APP_VERSION, accountStateSync, subscriptionManager);
 
 // ---------------------------------------------------------------------------
 // HTTP server

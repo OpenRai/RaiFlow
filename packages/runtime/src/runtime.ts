@@ -551,6 +551,7 @@ export class Runtime implements WatcherSink {
         const newBalanceRaw = (BigInt(account.balanceRaw) + BigInt(block.amountRaw)).toString();
         const updated = await this.accountStore.update(account.id, {
           balanceRaw: newBalanceRaw,
+          frontier: block.blockHash,
         });
 
         await this.emitV2Event({

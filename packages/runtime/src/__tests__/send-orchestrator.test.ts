@@ -339,4 +339,29 @@ describe('SendOrchestrator', () => {
       data: expect.objectContaining({ reason: 'Block work is less than threshold' }),
     }));
   });
+
+  it('does NOT fall back to ZERO_HASH on transient RPC error', async () => {
+    const send = makeSend();
+    const account = makeAccount();
+
+    (accountStore.get as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (sendStore.listByStatus as ReturnType<typeof vi.fn>).mockResolvedValue([send]);
+    (sendStore.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...send, status: 'failed' });
+
+    const mockClient = {
+      accountInfo: vi.fn().mockRejectedValue(new Error('RPC timeout')),
+      process: vi.fn(),
+    };
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue(mockClient);
+
+    await orchestrator.tick();
+
+    // Should NOT have called process — transient RPC error should abort before signing
+    expect(mockClient.process).not.toHaveBeenCalled();
+    expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'failed' }));
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      type: 'send.failed',
+      data: expect.objectContaining({ reason: 'RPC timeout' }),
+    }));
+  });
 });

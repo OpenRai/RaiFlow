@@ -11,7 +11,7 @@ export interface RpcNodeConfig {
 }
 
 export interface RpcClient {
-  accountInfo(account: string): Promise<AccountInfoResponse>;
+  accountInfo(account: string): Promise<AccountInfoResponse | undefined>;
   accountsReceivable(account: string): Promise<Receivable[]>;
   process(block: string): Promise<ProcessResponse>;
   workGenerate(hash: string, difficulty?: string, blockType?: 'send' | 'receive'): Promise<WorkGenerateResponse>;
@@ -83,13 +83,22 @@ class PooledRpcClient implements RpcClient {
     private readonly getDifficulty: () => Promise<ActiveDifficulty>,
   ) {}
 
-  async accountInfo(account: string): Promise<AccountInfoResponse> {
-    return this.client.rpcPool.postJson<AccountInfoResponse>({
-      action: 'account_info',
-      account,
-      representative: true,
-      confirmed: true,
-    });
+  async accountInfo(account: string): Promise<AccountInfoResponse | undefined> {
+    try {
+      return await this.client.rpcPool.postJson<AccountInfoResponse>({
+        action: 'account_info',
+        account,
+        representative: true,
+        confirmed: true,
+      });
+    } catch (err) {
+      // Nano nodes return "Account not found" for unopened accounts.
+      // This is not an error — it simply means the account has not been opened yet.
+      if (err instanceof Error && err.message === 'Account not found') {
+        return undefined;
+      }
+      throw err;
+    }
   }
 
   async accountsReceivable(account: string): Promise<Receivable[]> {

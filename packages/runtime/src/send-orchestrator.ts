@@ -52,11 +52,9 @@ export class SendOrchestrator {
       if (!account) throw new Error('Account not found');
 
       const client = this.rpcPool.getClient();
-      let info;
-      try {
-        info = await client.accountInfo(account.address);
-      } catch {
-        // Treat as unopened account
+      let info = await client.accountInfo(account.address);
+      if (!info) {
+        // Unopened account — use zero state
         info = {
           frontier: '0000000000000000000000000000000000000000000000000000000000000000',
           balance: '0',
