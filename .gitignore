@@ -159,3 +159,6 @@ vite.config.ts.timestamp-*
 
 # HTMX wallet demo — never commit private keys
 **/example-wallet-data.json
+
+# Agent plans
+.kilo/plans/
