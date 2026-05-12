@@ -77,17 +77,32 @@ pnpm release:version  # bump versions, commit, tag (after merge to main)
 
 ## Release Process
 
-Releases are local — CI does not publish packages.
+The Release workflow uses `changesets/action@v1` with npm Trusted Publishing (OIDC). On push to main:
+
+- Changesets present → creates a "Version Packages" PR
+- PR merged → runs `pnpm release` (`changeset publish --provenance`) → publishes all packages via OIDC → creates `@openrai/*@X.Y.Z` tags
+
+### Developer flow
 
 ```bash
-# After changes merged to main:
-pnpm release:version  # runs changeset version, commits, tags all public packages
-git push && git push --tags
-
-# npm Trusted Publishers detect tags automatically and publish to registry
+pnpm changeset  # add a changeset file
+git add . && git commit -m "chore: add changeset" && git push
 ```
 
-The Release CI workflow only builds and tests on push to main — it does not create PRs or publish.
+1. Push to main
+2. CI creates a "Version Packages" PR
+3. Merge the PR
+4. CI publishes automatically (OIDC, no tokens)
+
+### Manual escape hatch
+
+```bash
+# If the automated flow is unavailable:
+pnpm release:version  # runs changeset version, commits, tags all public packages
+git push && git push --tags
+```
+
+The `scripts/release-version.mjs` script is retained for manual releases, but the primary flow should be through `changesets/action`.
 
 **CRITICAL — No legacy token auth:** This project uses npm Trusted Publishers with OIDC via GitHub Actions. The workflow has `id-token: write` and publishes directly to npm. **Never suggest, ask about, or attempt to add a GitHub secret `NPM_TOKEN`.** Token-based npm auth is not acceptable in 2026. If OIDC publish fails, fix the OIDC/Trusted Publishers configuration (registry URL, workflow path, permissions, or npm-side publisher setup) — do not fall back to long-lived tokens.
 
