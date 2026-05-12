@@ -128,19 +128,24 @@ describe('@openrai/rpc accountsReceivable', () => {
   });
 
   function mockPostJson(handler: (payload: Record<string, unknown>) => unknown) {
-    const rawClient = (client as any).client;
-    const originalPostJson = rawClient.rpcPool.postJson.bind(rawClient.rpcPool);
-    rawClient.rpcPool.postJson = async (payload: Record<string, unknown>) => {
-      if (payload.action === 'accounts_receivable') {
-        return handler(payload);
-      }
-      return originalPostJson(payload);
-    };
+    // Mock at the rpcCall level — this is what accountInfo/accountsReceivable
+    // now use internally to avoid poisoning the EndpointPool with app-level errors.
+    const pooledClient = client as any;
+    const originalRpcCall = pooledClient.rpcCall?.bind(pooledClient);
+    if (pooledClient.rpcCall) {
+      pooledClient.rpcCall = async (payload: Record<string, unknown>) => {
+        if (payload.action === 'accounts_receivable') {
+          return handler(payload);
+        }
+        if (originalRpcCall) return originalRpcCall(payload);
+        throw new Error('No handler for action: ' + payload.action);
+      };
+    }
   }
 
   it('returns empty array when node reports Account not found', async () => {
     mockPostJson(() => {
-      throw new Error('Account not found');
+      return { error: 'Account not found' };
     });
 
     const result = await client.accountsReceivable('nano_1unopenedaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');

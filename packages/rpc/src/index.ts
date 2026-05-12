@@ -77,51 +77,158 @@ function configuredWorkUrls(nodes: RpcNodeConfig[]): string[] {
   return nodes.flatMap((node) => node.work);
 }
 
+/**
+ * A simple promise-based semaphore for limiting concurrency.
+ * Callers acquire a slot (waiting if all slots are taken) and release when done.
+ */
+class Semaphore {
+  private readonly queue: Array<() => void> = [];
+  private running = 0;
+
+  constructor(private readonly concurrency: number) {}
+
+  acquire(): Promise<void> {
+    if (this.running < this.concurrency) {
+      this.running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(resolve);
+    });
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.running--;
+    }
+  }
+}
+
 class PooledRpcClient implements RpcClient {
   constructor(
     private readonly client: NanoClient,
     private readonly getDifficulty: () => Promise<ActiveDifficulty>,
+    private readonly semaphore: Semaphore,
   ) {}
 
-  async accountInfo(account: string): Promise<AccountInfoResponse | undefined> {
+  /**
+   * Low-level RPC call that returns raw JSON responses without throwing on
+   * application-level errors (e.g. "Account not found"). Only transport errors
+   * (HTTP failures, network errors, timeouts) propagate as exceptions and are
+   * recorded by the EndpointPool.
+   *
+   * This prevents Nano RPC application errors from poisoning the endpoint pool's
+   * cooldown state — which would otherwise cause "All endpoints exhausted" cascades.
+   *
+   * Requests are serialized through a semaphore sized to the number of configured
+   * endpoints, so a single-endpoint pool never overwhelms the EndpointPool with
+   * concurrent failures that trigger cascading cooldown exhaustion.
+   */
+  private async rpcCall<T extends Record<string, unknown>>(
+    body: Record<string, unknown>,
+  ): Promise<T> {
+    await this.semaphore.acquire();
     try {
-      return await this.client.rpcPool.postJson<AccountInfoResponse>({
-        action: 'account_info',
-        account,
-        representative: true,
-        confirmed: true,
-      });
-    } catch (err) {
-      // Nano nodes return "Account not found" for unopened accounts.
-      // This is not an error — it simply means the account has not been opened yet.
-      if (err instanceof Error && err.message === 'Account not found') {
-        return undefined;
-      }
-      throw err;
+      return await this._rpcCallInner<T>(body);
+    } finally {
+      this.semaphore.release();
     }
   }
 
-  async accountsReceivable(account: string): Promise<Receivable[]> {
-    let response: { blocks?: Record<string, { amount: string; sender: string }> };
-    try {
-      response = await this.client.rpcPool.postJson<{ blocks: Record<string, { amount: string; sender: string }> }>({
-        action: 'accounts_receivable',
-        accounts: [account],
-        source: true,
-        include_only_confirmed: false,
-      });
-    } catch (err) {
-      // Nano nodes return "Account not found" for unopened accounts.
-      // This is not an error — it simply means there are zero receivable blocks.
-      if (err instanceof Error && err.message === 'Account not found') {
-        return [];
+  private async _rpcCallInner<T extends Record<string, unknown>>(
+    body: Record<string, unknown>,
+  ): Promise<T> {
+    // Access the internal EndpointPool and timeout from the HttpEndpointPool.
+    // These are public fields in nano-core's compiled output.
+    const rpcPool = this.client.rpcPool as unknown as {
+      pool: { execute: <R>(attempt: (endpoint: unknown) => Promise<R>) => Promise<R> };
+      timeoutMs: number | null;
+    };
+    const endpointPool = rpcPool.pool;
+    const timeoutMs = rpcPool.timeoutMs;
+
+    return endpointPool.execute(async (ep: unknown) => {
+      const endpoint = ep as {
+        url: URL;
+        auth: { type: string; value?: string; policy?: string };
+      };
+
+      // Build headers (mirrors nano-core's buildHeaders logic)
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (endpoint.auth.type === 'api-key' && endpoint.auth.value) {
+        if (endpoint.auth.policy === 'basic-header') {
+          headers['Authorization'] = `Basic ${btoa(`${endpoint.auth.value}:`)}`;
+        } else {
+          headers['Authorization'] = `Bearer ${endpoint.auth.value}`;
+        }
       }
-      throw err;
+
+      const controller = timeoutMs !== null ? new AbortController() : null;
+      const timer = controller && timeoutMs !== null
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : null;
+
+      let response: Response;
+      try {
+        response = await fetch(endpoint.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status} ${response.statusText}`);
+      }
+
+      const json = (await response.json()) as T;
+      // Return the raw JSON — including any `error` field.
+      // The caller decides how to handle application-level errors.
+      // Transport errors (above) are the only ones that poison the pool.
+      return json;
+    });
+  }
+
+  async accountInfo(account: string): Promise<AccountInfoResponse | undefined> {
+    const result = await this.rpcCall<Record<string, unknown>>({
+      action: 'account_info',
+      account,
+      representative: true,
+      confirmed: true,
+    });
+    // "Account not found" is a valid Nano RPC response for unopened accounts.
+    if (result.error === 'Account not found') return undefined;
+    if (result.error) {
+      throw new Error(`account_info error: ${result.error}`);
+    }
+    return result as unknown as AccountInfoResponse;
+  }
+
+  async accountsReceivable(account: string): Promise<Receivable[]> {
+    const result = await this.rpcCall<Record<string, unknown>>({
+      action: 'accounts_receivable',
+      accounts: [account],
+      source: true,
+      include_only_confirmed: false,
+    });
+    // "Account not found" simply means zero receivable blocks.
+    if (result.error === 'Account not found') return [];
+    if (result.error) {
+      throw new Error(`accounts_receivable error: ${result.error}`);
     }
 
-    if (!response.blocks) return [];
+    const blocks = result.blocks as Record<string, { amount: string; sender: string }> | undefined;
+    if (!blocks) return [];
 
-    return Object.entries(response.blocks).map(([hash, block]) => ({
+    return Object.entries(blocks).map(([hash, block]) => ({
       hash,
       amount: block.amount,
       sender: block.sender,
@@ -155,6 +262,12 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   let currentState: RpcPoolState = { status: 'disconnected' };
   let detachEndpointListener = () => {};
   let client = NanoClient.initialize(buildClientOptions(nodes));
+
+  // One semaphore slot per configured RPC endpoint (minimum 1).
+  // This serialises concurrent callers against the pool so a single-endpoint
+  // setup never fans out more requests than it can handle, which would trigger
+  // cascading cooldown exhaustion ("All endpoints exhausted").
+  let semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
 
   const DIFFICULTY_CACHE_TTL_MS = 60_000;
   let difficultyCache: { send: string; receive: string; fetchedAt: number } | null = null;
@@ -193,6 +306,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   function refreshClient(): void {
     detachEndpointListener();
     client = NanoClient.initialize(buildClientOptions(nodes));
+    semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
     detachEndpointListener = client.onEndpointChange((event) => {
       if (event.kind !== 'rpc') return;
 
@@ -210,7 +324,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   refreshClient();
 
   function buildClient(): RpcClient {
-    return new PooledRpcClient(client, getActiveDifficulty);
+    return new PooledRpcClient(client, getActiveDifficulty, semaphore);
   }
 
   return {
