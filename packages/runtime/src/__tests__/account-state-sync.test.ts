@@ -73,7 +73,7 @@ describe('AccountStateSync', () => {
       watcher,
       (event) => events.push(event),
       (block) => { forwardedBlocks.push(block); return Promise.resolve(); },
-      { reconcileIntervalMs: 30_000 },
+      { reconcileIntervalMs: 30_000, initialSyncDelayMs: 0 },
     );
   });
 
@@ -181,5 +181,56 @@ describe('AccountStateSync', () => {
   it('removeAccount removes from watcher', () => {
     sync.removeAccount(TEST_ADDRESS);
     expect(watcher.removeAccount).toHaveBeenCalledWith(TEST_ADDRESS);
+  });
+
+  it('addAccount survives RPC failure and emits state_synced with local state', async () => {
+    const account = makeAccount();
+    (accountStore.getByAddress as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (accountStore.get as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue({
+      accountInfo: vi.fn().mockRejectedValue(new Error('All endpoints exhausted')),
+    });
+
+    await sync.addAccount(TEST_ADDRESS);
+
+    expect(watcher.addAccount).toHaveBeenCalledWith(TEST_ADDRESS);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe('account.state_synced');
+    expect(events[0]!.data.snapshot).toEqual({
+      balanceRaw: '0',
+      frontier: null,
+      representative: null,
+      blockCount: 0,
+    });
+  });
+
+  it('addAccount does not block subsequent accounts when one fails', async () => {
+    const accountA = makeAccount({ id: 'acc-a', address: 'nano_1a' });
+    const accountB = makeAccount({ id: 'acc-b', address: 'nano_1b' });
+
+    (accountStore.getByAddress as ReturnType<typeof vi.fn>).mockImplementation((addr: string) =>
+      addr === 'nano_1a' ? Promise.resolve(accountA) : Promise.resolve(accountB),
+    );
+    (accountStore.get as ReturnType<typeof vi.fn>).mockImplementation((id: string) =>
+      id === 'acc-a' ? Promise.resolve(accountA) : Promise.resolve(accountB),
+    );
+
+    const accountInfo = vi.fn();
+    accountInfo.mockImplementation((addr: string) => {
+      if (addr === 'nano_1a') return Promise.reject(new Error('boom'));
+      return Promise.resolve({ frontier: 'hash-b', balance: '1000', representative: 'nano_1rep', blockCount: 3 });
+    });
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue({ accountInfo });
+    (accountStore.update as ReturnType<typeof vi.fn>).mockImplementation((id: string, updates: any) =>
+      Promise.resolve(id === 'acc-a' ? { ...accountA, ...updates } : { ...accountB, ...updates }),
+    );
+
+    await sync.addAccount('nano_1a');
+    await sync.addAccount('nano_1b');
+
+    expect(watcher.addAccount).toHaveBeenCalledWith('nano_1a');
+    expect(watcher.addAccount).toHaveBeenCalledWith('nano_1b');
+    expect(events).toHaveLength(2);
+    expect(events.some((e) => e.accountAddress === 'nano_1b' && e.data.snapshot!.balanceRaw === '1000')).toBe(true);
   });
 });

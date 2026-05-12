@@ -1,7 +1,7 @@
 # RaiFlow Progress
 
 **Purpose:** Bootstrap document for new coding sessions. Contains current architecture context, active milestone, and immediate next steps.
-**Last updated:** 2026-04-01 (v2 implementation started)
+**Last updated:** 2026-05-12 (account sync resilience fix)
 
 ---
 
@@ -69,7 +69,7 @@ Current frontier:
 - The runtime wires `accountStore`, `sendStore`, `custodyEngine`, `rpcPool`, and `Watcher` together in `main.ts`.
 - `Watcher` now forwards confirmations for both incoming (recipient match) and outgoing (sender match) blocks.
 - `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
-- **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s.
+- **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s. Initial sync now defends against transient RPC failures (logs warning, continues startup) and spaces bulk sync calls with a 250ms delay to avoid rate-limit cooldowns.
 - **SubscriptionManager** deduplicates SSE connections and fans out `AccountEvent`s to subscribed clients.
 - **SSE stream** (`GET /api/accounts/stream`) with `X-Raiflow-Stream-Id` header, plus `POST/DELETE /api/accounts/:id/watch` for dynamic subscribe/unsubscribe.
 - **SDK** adds `accounts.watch()` returning an `AsyncIterable<AccountEvent>`, backed by a shared `SseConnection` with auto-reconnect.

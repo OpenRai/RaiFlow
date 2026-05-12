@@ -327,7 +327,7 @@ const accountStateSync = new AccountStateSync(
   },
   (event) => subscriptionManager.publish(event),
   (block) => runtime.handleConfirmedBlock(block),
-  { reconcileIntervalMs: 30_000 },
+  { reconcileIntervalMs: 30_000, initialSyncDelayMs: 250 },
 );
 
 // ---------------------------------------------------------------------------
@@ -344,13 +344,27 @@ watcher = new Watcher({
 
 // Seed state sync with existing accounts
 const existingAccounts = await accountStore.list();
+let syncSuccess = 0;
+let syncFailed = 0;
 for (const acc of existingAccounts) {
-  await accountStateSync.addAccount(acc.address);
+  try {
+    await accountStateSync.addAccount(acc.address);
+    syncSuccess++;
+  } catch (err) {
+    syncFailed++;
+    logger.warn(
+      `failed to sync account ${acc.address}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+if (syncFailed > 0) {
+  logger.warn(`account state sync completed with ${syncFailed} failures out of ${existingAccounts.length} accounts`);
 }
 
 runtime.watcher = watcher;
 watcher.start();
-logger.info('watcher started', `accounts=${existingAccounts.length}`);
+logger.info('watcher started', `accounts=${existingAccounts.length} synced=${syncSuccess} failed=${syncFailed}`);
 
 accountStateSync.start();
 logger.info('account state sync started');

@@ -12,12 +12,14 @@ import type { WatcherLike } from './runtime.js';
 
 export interface AccountStateSyncOptions {
   reconcileIntervalMs?: number;
+  initialSyncDelayMs?: number;
 }
 
 export class AccountStateSync implements WatcherSink {
   private readonly watchedAccounts = new Map<string, { id: string }>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly reconcileIntervalMs: number;
+  private readonly initialSyncDelayMs: number;
 
   constructor(
     private readonly rpcPool: RpcPool,
@@ -28,6 +30,11 @@ export class AccountStateSync implements WatcherSink {
     options?: AccountStateSyncOptions,
   ) {
     this.reconcileIntervalMs = options?.reconcileIntervalMs ?? 30_000;
+    this.initialSyncDelayMs = options?.initialSyncDelayMs ?? 250;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // -----------------------------------------------------------------------
@@ -59,7 +66,17 @@ export class AccountStateSync implements WatcherSink {
 
     this.watchedAccounts.set(address, { id: account.id });
     this.watcher.addAccount(address);
-    await this.initialSync(address, account.id);
+    try {
+      await this.initialSync(address, account.id);
+    } catch (err) {
+      console.warn(
+        `[account-state-sync] failed to sync ${address} on add:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+    if (this.initialSyncDelayMs > 0) {
+      await this.sleep(this.initialSyncDelayMs);
+    }
   }
 
   removeAccount(address: string): void {
@@ -160,7 +177,15 @@ export class AccountStateSync implements WatcherSink {
 
   private async initialSync(address: string, accountId: string): Promise<void> {
     const client = this.rpcPool.getClient();
-    const info = await client.accountInfo(address);
+    let info: Awaited<ReturnType<typeof client.accountInfo>> | null = null;
+    try {
+      info = await client.accountInfo(address);
+    } catch (err) {
+      console.warn(
+        `[account-state-sync] initial sync RPC failed for ${address}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
 
     const account = await this.accountStore.get(accountId);
     if (!account) return;
