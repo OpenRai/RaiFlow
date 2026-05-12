@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@openrai/model": "workspace:*",
-    "@openrai/nano-core": "2.4.9"
+    "@openrai/nano-core": "2.4.10"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
