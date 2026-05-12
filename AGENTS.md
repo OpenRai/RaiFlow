@@ -89,6 +89,8 @@ git push && git push --tags
 
 The Release CI workflow only builds and tests on push to main — it does not create PRs or publish.
 
+**CRITICAL — No legacy token auth:** This project uses npm Trusted Publishers with OIDC via GitHub Actions. The workflow has `id-token: write` and publishes directly to npm. **Never suggest, ask about, or attempt to add a GitHub secret `NPM_TOKEN`.** Token-based npm auth is not acceptable in 2026. If OIDC publish fails, fix the OIDC/Trusted Publishers configuration (registry URL, workflow path, permissions, or npm-side publisher setup) — do not fall back to long-lived tokens.
+
 ---
 
 ## When Making Changes
