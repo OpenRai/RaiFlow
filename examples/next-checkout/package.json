@@ -1,6 +1,6 @@
 {
   "name": "next-checkout-example",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Reference Next.js checkout integration for RaiFlow",
   "type": "module",
   "scripts": {
@@ -9,11 +9,11 @@
     "start": "sh -c 'printf \"[next-checkout] http://localhost:3003\\n\"; next start -p 3003'"
   },
   "dependencies": {
+    "@openrai/nano-core": "2.4.11",
+    "@openrai/raiflow-sdk": "workspace:*",
     "next": "^14.2.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0",
-    "@openrai/raiflow-sdk": "workspace:*",
-    "@openrai/nano-core": "2.4.10"
+    "react-dom": "^18.3.0"
   },
   "private": true
 }

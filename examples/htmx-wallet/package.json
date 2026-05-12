@@ -1,6 +1,6 @@
 {
   "name": "htmx-wallet-demo",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "RaiFlow HTMX Demo Wallet",
   "main": "server.js",
   "type": "module",
@@ -8,9 +8,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.0",
+    "@openrai/nano-core": "2.4.11",
     "@openrai/raiflow-sdk": "workspace:*",
-    "@openrai/nano-core": "2.4.10"
+    "express": "^4.19.0"
   },
   "private": true
 }
