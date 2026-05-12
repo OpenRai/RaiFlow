@@ -30,7 +30,7 @@ export class AccountStateSync implements WatcherSink {
     options?: AccountStateSyncOptions,
   ) {
     this.reconcileIntervalMs = options?.reconcileIntervalMs ?? 30_000;
-    this.initialSyncDelayMs = options?.initialSyncDelayMs ?? 250;
+    this.initialSyncDelayMs = options?.initialSyncDelayMs ?? 750;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -130,13 +130,29 @@ export class AccountStateSync implements WatcherSink {
 
   private async reconcile(): Promise<void> {
     for (const [address, { id }] of this.watchedAccounts) {
-      await this.reconcileAccount(address, id);
+      try {
+        await this.reconcileAccount(address, id);
+      } catch (err) {
+        console.warn(
+          `[account-state-sync] reconciliation failed for ${address}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
   }
 
   private async reconcileAccount(address: string, accountId: string): Promise<void> {
     const client = this.rpcPool.getClient();
-    const info = await client.accountInfo(address);
+    let info: Awaited<ReturnType<typeof client.accountInfo>> | undefined;
+    try {
+      info = await client.accountInfo(address);
+    } catch (err) {
+      console.warn(
+        `[account-state-sync] reconciliation RPC failed for ${address}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
     if (!info) return; // unopened account
 
     const account = await this.accountStore.get(accountId);

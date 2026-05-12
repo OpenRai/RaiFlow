@@ -327,7 +327,7 @@ const accountStateSync = new AccountStateSync(
   },
   (event) => subscriptionManager.publish(event),
   (block) => runtime.handleConfirmedBlock(block),
-  { reconcileIntervalMs: 30_000, initialSyncDelayMs: 250 },
+  { reconcileIntervalMs: 30_000, initialSyncDelayMs: 750 },
 );
 
 // ---------------------------------------------------------------------------
