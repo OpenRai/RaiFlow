@@ -27,7 +27,7 @@
     "@openrai/custody": "workspace:*",
     "@openrai/events": "workspace:*",
     "@openrai/model": "workspace:*",
-    "@openrai/nano-core": "2.4.10",
+    "@openrai/nano-core": "2.4.11",
     "@openrai/rpc": "workspace:*",
     "@openrai/storage": "workspace:*",
     "@openrai/webhook": "workspace:*"

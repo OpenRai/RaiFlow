@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@openrai/model": "workspace:*",
-    "@openrai/nano-core": "2.4.10",
+    "@openrai/nano-core": "2.4.11",
     "@openrai/webhook": "workspace:*"
   },
   "devDependencies": {
