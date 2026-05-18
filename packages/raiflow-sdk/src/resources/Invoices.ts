@@ -2,7 +2,6 @@ import type { Invoice, Payment, RaiFlowEvent, CompletionPolicy } from '@openrai/
 import type { RaiFlowClient } from '../client.js';
 
 export interface CreateInvoiceOptions {
-  recipientAccount: string;
   expectedAmountRaw: string;
   expiresAt?: string;
   metadata?: Record<string, unknown>;
@@ -43,8 +42,12 @@ export class InvoicesResource {
     return this.client.request<{ data: Invoice[] }>('GET', path);
   }
 
-  public async cancel(id: string): Promise<Invoice> {
-    return this.client.request<Invoice>('POST', `/invoices/${id}/cancel`);
+  public async cancel(id: string, idempotencyKey?: string): Promise<Invoice> {
+    const headers: Record<string, string> = {};
+    if (idempotencyKey) {
+      headers['Idempotency-Key'] = idempotencyKey;
+    }
+    return this.client.request<Invoice>('POST', `/invoices/${id}/cancel`, undefined, headers);
   }
 
   public async listPayments(id: string): Promise<{ data: Payment[] }> {

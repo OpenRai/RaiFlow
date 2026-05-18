@@ -23,11 +23,17 @@ function mockResponse(data: unknown, init: ResponseInit = {}): Response {
 const TEST_INVOICE: Invoice = {
   id: 'inv-1',
   status: 'open',
-  currency: 'XNO',
+  payAddress: 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
   expectedAmountRaw: '1000000000000000000000000000000',
-  confirmedAmountRaw: '0',
-  recipientAccount: 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
+  receivedAmountRaw: '0',
+  memo: null,
+  metadata: null,
+  idempotencyKey: null,
+  expiresAt: null,
+  completedAt: null,
+  canceledAt: null,
   createdAt: '2026-03-31T00:00:00.000Z',
+  updatedAt: '2026-03-31T00:00:00.000Z',
   completionPolicy: { type: 'at_least' },
 };
 
@@ -35,18 +41,20 @@ const TEST_PAYMENT: Payment = {
   id: 'pay-1',
   invoiceId: 'inv-1',
   status: 'confirmed',
-  currency: 'XNO',
+  blockHash: 'abc123',
+  senderAddress: null,
   amountRaw: '1000000000000000000000000000000',
-  recipientAccount: 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
-  sendBlockHash: 'abc123',
+  detectedAt: '2026-03-31T00:01:00.000Z',
   confirmedAt: '2026-03-31T00:01:00.000Z',
 };
 
 const TEST_EVENT: RaiFlowEvent = {
   id: 'evt-1',
   type: 'invoice.created',
-  createdAt: '2026-03-31T00:00:00.000Z',
+  timestamp: '2026-03-31T00:00:00.000Z',
   data: { invoice: TEST_INVOICE },
+  resourceId: 'inv-1',
+  resourceType: 'invoice',
 };
 
 const TEST_ENDPOINT: WebhookEndpoint = {
@@ -93,7 +101,6 @@ describe('RaiFlowClient', () => {
       basePath: '/v2',
     });
     await client.invoices.create({
-      recipientAccount: TEST_INVOICE.recipientAccount,
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
     });
 
@@ -120,7 +127,6 @@ describe('InvoicesResource', () => {
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
     const invoice = await client.invoices.create({
-      recipientAccount: TEST_INVOICE.recipientAccount,
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
     });
 
@@ -136,7 +142,7 @@ describe('InvoicesResource', () => {
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
     await client.invoices.create(
-      { recipientAccount: TEST_INVOICE.recipientAccount, expectedAmountRaw: '1' },
+      { expectedAmountRaw: '1' },
       'idem-key-123',
     );
 
@@ -151,7 +157,6 @@ describe('InvoicesResource', () => {
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
     await client.invoices.create({
-      recipientAccount: TEST_INVOICE.recipientAccount,
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
       completionPolicy: { type: 'exact' },
     });
@@ -257,7 +262,6 @@ describe('InvoicesResource', () => {
       apiKey: 'secret-key',
     });
     await client.invoices.create({
-      recipientAccount: TEST_INVOICE.recipientAccount,
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
     });
 
