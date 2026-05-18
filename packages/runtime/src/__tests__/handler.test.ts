@@ -220,13 +220,13 @@ describe('POST /api/invoices', () => {
     const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+      body: { expectedAmountRaw: ONE_XNO },
     }));
 
     expect(res.status).toBe(201);
-    const body = await parseJson(res) as { status: string; currency: string };
+    const body = await parseJson(res) as { status: string; payAddress: string };
     expect(body.status).toBe('open');
-    expect(body.currency).toBe('XNO');
+    expect(body.payAddress.startsWith('nano_') || body.payAddress.startsWith('xrb_')).toBe(true);
   });
 
   it('returns 400 when required fields are missing', async () => {
@@ -234,12 +234,25 @@ describe('POST /api/invoices', () => {
     const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT },
+      body: {},
     }));
 
     expect(res.status).toBe(400);
     const body = await parseJson(res) as { error: { code: string } };
     expect(body.error.code).toBe('bad_request');
+  });
+
+  it('rejects deprecated recipientAccount field', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+
+    const res = await handler(req('POST', '/api/invoices', {
+      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+    }));
+
+    expect(res.status).toBe(400);
+    const body = await parseJson(res) as { error: { message: string } };
+    expect(body.error.message).toContain('deprecated');
   });
 
   it('returns same invoice on replay with Idempotency-Key header', async () => {
@@ -249,11 +262,11 @@ describe('POST /api/invoices', () => {
     const idemKey = 'test-idem-key';
 
     const res1 = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+      body: { expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
     const res2 = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+      body: { expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
 
@@ -269,7 +282,6 @@ describe('POST /api/invoices', () => {
 
     const res = await handler(req('POST', '/api/invoices', {
       body: {
-        recipientAccount: TEST_ACCOUNT,
         expectedAmountRaw: ONE_XNO,
         completionPolicy: { type: 'exact' },
       },
@@ -285,7 +297,7 @@ describe('POST /api/invoices', () => {
     const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+      body: { expectedAmountRaw: ONE_XNO },
     }));
 
     expect(res.status).toBe(201);
@@ -379,7 +391,7 @@ describe('POST /api/invoices/:id/cancel', () => {
     await runtime.handleConfirmedBlock({
       blockHash: 'hash-complete',
       senderAccount: 'nano_2testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
-      recipientAccount: TEST_ACCOUNT,
+      recipientAccount: invoice.payAddress,
       amountRaw: ONE_XNO,
       confirmedAt: new Date().toISOString(),
     });
@@ -404,7 +416,7 @@ describe('GET /api/invoices/:id/payments', () => {
     await runtime.handleConfirmedBlock({
       blockHash: 'hash-pay-1',
       senderAccount: 'nano_2testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
-      recipientAccount: TEST_ACCOUNT,
+      recipientAccount: invoice.payAddress,
       amountRaw: ONE_XNO,
       confirmedAt: new Date().toISOString(),
     });

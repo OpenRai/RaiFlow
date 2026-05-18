@@ -194,7 +194,7 @@ export async function renderDashboard(
       recentEvents.push({
         id: event.id,
         type: event.type,
-        createdAt: event.createdAt,
+        createdAt: 'timestamp' in event ? event.timestamp : event.createdAt,
         label: String(invoice.metadata?.orderId ?? invoice.id.slice(0, 8)),
       });
     }

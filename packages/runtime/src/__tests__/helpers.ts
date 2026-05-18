@@ -2,7 +2,8 @@
 
 import type { WebhookDelivery } from '@openrai/webhook';
 import type { RaiFlowConfig } from '@openrai/config';
-import type { LegacyRaiFlowEvent, ConfirmedBlock } from '@openrai/model';
+import type { RaiFlowEvent, ConfirmedBlock, EventStore } from '@openrai/model';
+import { createCustodyEngine } from '@openrai/custody';
 import { vi } from 'vitest';
 import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
@@ -32,14 +33,38 @@ export function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): 
 }
 
 export function createTestRuntime() {
-  const deliveredEvents: { event: LegacyRaiFlowEvent; endpoints: unknown[] }[] = [];
+  const deliveredEvents: { event: RaiFlowEvent; endpoints: unknown[] }[] = [];
   const fakeDelivery: WebhookDelivery = {
     deliver: async (event: unknown, endpoints: unknown[]) => {
-      deliveredEvents.push({ event: event as LegacyRaiFlowEvent, endpoints });
+      deliveredEvents.push({ event: event as RaiFlowEvent, endpoints });
     },
     shutdown: () => {},
   };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery });
+  const custodyEngine = createCustodyEngine({
+    seed: '9f4f272617f01c4db7d5ebc0f4ef5baf6286f09ad7f295d08f6f41e88c2e6d14',
+    representative: 'nano_3arg3asgtigae3zha8xw5rh4n83d3f4h6f9y4w6q37fph4n8tqbo6j8qzszk',
+    derivationStartIndex: {
+      invoice: 0,
+      managed: 1_000_000,
+    },
+  });
+  custodyEngine.loadSeed('9f4f272617f01c4db7d5ebc0f4ef5baf6286f09ad7f295d08f6f41e88c2e6d14');
+  const v2Events: RaiFlowEvent[] = [];
+  const v2EventStore: EventStore = {
+    async append(event) {
+      v2Events.push(event);
+    },
+    async list(options) {
+      const limit = options?.limit ?? 100;
+      return v2Events
+        .filter((event) => (options?.after ? event.id > options.after : true))
+        .filter((event) => (options?.type ? event.type === options.type : true))
+        .filter((event) => (options?.resourceType ? event.resourceType === options.resourceType : true))
+        .filter((event) => (options?.resourceId ? event.resourceId === options.resourceId : true))
+        .slice(0, limit);
+    },
+  };
+  const runtime = new Runtime({ webhookDelivery: fakeDelivery, custodyEngine, v2EventStore });
   return { runtime, deliveredEvents };
 }
 
@@ -74,7 +99,6 @@ export function req(
 
 export async function createTestInvoice(runtime: Runtime) {
   return runtime.createInvoice({
-    recipientAccount: TEST_ACCOUNT,
     expectedAmountRaw: ONE_XNO,
   });
 }
@@ -82,10 +106,10 @@ export async function createTestInvoice(runtime: Runtime) {
 export async function createAndPayInvoice(
   runtime: Runtime,
   amountRaw: string = ONE_XNO,
-  recipientAccount: string = TEST_ACCOUNT,
+  recipientAccount?: string,
 ) {
   const invoice = await createTestInvoice(runtime);
-  const block = makeBlock({ recipientAccount, amountRaw });
+  const block = makeBlock({ recipientAccount: recipientAccount ?? invoice.payAddress, amountRaw });
   await runtime.handleConfirmedBlock(block);
   return { invoice, block };
 }

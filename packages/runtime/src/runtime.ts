@@ -8,6 +8,7 @@ import type {
   ConfirmedBlock,
   CompletionPolicy,
   LegacyInvoice,
+  LegacyPayment,
   LegacyInvoiceStore,
   LegacyPaymentStore,
   LegacyEventStore,
@@ -20,6 +21,11 @@ import type {
   SendStore,
   RaiFlowEvent,
   EventStore,
+  IdempotencyReplayStore,
+  Invoice,
+  Payment,
+  EventQueryOptions,
+  PaginatedEventsResponse,
 } from '@openrai/model';
 import { RaiFlowError } from '@openrai/model';
 import { NanoAddress } from '@openrai/nano-core';
@@ -35,6 +41,7 @@ import {
   createInvoiceStore,
   createPaymentStore,
   createEventStore,
+  createIdempotencyReplayStore,
 } from './stores.js';
 import { SendOrchestrator } from './send-orchestrator.js';
 
@@ -116,10 +123,75 @@ export interface RuntimeConfig {
   rpcPool?: RpcPool;
   watcher?: WatcherLike;
   mode?: RunMode;
+  idempotencyStore?: IdempotencyReplayStore;
+  derivationStartIndex?: {
+    invoice: number;
+    managed: number;
+  };
 }
 
 /** States that cannot be transitioned out of. */
 const TERMINAL_STATES = new Set<InvoiceStatus>(['completed', 'expired', 'canceled']);
+const IDEMPOTENCY_SCOPE = {
+  invoiceCreate: 'invoice.create',
+  invoiceCancel: 'invoice.cancel',
+  accountCreateManaged: 'account.create.managed',
+  sendQueue: 'send.queue',
+  webhookCreate: 'webhook.create',
+  webhookDelete: 'webhook.delete',
+  blockPublish: 'block.publish',
+} as const;
+
+function legacyToV2Invoice(invoice: LegacyInvoice, idempotencyKey?: string): Invoice {
+  return {
+    id: invoice.id,
+    status: invoice.status,
+    payAddress: invoice.recipientAccount,
+    expectedAmountRaw: invoice.expectedAmountRaw,
+    receivedAmountRaw: invoice.confirmedAmountRaw,
+    memo: null,
+    metadata: invoice.metadata
+      ? Object.fromEntries(Object.entries(invoice.metadata).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]))
+      : null,
+    idempotencyKey: idempotencyKey ?? null,
+    expiresAt: invoice.expiresAt ?? null,
+    completedAt: invoice.completedAt ?? null,
+    canceledAt: invoice.canceledAt ?? null,
+    createdAt: invoice.createdAt,
+    updatedAt: invoice.createdAt,
+    completionPolicy: invoice.completionPolicy ?? { type: 'at_least' },
+  };
+}
+
+function v2ToLegacyInvoice(invoice: Invoice): LegacyInvoice {
+  return {
+    id: invoice.id,
+    status: invoice.status,
+    currency: 'XNO',
+    expectedAmountRaw: invoice.expectedAmountRaw,
+    confirmedAmountRaw: invoice.receivedAmountRaw,
+    recipientAccount: invoice.payAddress,
+    createdAt: invoice.createdAt,
+    expiresAt: invoice.expiresAt ?? undefined,
+    completedAt: invoice.completedAt ?? undefined,
+    canceledAt: invoice.canceledAt ?? undefined,
+    metadata: invoice.metadata ? { ...invoice.metadata } : undefined,
+    completionPolicy: invoice.completionPolicy,
+  };
+}
+
+function legacyToV2Payment(payment: LegacyPayment): Payment {
+  return {
+    id: payment.id,
+    invoiceId: payment.invoiceId,
+    status: payment.status,
+    blockHash: payment.sendBlockHash,
+    senderAddress: payment.senderAccount ?? null,
+    amountRaw: payment.amountRaw,
+    confirmedAt: payment.confirmedAt ?? null,
+    detectedAt: payment.confirmedAt,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Runtime
@@ -135,8 +207,11 @@ export class Runtime implements WatcherSink {
   readonly custodyEngine?: CustodyEngine;
   readonly rpcPool?: RpcPool;
   readonly mode: RunMode;
+  readonly idempotencyStore: IdempotencyReplayStore;
 
   private readonly v2EventStore?: EventStore;
+  private readonly invoiceDerivationStartIndex: number;
+  private readonly managedDerivationStartIndex: number;
   private readonly webhookDelivery: WebhookDelivery;
   private readonly expiryIntervalMs: number;
   private expiryTimer: ReturnType<typeof setInterval> | undefined;
@@ -150,6 +225,7 @@ export class Runtime implements WatcherSink {
     this.paymentStore = config.paymentStore ?? createPaymentStore();
     this.eventStore = config.eventStore ?? createEventStore();
     this.v2EventStore = config.v2EventStore;
+    this.idempotencyStore = config.idempotencyStore ?? createIdempotencyReplayStore();
     this.webhookEndpointStore =
       config.webhookEndpointStore ?? createWebhookEndpointStore();
     this.webhookDelivery = config.webhookDelivery ?? createWebhookDelivery();
@@ -159,6 +235,12 @@ export class Runtime implements WatcherSink {
     this.custodyEngine = config.custodyEngine;
     this.rpcPool = config.rpcPool;
     this.watcher = config.watcher;
+    this.invoiceDerivationStartIndex = config.derivationStartIndex?.invoice ?? 0;
+    this.managedDerivationStartIndex = config.derivationStartIndex?.managed ?? 1_000_000;
+
+    if (this.invoiceDerivationStartIndex === this.managedDerivationStartIndex) {
+      throw new Error('Invoice and managed derivation start indices must not overlap');
+    }
 
     if (this.sendStore && this.accountStore && this.custodyEngine && this.rpcPool) {
       this.sendOrchestrator = new SendOrchestrator(
@@ -204,7 +286,6 @@ export class Runtime implements WatcherSink {
 
   async createInvoice(
     params: {
-      recipientAccount: string;
       /** Amount in raw (string). Provide this or `expectedAmount`. */
       expectedAmountRaw?: string;
       /** Amount in XNO (human-readable). Converted to raw via `xnoToRaw`. */
@@ -214,11 +295,14 @@ export class Runtime implements WatcherSink {
       completionPolicy?: CompletionPolicy;
     },
     idempotencyKey?: string,
-  ): Promise<LegacyInvoice> {
+  ): Promise<Invoice> {
     if (this.mode === 'non-custodial') {
       throw RaiFlowError.badRequest(
         'Invoices are not available in non-custodial mode',
       );
+    }
+    if (!this.custodyEngine) {
+      throw RaiFlowError.badRequest('Custody engine not configured');
     }
 
     const resolvedAmountRaw =
@@ -229,46 +313,74 @@ export class Runtime implements WatcherSink {
       throw new Error('Either expectedAmountRaw or expectedAmount is required');
     }
 
+    if (idempotencyKey) {
+      const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.invoiceCreate, idempotencyKey);
+      if (replay) {
+        const existing = await this.invoiceStore.get(replay.resourceId);
+        if (existing) return legacyToV2Invoice(existing, idempotencyKey);
+      }
+    }
+
+    const nextInvoiceIndex = await this.getNextInvoiceDerivationIndex();
+    const payAddress = this.custodyEngine.deriveInvoiceAddress({ index: nextInvoiceIndex });
     const invoice: LegacyInvoice = {
       id: randomUUID(),
       status: 'open',
       currency: 'XNO',
       expectedAmountRaw: resolvedAmountRaw,
       confirmedAmountRaw: '0',
-      recipientAccount: params.recipientAccount,
+      recipientAccount: payAddress,
       createdAt: new Date().toISOString(),
       expiresAt: params.expiresAt,
       metadata: params.metadata,
       completionPolicy: params.completionPolicy ?? { type: 'at_least' },
     };
 
-    const stored = await this.invoiceStore.create(invoice, idempotencyKey);
-
-    // If returned invoice has a different id, the idempotency key was a hit —
-    // skip event emission for the deduplicated request.
-    if (stored.id !== invoice.id) {
-      return stored;
+    const stored = await this.invoiceStore.create(invoice);
+    if (idempotencyKey) {
+      const persisted = await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.invoiceCreate,
+        idempotencyKey,
+        'invoice',
+        stored.id,
+      );
+      if (persisted.resourceId !== stored.id) {
+        const existing = await this.invoiceStore.get(persisted.resourceId);
+        if (existing) return legacyToV2Invoice(existing, idempotencyKey);
+      }
     }
 
-    await this.emitEvent({
+    await this.emitV2Event({
       id: randomUUID(),
       type: 'invoice.created',
-      createdAt: new Date().toISOString(),
-      data: { invoice: stored },
+      timestamp: new Date().toISOString(),
+      data: { invoice: legacyToV2Invoice(stored, idempotencyKey) },
+      resourceId: stored.id,
+      resourceType: 'invoice',
     });
 
-    return stored;
+    return legacyToV2Invoice(stored, idempotencyKey);
   }
 
-  async getInvoice(id: string): Promise<LegacyInvoice | undefined> {
-    return this.invoiceStore.get(id);
+  async getInvoice(id: string): Promise<Invoice | undefined> {
+    const invoice = await this.invoiceStore.get(id);
+    return invoice ? legacyToV2Invoice(invoice) : undefined;
   }
 
-  async listInvoices(filter?: { status?: InvoiceStatus }): Promise<LegacyInvoice[]> {
-    return this.invoiceStore.list(filter);
+  async listInvoices(filter?: { status?: InvoiceStatus }): Promise<Invoice[]> {
+    const invoices = await this.invoiceStore.list(filter);
+    return invoices.map((invoice) => legacyToV2Invoice(invoice));
   }
 
-  async cancelInvoice(id: string): Promise<LegacyInvoice> {
+  async cancelInvoice(id: string, idempotencyKey?: string): Promise<Invoice> {
+    if (idempotencyKey) {
+      const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.invoiceCancel, idempotencyKey);
+      if (replay) {
+        const existing = await this.getInvoice(replay.resourceId);
+        if (existing) return existing;
+      }
+    }
+
     const invoice = await this.invoiceStore.get(id);
     if (invoice === undefined) {
       throw RaiFlowError.notFound('Invoice', id);
@@ -283,15 +395,25 @@ export class Runtime implements WatcherSink {
       status: 'canceled',
       canceledAt: new Date().toISOString(),
     });
+    if (idempotencyKey) {
+      await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.invoiceCancel,
+        idempotencyKey,
+        'invoice',
+        updated.id,
+      );
+    }
 
-    await this.emitEvent({
+    await this.emitV2Event({
       id: randomUUID(),
       type: 'invoice.canceled',
-      createdAt: new Date().toISOString(),
-      data: { invoice: updated },
+      timestamp: new Date().toISOString(),
+      data: { invoice: legacyToV2Invoice(updated) },
+      resourceId: updated.id,
+      resourceType: 'invoice',
     });
 
-    return updated;
+    return legacyToV2Invoice(updated);
   }
 
   // -------------------------------------------------------------------------
@@ -329,6 +451,17 @@ export class Runtime implements WatcherSink {
       throw RaiFlowError.badRequest( 'Account store not configured');
     }
 
+    if (params.idempotencyKey) {
+      const replay = await this.idempotencyStore.get(
+        IDEMPOTENCY_SCOPE.accountCreateManaged,
+        params.idempotencyKey,
+      );
+      if (replay) {
+        const existing = await this.accountStore.get(replay.resourceId);
+        if (existing) return existing;
+      }
+    }
+
     const nextIndex = await this.getNextManagedDerivationIndex();
     const address = this.custodyEngine.deriveManagedAccount({ index: nextIndex });
 
@@ -346,7 +479,16 @@ export class Runtime implements WatcherSink {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.persistAccount(account);
+    const created = await this.persistAccount(account);
+    if (params.idempotencyKey) {
+      await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.accountCreateManaged,
+        params.idempotencyKey,
+        'account',
+        created.id,
+      );
+    }
+    return created;
   }
 
   async createWatchedAccount(params: {
@@ -447,10 +589,11 @@ export class Runtime implements WatcherSink {
       throw RaiFlowError.badRequest( 'amountRaw must be a positive numeric string');
     }
 
-    // Check idempotency
-    const existing = await this.sendStore.getByIdempotencyKey(params.idempotencyKey);
-    if (existing) {
-      return existing;
+    // Check idempotency via shared replay store
+    const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.sendQueue, params.idempotencyKey);
+    if (replay) {
+      const existing = await this.sendStore.get(replay.resourceId);
+      if (existing) return existing;
     }
 
     const send: Send = {
@@ -467,6 +610,12 @@ export class Runtime implements WatcherSink {
     };
 
     await this.sendStore.create(send);
+    await this.idempotencyStore.put(
+      IDEMPOTENCY_SCOPE.sendQueue,
+      params.idempotencyKey,
+      'send',
+      send.id,
+    );
 
     await this.emitV2Event({
       id: randomUUID(),
@@ -494,12 +643,102 @@ export class Runtime implements WatcherSink {
   // Payment / event queries
   // -------------------------------------------------------------------------
 
-  async getPaymentsByInvoice(invoiceId: string) {
-    return this.paymentStore.listByInvoice(invoiceId);
+  async getPaymentsByInvoice(invoiceId: string): Promise<Payment[]> {
+    const payments = await this.paymentStore.listByInvoice(invoiceId);
+    return payments.map((payment) => legacyToV2Payment(payment));
   }
 
   async getEventsByInvoice(invoiceId: string, options?: { after?: string }) {
+    if (this.v2EventStore) {
+      return this.v2EventStore.list({
+        resourceType: 'invoice',
+        resourceId: invoiceId,
+        after: options?.after,
+        limit: 1000,
+      });
+    }
     return this.eventStore.listByInvoice(invoiceId, options);
+  }
+
+  async listEvents(options?: EventQueryOptions): Promise<PaginatedEventsResponse> {
+    if (!this.v2EventStore) {
+      return { data: [], nextCursor: null };
+    }
+    const limit = options?.limit ?? 100;
+    const rows = await this.v2EventStore.list({
+      ...options,
+      limit: Math.max(1, Math.min(limit, 500)) + 1,
+    });
+    const hasNext = rows.length > limit;
+    const data = hasNext ? rows.slice(0, limit) : rows;
+    const nextCursor = hasNext ? data[data.length - 1]?.id ?? null : null;
+    return { data, nextCursor };
+  }
+
+  async createWebhookEndpoint(
+    input: Parameters<WebhookEndpointStore['create']>[0],
+    idempotencyKey?: string,
+  ) {
+    if (idempotencyKey) {
+      const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.webhookCreate, idempotencyKey);
+      if (replay) {
+        const existing = await this.webhookEndpointStore.get(replay.resourceId);
+        if (existing) return existing;
+      }
+    }
+
+    const endpoint = await this.webhookEndpointStore.create(input);
+    if (idempotencyKey) {
+      await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.webhookCreate,
+        idempotencyKey,
+        'webhook',
+        endpoint.id,
+      );
+    }
+    return endpoint;
+  }
+
+  async deleteWebhookEndpoint(id: string, idempotencyKey?: string): Promise<boolean> {
+    if (idempotencyKey) {
+      const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.webhookDelete, idempotencyKey);
+      if (replay) {
+        return replay.resourceId === id;
+      }
+    }
+
+    const deleted = await this.webhookEndpointStore.delete(id);
+    if (!deleted) return false;
+    if (idempotencyKey) {
+      await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.webhookDelete,
+        idempotencyKey,
+        'webhook',
+        id,
+      );
+    }
+    return true;
+  }
+
+  async publishBlock(block: string, idempotencyKey?: string): Promise<{ hash: string }> {
+    const client = this.rpcPool?.getClient();
+    if (!client) throw RaiFlowError.badRequest('RPC not configured');
+
+    if (idempotencyKey) {
+      const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.blockPublish, idempotencyKey);
+      if (replay) return { hash: replay.resourceId };
+    }
+
+    const result = await client.process(block);
+    if (idempotencyKey) {
+      await this.idempotencyStore.put(
+        IDEMPOTENCY_SCOPE.blockPublish,
+        idempotencyKey,
+        'block',
+        result.hash,
+      );
+    }
+    return result;
   }
 
   // -------------------------------------------------------------------------
@@ -607,11 +846,25 @@ export class Runtime implements WatcherSink {
     });
 
     // Emit payment.confirmed
-    await this.emitEvent({
+    const v2Invoice = legacyToV2Invoice(updatedInvoice);
+    const v2Payment = legacyToV2Payment(payment);
+
+    await this.emitV2Event({
       id: randomUUID(),
-      type: 'payment.confirmed',
-      createdAt: new Date().toISOString(),
-      data: { payment, invoice: updatedInvoice },
+      type: 'invoice.payment_received',
+      timestamp: new Date().toISOString(),
+      data: { payment: v2Payment, invoice: v2Invoice },
+      resourceId: invoice.id,
+      resourceType: 'invoice',
+    });
+
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'invoice.payment_confirmed',
+      timestamp: new Date().toISOString(),
+      data: { payment: v2Payment, invoice: v2Invoice },
+      resourceId: invoice.id,
+      resourceType: 'invoice',
     });
 
     // Check if invoice is now fully paid.
@@ -625,11 +878,13 @@ export class Runtime implements WatcherSink {
         completedAt: new Date().toISOString(),
       });
 
-      await this.emitEvent({
+      await this.emitV2Event({
         id: randomUUID(),
         type: 'invoice.completed',
-        createdAt: new Date().toISOString(),
-        data: { invoice: completedInvoice },
+        timestamp: new Date().toISOString(),
+        data: { invoice: legacyToV2Invoice(completedInvoice) },
+        resourceId: completedInvoice.id,
+        resourceType: 'invoice',
       });
     }
   }
@@ -649,11 +904,13 @@ export class Runtime implements WatcherSink {
           expiredAt: new Date().toISOString(),
         });
 
-        await this.emitEvent({
+        await this.emitV2Event({
           id: randomUUID(),
           type: 'invoice.expired',
-          createdAt: new Date().toISOString(),
-          data: { invoice: updated },
+          timestamp: new Date().toISOString(),
+          data: { invoice: legacyToV2Invoice(updated) },
+          resourceId: updated.id,
+          resourceType: 'invoice',
         });
       }
     }
@@ -710,12 +967,17 @@ export class Runtime implements WatcherSink {
   // -------------------------------------------------------------------------
 
   private async getNextManagedDerivationIndex(): Promise<number> {
-    if (!this.accountStore) return 0;
+    if (!this.accountStore) return this.managedDerivationStartIndex;
     const managed = await this.accountStore.list({ type: 'managed' });
     const maxIndex = managed.reduce((max, acc) =>
       acc.derivationIndex !== null && acc.derivationIndex > max ? acc.derivationIndex : max,
-      -1,
+      this.managedDerivationStartIndex - 1,
     );
     return maxIndex + 1;
+  }
+
+  private async getNextInvoiceDerivationIndex(): Promise<number> {
+    const invoices = await this.invoiceStore.list();
+    return this.invoiceDerivationStartIndex + invoices.length;
   }
 }

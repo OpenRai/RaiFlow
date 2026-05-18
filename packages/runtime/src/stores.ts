@@ -8,6 +8,8 @@ import type {
   Payment,
   PaymentStatus,
   EventStore,
+  IdempotencyReplayStore,
+  IdempotencyRecord,
 } from '@openrai/model';
 import type {
   LegacyInvoiceStore,
@@ -175,6 +177,35 @@ export function createEventStore(): LegacyEventStore {
         return events;
       }
       return events.slice(idx + 1);
+    },
+  };
+}
+
+export function createIdempotencyReplayStore(): IdempotencyReplayStore {
+  const records = new Map<string, IdempotencyRecord>();
+
+  function scoped(scope: string, key: string): string {
+    return `${scope}:${key}`;
+  }
+
+  return {
+    async get(scope: string, key: string): Promise<IdempotencyRecord | undefined> {
+      return records.get(scoped(scope, key));
+    },
+
+    async put(scope: string, key: string, resourceType: string, resourceId: string): Promise<IdempotencyRecord> {
+      const storeKey = scoped(scope, key);
+      const existing = records.get(storeKey);
+      if (existing) return existing;
+      const created: IdempotencyRecord = {
+        key,
+        scope,
+        resourceType,
+        resourceId,
+        createdAt: new Date().toISOString(),
+      };
+      records.set(storeKey, created);
+      return created;
     },
   };
 }

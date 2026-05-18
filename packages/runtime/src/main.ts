@@ -7,12 +7,10 @@
 // Configuration via YAML file (default: ./raiflow.yml) or RAIFLOW_CONFIG_PATH env var.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
-import { resolve, dirname } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
-import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, type Database } from '@openrai/storage';
+import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { createRpcPool } from '@openrai/rpc';
 import { createCustodyEngine } from '@openrai/custody';
@@ -72,7 +70,29 @@ if (!config.daemon.mode) {
 
 const mode = config.daemon.mode;
 
-// Custody auto-generation happens after dbPath is resolved (below).
+try {
+  const apiKey = resolveApiKey(config);
+  config = {
+    ...config,
+    daemon: {
+      ...config.daemon,
+      apiKey: apiKey.apiKey,
+    },
+  };
+  (globalThis as { __RAIFLOW_CONFIG__?: RaiFlowConfig }).__RAIFLOW_CONFIG__ = config;
+} catch (err) {
+  console.error('[raiflow] failed startup API key validation:', err instanceof Error ? err.message : err);
+  process.exit(1);
+}
+
+if (mode === 'custodial') {
+  if (!config.custody?.seed || !config.custody?.representative) {
+    console.error(
+      '[raiflow] custodial mode requires both RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP (or custody.seed/representative in raiflow.yml).',
+    );
+    process.exit(1);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -137,40 +157,6 @@ const metrics = createRuntimeMetrics({ dbPath, migrations: appliedMigrations });
 (globalThis as { __RAIFLOW_METRICS__?: ReturnType<typeof createRuntimeMetrics> }).__RAIFLOW_METRICS__ = metrics;
 
 // ---------------------------------------------------------------------------
-// Custody auto-generation (custodial mode)
-// ---------------------------------------------------------------------------
-
-const DEFAULT_REPRESENTATIVE = 'nano_3kqdiqmqiojr1aqqj51aq8bzz5jtwnkmhb38qwf3ppngo8uhhzkdkn7up7rp';
-
-if (mode === 'custodial' && !config.custody) {
-  const seedPath = resolve(dirname(dbPath), 'custody-seed.txt');
-  let seed: string;
-
-  if (existsSync(seedPath)) {
-    seed = readFileSync(seedPath, 'utf-8').trim();
-    logger.info('custody seed loaded from', seedPath);
-  } else {
-    seed = randomBytes(32).toString('hex');
-    const seedDir = dirname(seedPath);
-    if (!existsSync(seedDir)) {
-      mkdirSync(seedDir, { recursive: true });
-    }
-    writeFileSync(seedPath, seed, { encoding: 'utf-8', mode: 0o600 });
-    logger.info('custody seed generated and saved to', seedPath);
-  }
-
-  config = {
-    ...config,
-    custody: {
-      seed,
-      representative: DEFAULT_REPRESENTATIVE,
-    },
-  };
-  (globalThis as { __RAIFLOW_CONFIG__?: RaiFlowConfig }).__RAIFLOW_CONFIG__ = config;
-  logger.info('using default representative', DEFAULT_REPRESENTATIVE);
-}
-
-// ---------------------------------------------------------------------------
 // Stores (wire through events system)
 // ---------------------------------------------------------------------------
 
@@ -186,6 +172,7 @@ const paymentStore = createLegacySqlitePaymentStore(sqlitePaymentStore, sqliteIn
 const accountStore = createSqliteAccountStore(db);
 const sendStore = createSqliteSendStore(db);
 const webhookStore = createSqliteWebhookStore(db);
+const idempotencyStore = createSqliteIdempotencyReplayStore(db);
 const legacyEventStore = createLegacySqliteEventStore(eventStore);
 
 // ---------------------------------------------------------------------------
@@ -280,12 +267,21 @@ if (rpcUrls.length === 0) {
 // Custody engine
 // ---------------------------------------------------------------------------
 
+const DERIVATION_START_INDEX = {
+  invoice: 0,
+  managed: 1_000_000,
+};
+if (DERIVATION_START_INDEX.invoice === DERIVATION_START_INDEX.managed) {
+  logger.error('invoice and managed derivation namespaces overlap');
+  process.exit(1);
+}
+
 let custodyEngine: ReturnType<typeof createCustodyEngine> | undefined;
 if (config.custody) {
   custodyEngine = createCustodyEngine({
     seed: config.custody.seed,
     representative: config.custody.representative,
-    derivationStartIndex: { invoice: 0, managed: 0 },
+    derivationStartIndex: DERIVATION_START_INDEX,
   });
   custodyEngine.loadSeed(config.custody.seed);
   logger.info('custody engine initialized');
@@ -307,6 +303,8 @@ const runtime = new Runtime({
   rpcPool,
   expiryIntervalMs: 10_000,
   mode,
+  idempotencyStore,
+  derivationStartIndex: DERIVATION_START_INDEX,
 });
 
 // ---------------------------------------------------------------------------

@@ -10,4 +10,5 @@ export {
   createInvoiceStore,
   createPaymentStore,
   createEventStore,
+  createIdempotencyReplayStore,
 } from './stores.js';

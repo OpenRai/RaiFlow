@@ -475,12 +475,13 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     if (typeof block !== 'string') {
       return errorResponse('Missing required field: block (JSON string)', 'bad_request', 400);
     }
-    const client = runtime.rpcPool?.getClient();
-    if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
+    const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
     try {
-      const result = await client.process(block);
+      const result = await runtime.publishBlock(block, idempotencyKey);
       return json(result, 201);
     } catch (err) {
+      const handled = handleRaiFlowError(err);
+      if (handled) return handled;
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('Block work is less than threshold')) {
         return errorResponse(message, 'insufficient_work', 422);
@@ -535,6 +536,23 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
   // Invoices
   // ---------------------------------------------------------------------------
 
+  if (parts[0] === 'events' && method === 'GET' && parts.length === 1) {
+    const after = url.searchParams.get('after') ?? undefined;
+    const type = url.searchParams.get('type') ?? undefined;
+    const resourceType = url.searchParams.get('resourceType') ?? undefined;
+    const resourceId = url.searchParams.get('resourceId') ?? undefined;
+    const limitParam = url.searchParams.get('limit');
+    const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+    const result = await runtime.listEvents({
+      after,
+      type,
+      resourceType,
+      resourceId,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    return json(result);
+  }
+
   if (parts[0] === 'invoices') {
     // POST /api/invoices
     if (method === 'POST' && parts.length === 1) {
@@ -548,10 +566,16 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
       const body = await req.json() as Record<string, unknown>;
       const { recipientAccount, expectedAmountRaw, expiresAt, metadata, completionPolicy } = body;
-
-      if (typeof recipientAccount !== 'string' || typeof expectedAmountRaw !== 'string') {
+      if (recipientAccount !== undefined) {
         return errorResponse(
-          'Missing required fields: recipientAccount, expectedAmountRaw',
+          'recipientAccount is deprecated and no longer accepted. Remove it; RaiFlow now derives payAddress per invoice.',
+          'bad_request',
+          400,
+        );
+      }
+      if (typeof expectedAmountRaw !== 'string') {
+        return errorResponse(
+          'Missing required field: expectedAmountRaw',
           'bad_request',
           400,
         );
@@ -561,7 +585,6 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
       const invoice = await runtime.createInvoice(
         {
-          recipientAccount,
           expectedAmountRaw,
           expiresAt: typeof expiresAt === 'string' ? expiresAt : undefined,
           metadata: typeof metadata === 'object' && metadata !== null
@@ -602,7 +625,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       // POST /api/invoices/:id/cancel
       if (method === 'POST' && parts.length === 3 && parts[2] === 'cancel') {
         try {
-          const invoice = await runtime.cancelInvoice(invoiceId);
+          const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+          const invoice = await runtime.cancelInvoice(invoiceId, idempotencyKey);
           return json(invoice);
         } catch (err) {
           const handled = handleRaiFlowError(err);
@@ -658,8 +682,10 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         eventTypes: eventTypes as RaiFlowEventType[],
       };
       if (typeof secret === 'string') createInputRaw['secret'] = secret;
-      const endpoint = await runtime.webhookEndpointStore.create(
+      const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+      const endpoint = await runtime.createWebhookEndpoint(
         createInputRaw as unknown as CreateEndpointInput,
+        idempotencyKey,
       );
 
       return json(endpoint, 201);
@@ -674,7 +700,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     // DELETE /api/webhooks/:id
     if (method === 'DELETE' && parts.length === 2) {
       const webhookId = parts[1]!;
-      const deleted = await runtime.webhookEndpointStore.delete(webhookId);
+      const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+      const deleted = await runtime.deleteWebhookEndpoint(webhookId, idempotencyKey);
       if (!deleted) {
         return errorResponse(`Webhook not found: ${webhookId}`, 'not_found', 404);
       }
