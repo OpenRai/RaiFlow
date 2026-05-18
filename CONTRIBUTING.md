@@ -74,7 +74,7 @@ Architectural review docs (`docs/architectural-review*.md`) are implementation n
 
 ## Code of conduct
 
-All contributors are expected to follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
+All contributors are expected to keep discussion respectful, focused, and professional.
 
 ---
 

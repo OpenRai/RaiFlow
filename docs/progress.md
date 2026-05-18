@@ -1,7 +1,7 @@
 # RaiFlow Progress
 
 **Purpose:** Bootstrap document for new coding sessions. Contains current architecture context, active milestone, and immediate next steps.
-**Last updated:** 2026-05-12 (account sync resilience fix)
+**Last updated:** 2026-05-18 (roadmap and RFC divergence audit)
 
 ---
 
@@ -54,33 +54,44 @@ packages/
 
 ---
 
-**M3 — Wallet Domain** — *in progress*
+**M3 — Wallet Domain** — ✅ **Mostly implemented**
 
-Building in order:
-1. ✅ Accounts service (managed + watched)
-2. ✅ Sends service (idempotent, state machine)
-3. ✅ Account Watch Pool & Real-Time Event Fan-Out
-4. Publish service (pre-signed blocks)
-5. Work generation API
-
-Current frontier:
 - Account and Send resources are exposed through the runtime HTTP API and the `@openrai/raiflow-sdk` package.
 - `SendOrchestrator` drives the non-anemic send lifecycle: `queued` → `published` → `confirmed`/`failed`.
 - The runtime wires `accountStore`, `sendStore`, `custodyEngine`, `rpcPool`, and `Watcher` together in `main.ts`.
 - `Watcher` now forwards confirmations for both incoming (recipient match) and outgoing (sender match) blocks.
 - `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
-- **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s. Initial sync now defends against transient RPC failures (logs warning, continues startup) and spaces bulk sync calls with a 250ms delay to avoid rate-limit cooldowns.
+- **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s. Initial sync now defends against transient RPC failures (logs warning, continues startup) and spaces bulk sync calls with a 750ms delay to avoid rate-limit cooldowns.
 - **SubscriptionManager** deduplicates SSE connections and fans out `AccountEvent`s to subscribed clients.
 - **SSE stream** (`GET /api/accounts/stream`) with `X-Raiflow-Stream-Id` header, plus `POST/DELETE /api/accounts/:id/watch` for dynamic subscribe/unsubscribe.
 - **SDK** adds `accounts.watch()` returning an `AsyncIterable<AccountEvent>`, backed by a shared `SseConnection` with auto-reconnect.
-- Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime auto-generates and enforces API keys.
-- Next transport follow-up is to persist and surface infrastructure events like `rpc.connected` and `rpc.failover` through the runtime once the legacy event adapter no longer constrains non-invoice event types.
+- Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime enforces Bearer auth when an API key is configured.
+- Pre-signed block publishing and work-generation APIs are exposed through both the runtime and SDK.
+
+Remaining wallet follow-ups:
+- Persist and surface `account.received`, `block.published`, `block.confirmed`, `block.failed`, `rpc.connected`, `rpc.disconnected`, and `rpc.failover` through the unified runtime event surface.
+- Add account deletion/removal semantics.
+- Add full auto-receive for managed accounts.
+- Harden restart recovery for queued and published sends.
 
 Exit criterion: can create a managed account, derive addresses, send XNO, query send status.
 
 ---
 
-## What Is Already True
+**M4/M5 — Invoice + Delivery Convergence** — *active*
+
+Current frontier:
+- Invoice creation now derives deterministic per-invoice pay addresses in a dedicated derivation namespace; caller `recipientAccount` is rejected as deprecated.
+- Runtime API responses for invoice/payment resources are now canonical v2 shapes, and invoice payment lifecycle emits canonical `invoice.payment_received` / `invoice.payment_confirmed` events.
+- Global polling endpoint (`GET /api/events`) is now wired to the persisted v2 event store.
+- Mutating operations now use scoped persisted idempotency replay for invoice create/cancel, managed account create, send queue, webhook create/delete, and block publish.
+- Startup now hard-fails when API key is missing, and custodial mode now hard-fails when custody seed/representative are missing.
+- Wire webhook delivery attempts to persisted storage and recover retries after restart.
+- See `ROADMAP_DIVERGENCE.md` for the current RFC-vs-implementation audit.
+
+---
+
+## Settled Decisions
 
 These decisions are settled and should not be re-litigated without strong new evidence:
 
@@ -95,8 +106,8 @@ These decisions are settled and should not be re-litigated without strong new ev
 9. **SQLite default, PostgreSQL later** — single-file zero-dependency default, swap via adapter.
 10. **YAML config with `env:` references** — no hardcoded values, no surprising runtime env var injection.
 11. **Web standard Request/Response** — framework-agnostic HTTP handler. No Express/Hono/Fastify dependency in the core runtime.
-12. **Startup mode enforcement** — `RAIFLOW_MODE` is required at boot (`custodial` or `non-custodial`). Mode gates which features are available. Custodial mode requires custody config.
-13. **API key is developer-provided** — `RAIFLOW_API_KEY` is required. No auto-generation, no hidden files. The developer picks their own key.
+12. **Startup mode enforcement** — `RAIFLOW_MODE` is required at boot (`custodial` or `non-custodial`). Mode gates which features are available. Custodial mode should require explicit custody config.
+13. **API key is developer-provided** — `RAIFLOW_API_KEY` is required. No auto-generation, no hidden files. The developer picks their own key. Current implementation gaps are tracked in `ROADMAP_DIVERGENCE.md`.
 14. **PoW is invisible to the developer** — RaiFlow absorbs work generation, signing, and frontier management. Low-level escape hatches (`WorkResource`, `BlocksResource`) exist only for non-custodial pre-signed flows.
 
 ---

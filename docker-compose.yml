@@ -7,7 +7,7 @@ services:
       RAIFLOW_MODE: "custodial"           # required: "custodial" or "non-custodial"
       RAIFLOW_API_KEY: ""                  # required: set a strong secret
       # RAIFLOW_CUSTODY_SEED: ""           # required only for custodial mode
-      # RAIFLOW_CUSTORY_REP: ""            # required only for custodial mode
+      # RAIFLOW_CUSTODY_REP: ""            # required only for custodial mode
     volumes:
       - raiflow-data:/data
     ports:

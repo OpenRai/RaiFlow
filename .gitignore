@@ -162,3 +162,4 @@ vite.config.ts.timestamp-*
 
 # Agent plans
 .kilo/plans/
+.pnpm-store/
