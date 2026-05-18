@@ -18,6 +18,8 @@ import type {
   WebhookEndpoint,
   WebhookEndpointStore,
   EventQueryOptions,
+  IdempotencyReplayStore,
+  IdempotencyRecord,
 } from '@openrai/model';
 import BetterSqlite3 from 'better-sqlite3';
 
@@ -706,6 +708,52 @@ export function createSqliteWebhookStore(db: Database): WebhookEndpointStore {
       return rows
         .map(rowToWebhook)
         .filter((w) => w.eventTypes.includes('*') || w.eventTypes.includes(eventType));
+    },
+  };
+}
+
+function scopedIdempotencyKey(scope: string, key: string): string {
+  return `${scope}:${key}`;
+}
+
+function rowToIdempotencyRecord(row: Record<string, unknown>): IdempotencyRecord {
+  const rawKey = row.key as string;
+  const splitIdx = rawKey.indexOf(':');
+  const scope = splitIdx >= 0 ? rawKey.slice(0, splitIdx) : 'default';
+  const key = splitIdx >= 0 ? rawKey.slice(splitIdx + 1) : rawKey;
+  return {
+    key,
+    scope,
+    resourceType: row.resource_type as string,
+    resourceId: row.resource_id as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+export function createSqliteIdempotencyReplayStore(db: Database): IdempotencyReplayStore {
+  return {
+    async get(scope: string, key: string): Promise<IdempotencyRecord | undefined> {
+      const row = db
+        .prepare('SELECT * FROM idempotency_keys WHERE key = ?')
+        .get(scopedIdempotencyKey(scope, key)) as Record<string, unknown> | undefined;
+      return row ? rowToIdempotencyRecord(row) : undefined;
+    },
+
+    async put(scope: string, key: string, resourceType: string, resourceId: string): Promise<IdempotencyRecord> {
+      const scopedKey = scopedIdempotencyKey(scope, key);
+      const createdAt = new Date().toISOString();
+      db.prepare(`
+        INSERT OR IGNORE INTO idempotency_keys (key, resource_type, resource_id, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(scopedKey, resourceType, resourceId, createdAt);
+
+      const row = db
+        .prepare('SELECT * FROM idempotency_keys WHERE key = ?')
+        .get(scopedKey) as Record<string, unknown> | undefined;
+      if (!row) {
+        throw new Error(`Failed to persist idempotency key for scope=${scope}`);
+      }
+      return rowToIdempotencyRecord(row);
     },
   };
 }

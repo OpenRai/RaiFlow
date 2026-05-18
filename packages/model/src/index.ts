@@ -384,6 +384,14 @@ export interface PaginatedEventsResponse {
   nextCursor: string | null;
 }
 
+export interface IdempotencyRecord {
+  key: string;
+  scope: string;
+  resourceType: string;
+  resourceId: string;
+  createdAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // Store Interfaces
 // ---------------------------------------------------------------------------
@@ -433,6 +441,11 @@ export interface WebhookEndpointStore {
   list(): Promise<WebhookEndpoint[]>;
   delete(id: string): Promise<boolean>;
   getByEventType(eventType: string): Promise<WebhookEndpoint[]>;
+}
+
+export interface IdempotencyReplayStore {
+  get(scope: string, key: string): Promise<IdempotencyRecord | undefined>;
+  put(scope: string, key: string, resourceType: string, resourceId: string): Promise<IdempotencyRecord>;
 }
 
 // ---------------------------------------------------------------------------
