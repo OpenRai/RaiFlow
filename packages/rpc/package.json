@@ -1,6 +1,6 @@
 {
   "name": "@openrai/rpc",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Multi-node RPC, WebSocket, failover, and confirmation tracking for RaiFlow",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@openrai/events",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "private": true,
   "description": "Event bus, persistence, and querying for RaiFlow",
   "type": "module",
