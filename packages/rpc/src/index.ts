@@ -7,7 +7,6 @@ import type { ConfirmedBlock } from '@openrai/model';
 export interface RpcNodeConfig {
   rpc: string[];
   ws: string[];
-  work: string[];
 }
 
 export interface RpcClient {
@@ -73,9 +72,6 @@ function configuredWsUrls(nodes: RpcNodeConfig[]): string[] {
   return nodes.flatMap((node) => node.ws);
 }
 
-function configuredWorkUrls(nodes: RpcNodeConfig[]): string[] {
-  return nodes.flatMap((node) => node.work);
-}
 
 /**
  * A simple promise-based semaphore for limiting concurrency.
@@ -295,11 +291,9 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
     const rpc = configuredRpcUrls(configuredNodes);
     const ws = configuredWsUrls(configuredNodes);
-    const work = configuredWorkUrls(configuredNodes);
     return {
       ...(rpc.length > 0 ? { rpc } : {}),
       ...(ws.length > 0 ? { ws } : {}),
-      ...(work.length > 0 ? { work } : {}),
     };
   }
 

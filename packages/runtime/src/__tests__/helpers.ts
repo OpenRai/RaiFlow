@@ -23,7 +23,7 @@ export function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): 
       enableDashboardAuth: true,
       ...overrides,
     },
-    nano: { rpc: [], ws: [], work: [] },
+    nano: { rpc: [], ws: [] },
     custody: null,
     invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
     storage: { driver: 'sqlite', path: './raiflow.db' },

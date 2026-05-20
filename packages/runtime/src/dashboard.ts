@@ -110,7 +110,6 @@ function configRows(config: RaiFlowConfig | undefined): string {
     { key: 'logging.format', value: escapeHtml(config.logging.format) },
     { key: 'nano.rpc', value: escapeHtml(config.nano.rpc.join(', ') || 'none') },
     { key: 'nano.ws', value: escapeHtml(config.nano.ws.join(', ') || 'none') },
-    { key: 'nano.work', value: escapeHtml(config.nano.work.join(', ') || 'none') },
     { key: 'custody.configured', value: booleanPill(Boolean(config.custody)) },
     { key: 'invoices.defaultExpirySeconds', value: escapeHtml(String(config.invoices.defaultExpirySeconds)) },
     { key: 'invoices.autoSweep', value: booleanPill(config.invoices.autoSweep) },

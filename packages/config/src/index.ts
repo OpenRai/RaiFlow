@@ -16,7 +16,6 @@ export interface DaemonConfig {
 export interface NanoConfig {
   rpc: string[];
   ws: string[];
-  work: string[];
 }
 
 export interface CustodyConfig {
@@ -193,7 +192,6 @@ function parseNano(obj: Record<string, unknown>): NanoConfig {
   return {
     rpc: resolveStringArray(nano.rpc, 'nano.rpc'),
     ws: resolveStringArray(nano.ws, 'nano.ws'),
-    work: resolveStringArray(nano.work, 'nano.work'),
   };
 }
 

@@ -26,7 +26,7 @@ describe('loadConfig nano transport arrays', () => {
     tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
 
     const config = loadConfig(path);
-    expect(config.nano).toEqual({ rpc: [], ws: [], work: [] });
+    expect(config.nano).toEqual({ rpc: [], ws: [] });
   });
 
   it('accepts flat rpc override list', () => {
@@ -34,15 +34,15 @@ describe('loadConfig nano transport arrays', () => {
     tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
 
     const config = loadConfig(path);
-    expect(config.nano).toEqual({ rpc: ['https://rpc.example.com'], ws: [], work: [] });
+    expect(config.nano).toEqual({ rpc: ['https://rpc.example.com'], ws: [] });
   });
 
-  it('accepts flat rpc, ws, and work override lists', () => {
-    const path = writeConfig('nano:\n  rpc: ["https://rpc.example.com"]\n  ws: ["wss://ws.example.com"]\n  work: ["https://work.example.com"]\n');
+  it('accepts flat rpc and ws override lists', () => {
+    const path = writeConfig('nano:\n  rpc: ["https://rpc.example.com"]\n  ws: ["wss://ws.example.com"]\n');
     tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
 
     const config = loadConfig(path);
-    expect(config.nano).toEqual({ rpc: ['https://rpc.example.com'], ws: ['wss://ws.example.com'], work: ['https://work.example.com'] });
+    expect(config.nano).toEqual({ rpc: ['https://rpc.example.com'], ws: ['wss://ws.example.com'] });
   });
 
   it('rejects invalid nano transport values', () => {

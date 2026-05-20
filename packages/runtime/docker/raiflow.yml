@@ -8,7 +8,6 @@ nano:
   rpc:
     - "env:NANO_RPC_URL"
   ws: []
-  work: []
 
 invoices:
   defaultExpirySeconds: 3600

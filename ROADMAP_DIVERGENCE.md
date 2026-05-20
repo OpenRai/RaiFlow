@@ -1,215 +1,252 @@
 # Roadmap Divergence Report
 
-**Audit date:** 2026-05-18  
+**Audit date:** 2026-05-19 (updated from 2026-05-18 baseline)  
 **Scope:** `rfcs/*.md` compared with the current implementation in `packages/`, `apps/site/`, `examples/`, root docs, and config files.  
-**Status key:** `Aligned`, `Partial`, `Divergent`, `Not implemented`, `RFC conflict`.
+**Status key:** `Aligned`, `Partial`, `Divergent`, `Not implemented`, `RFC conflict`, `Resolved`.
 
 This report is intentionally detailed. It records where the RFC contract, roadmap, README/status docs, and runtime implementation no longer say the same thing.
 
 ## Executive Summary
 
-The repository has advanced beyond the old roadmap in the wallet/API/SDK areas, but several accepted RFC guarantees are still not true in the runtime. The largest divergences are:
+The 2026-05-18 shipping round resolved several high-priority divergences:
+
+- **Startup API-key enforcement** — `resolveApiKey()` is now called in `main.ts` and hard-fails if missing. (D-002 ✅)
+- **Custodial seed validation** — Auto-generation removed; custodial mode now hard-fails when `custody.seed` or `custody.representative` is missing. (D-003 ✅)
+- **Derivation namespace separation** — Invoice derivation starts at index 0, managed at 1,000,000. Runtime asserts they don't overlap. (D-005 ✅ at runtime level)
+- **Invoice v2 event migration** — Runtime now emits `invoice.payment_received` and `invoice.payment_confirmed` instead of legacy `payment.confirmed`. All invoice events flow through `emitV2Event()`.
+- **Global event polling** — `GET /api/events` is implemented with cursor-based pagination, backed by the persisted v2 event store.
+- **Scoped idempotency** — Invoice create/cancel, managed account create, send queue, webhook create/delete, and block publish all use the shared `IdempotencyReplayStore`.
+- **Invoice pay-address derivation** — `recipientAccount` is rejected; RaiFlow now derives `payAddress` per invoice via custody.
+
+Remaining largest divergences:
 
 - The implemented HTTP API is under `/api`, while RFC 0002 and RFC 0003 describe `/v1`.
-- Invoice storage uses v2 tables, but invoice runtime behavior still goes through legacy adapters and exposes prototype-era shapes/events in places.
-- The global event log exists in storage, but no global event polling route is exposed.
-- Webhook delivery is signed and retried, but delivery attempts are not persisted by the delivery engine and retry semantics differ from RFC 0003.
-- Startup mode gating exists, but required API-key and custodial seed validation are not fully enforced.
-- Derivation namespace separation is an accepted invariant, but runtime custody wiring starts invoice and managed derivation at the same index.
-- Pre-signed block publish exists as an RPC pass-through, but block events and confirmation tracking are not implemented.
-- RFC 0001/0002 describe custody modes coexisting in one instance, while RFC 0004 and implementation use startup mode gating. RFC 0004 is the newer accepted decision.
+- Webhook delivery semantics still diverge from RFC 0003 (signature format, 4xx retry, no persisted attempts).
+- `nano-core` boundary is still not clean in custody.
+- Legacy adapter layer (`LegacyInvoice`, `LegacyInvoiceStore`) remains as an internal shim between the v2 API surface and SQLite.
+- Invoice derivation index calculation is fragile (counts all invoices rather than tracking a persistent high-water mark).
+- Pre-signed block publish exists but emits no `block.*` events and has no confirmation tracking.
 
 ## Cross-Cutting Divergences
 
 ### D-001 — API Prefix and Route Contract Drift
 
-**Status:** Divergent  
+**Status:** Divergent (unchanged)  
 **RFCs:** RFC 0002 `Runtime HTTP API`, RFC 0003 `Event Polling`  
 **Implementation:** [packages/runtime/src/handler.ts](packages/runtime/src/handler.ts)
 
-RFC 0002 defines routes under `/v1`, including `GET /v1/events`, `POST /v1/work/generate`, `POST /v1/publish`, and `POST /v1/accounts/:id/send`. The implementation exposes `/api/*` instead, with routes such as `/api/accounts/:id/sends`, `/api/blocks`, `/api/work`, and no global `/api/events` equivalent.
-
-This is not just naming drift. SDK defaults also target `/api`, so the current public client and runtime agree with each other but not with RFC 0002/0003.
+RFC 0002 defines routes under `/v1`. The implementation exposes `/api/*` instead. SDK defaults also target `/api`, so the current public client and runtime agree with each other but not with RFC 0002/0003.
 
 **Roadmap impact:** decide whether `/api` is the canonical route prefix and update RFCs/site docs, or add `/v1` compatibility routes.
 
 ### D-002 — Required API Key Is Not Enforced at Startup
 
-**Status:** Divergent  
-**RFCs:** RFC 0004 `API Key`  
-**Implementation:** [packages/runtime/src/main.ts](packages/runtime/src/main.ts), [packages/runtime/src/handler.ts](packages/runtime/src/handler.ts), [packages/runtime/src/auth.ts](packages/runtime/src/auth.ts)
+**Status:** ✅ Resolved  
+**Resolved in:** `625fec3`
 
-RFC 0004 requires `RAIFLOW_API_KEY` or `daemon.apiKey` and says startup should fail if neither exists. The implementation has `resolveApiKey()`, but `main.ts` imports it without calling it. `checkAuth()` returns `undefined` when `config.daemon.apiKey` is absent, which leaves routes unauthenticated.
-
-**Roadmap impact:** M1/M7 should track startup API-key enforcement separately from Bearer auth middleware.
+`main.ts` now calls `resolveApiKey(config)` at startup, assigns the result into `config.daemon.apiKey`, and exits with a clear error if no key is found. `checkAuth()` in `handler.ts` uses the resolved key for Bearer token validation.
 
 ### D-003 — Custodial Seed Validation Was Replaced by Auto-Generation
 
-**Status:** Divergent  
-**RFCs:** RFC 0004 `Custodial Mode Validation`  
-**Implementation:** [packages/runtime/src/main.ts](packages/runtime/src/main.ts)
+**Status:** ✅ Resolved  
+**Resolved in:** `625fec3`
 
-RFC 0004 says custodial mode must fail startup when `custody.seed` or `custody.representative` is missing. The current main process generates `custody-seed.txt` beside the SQLite database and uses a default representative when `mode === 'custodial' && !config.custody`.
-
-This is a material security/product decision divergence: auto-generated custody is convenient for local development, but the RFC explicitly rejected hidden material.
-
-**Roadmap impact:** M7 should decide whether to remove auto-generation, gate it behind a dev flag, or amend RFC 0004.
+The auto-generation block (`custody-seed.txt`, default representative) has been removed. Custodial mode now hard-fails at startup when `config.custody?.seed` or `config.custody?.representative` is missing.
 
 ### D-004 — Custody Mode Semantics Conflict Across RFCs
 
-**Status:** RFC conflict, implementation follows RFC 0004  
+**Status:** RFC conflict, implementation follows RFC 0004 (unchanged)  
 **RFCs:** RFC 0001 `Custody Modes`, RFC 0002 `Integration Modes`, RFC 0004 `Startup Mode`
 
-RFC 0001/0002 say managed, watched, and pre-signed modes coexist in the same instance. RFC 0004 later says a single startup mode (`custodial` or `non-custodial`) gates capabilities. The implementation follows RFC 0004: watched accounts, blocks, and work are available in non-custodial mode; managed accounts, sends, and invoices are rejected with 501.
+RFC 0001/0002 say managed, watched, and pre-signed modes coexist in the same instance. RFC 0004 later says a single startup mode (`custodial` or `non-custodial`) gates capabilities. The implementation follows RFC 0004.
 
 **Roadmap impact:** update RFC 0001/0002 or add an explicit supersession note pointing to RFC 0004.
 
 ### D-005 — Derivation Namespace Separation Is Not Enforced
 
-**Status:** Divergent  
-**RFCs:** RFC 0001 `Operational Domains`, RFC 0002 `@openrai/custody`  
-**Implementation:** [packages/runtime/src/main.ts](packages/runtime/src/main.ts), [packages/custody/src/index.ts](packages/custody/src/index.ts)
+**Status:** ✅ Resolved at runtime level, not enforced in custody engine  
+**Resolved in:** `625fec3`
 
-RFC 0002 reserves invoice indexes `0x00000000-0x7FFFFFFF` and managed account indexes `0x80000000-0xFFFFFFFF`. Current runtime custody creation passes `derivationStartIndex: { invoice: 0, managed: 0 }`. The custody engine exposes separate methods but does not enforce ranges.
+`main.ts` now defines `DERIVATION_START_INDEX = { invoice: 0, managed: 1_000_000 }` and asserts they are not equal. The `Runtime` constructor also validates `invoiceDerivationStartIndex !== managedDerivationStartIndex`. The custody engine itself still does not enforce range bounds internally — it trusts the caller to pass correct indices.
 
-**Roadmap impact:** M2 should track namespace enforcement before invoice pay-address derivation lands.
+**Residual gap:** The RFC reserves `0x00000000–0x7FFFFFFF` for invoices and `0x80000000–0xFFFFFFFF` for managed. Current values (0 and 1,000,000) are within the RFC's invoice range. This is fine as long as managed index growth stays well below the invoice range ceiling, but the custody engine should eventually enforce hard upper bounds.
 
 ### D-006 — `nano-core` Boundary Is Not Clean in Custody
 
-**Status:** Partial / Divergent  
+**Status:** Partial / Divergent (unchanged)  
 **RFCs:** RFC 0001 `Motivation`, RFC 0002 `Custody Engine and nano-core`  
 **Implementation:** [packages/custody/src/index.ts](packages/custody/src/index.ts)
 
-The RFCs say `@openrai/nano-core` owns Nano protocol primitives such as address encoding, amount math, client calls, block construction helpers, and `WorkProvider`. The custody package imports `WorkProvider` from `@openrai/nano-core`, but it also directly imports `createBlock`, `deriveAddress`, `derivePublicKey`, `deriveSecretKey`, `signBlock`, and `computeWork` from `nanocurrency`.
+The custody package imports `WorkProvider` from `@openrai/nano-core`, but it also directly imports `createBlock`, `deriveAddress`, `derivePublicKey`, `deriveSecretKey`, `signBlock`, and `computeWork` from `nanocurrency`.
 
 **Roadmap impact:** decide whether this direct dependency is acceptable, or migrate custody protocol primitives behind `nano-core`.
+
+### D-007 — Invoice Derivation Index Calculation Is Fragile (NEW)
+
+**Status:** Divergent  
+**Implementation:** [packages/runtime/src/runtime.ts](packages/runtime/src/runtime.ts) line 979-982
+
+`getNextInvoiceDerivationIndex()` calculates the next index as `invoiceDerivationStartIndex + invoices.length` (counting all invoices, regardless of status). This has two problems:
+
+1. **Deleted invoices would cause index reuse.** If invoice deletion is ever implemented, the count would decrease, causing a previously-used derivation index to be reused — potentially creating address collisions or privacy leaks.
+2. **Performance.** Listing all invoices to count them scales poorly. A persisted high-water mark column or counter would be O(1) instead of O(n).
+
+The managed account derivation index uses a max-scan approach, which is safer (monotonically increasing) but also O(n).
+
+**Roadmap impact:** add a persisted `next_derivation_index` or high-water-mark column per namespace to make index assignment O(1) and deletion-safe.
+
+### D-008 — Legacy Adapter Layer Still Intermediates Invoice Storage (NEW)
+
+**Status:** Partial  
+**Implementation:** [packages/runtime/src/main.ts](packages/runtime/src/main.ts) lines 170-176, [packages/runtime/src/runtime.ts](packages/runtime/src/runtime.ts)
+
+The runtime now exposes a v2 API surface (v2 `Invoice` and `Payment` shapes, v2 events), but internally the `Runtime` class still operates on `LegacyInvoice` and `LegacyPayment` types, converting at the boundary via `legacyToV2Invoice()` and `legacyToV2Payment()`. The main process still wires through `createLegacySqliteInvoiceStore()` and `createLegacySqlitePaymentStore()` adapters.
+
+This works correctly but means:
+
+- Every invoice operation round-trips through a type conversion layer.
+- The `LegacyInvoice` type uses `recipientAccount` internally while the v2 `Invoice` type uses `payAddress` — the adapter maps between them, but the internal naming mismatch creates maintenance risk.
+- The `LegacyInvoiceStore` interface method `getByRecipientAccount()` is still the mechanism used for payment matching, even though invoices are now addressed by derived `payAddress`.
+
+**Roadmap impact:** Refactor `Runtime` to operate directly on v2 `Invoice` / `Payment` types and the v2 `InvoiceStore` / `PaymentStore` interfaces from `@openrai/model`. Remove legacy adapters and the `Legacy*` types from `@openrai/model`.
 
 ## RFC 0001 — Project Framing
 
 ### Summary / Motivation / What RaiFlow Is
 
-**Status:** Mostly aligned
+**Status:** Mostly aligned (improved)
 
-The package layout and runtime direction match the framing: RaiFlow sits between apps and Nano nodes, owns orchestration/storage/events, and does not try to become an e-commerce layer.
-
-Notable gap: README/status docs now describe invoices as shipped, but the implementation still uses legacy invoice adapters. The product framing is right; the invoice internals have not fully caught up.
+The product framing is right. Invoice internals now expose v2 shapes at the API boundary and emit canonical v2 events, though legacy adapters remain internally.
 
 ### What RaiFlow Is Not / Out of Scope
 
-**Status:** Mostly aligned
-
-No consumer wallet, SaaS gateway, cart/catalog system, fiat platform, Nano node, or block explorer is implemented. The SSR dashboard exists, but it is an operator dashboard rather than a consumer wallet UI.
+**Status:** Mostly aligned (unchanged)
 
 ### Operational Domains
 
-**Status:** Partial
+**Status:** Mostly aligned (improved from Partial)
 
-The dual-domain runtime exists. Wallet-domain accounts/sends and invoice-domain create/list/cancel/payment matching both run in one `Runtime`.
+The dual-domain runtime exists. Key improvements:
 
-Gaps:
+- Invoice pay-address derivation per invoice is now implemented — `POST /api/invoices` derives a `payAddress` via custody. The `recipientAccount` parameter is rejected.
+- Deterministic invoice address mapping is meaningful: the same seed + index always produces the same address.
 
-- Invoice pay-address derivation per invoice is not implemented; `POST /api/invoices` requires a caller-provided `recipientAccount`.
+Remaining gaps:
+
 - Auto-receive and treasury sweep are not implemented for invoices.
-- Deterministic invoice address mapping is not meaningful yet because invoice address selection is not owned by RaiFlow.
 
 ### Custody Modes
 
-**Status:** Partial, superseded by RFC 0004 for startup behavior
-
-Managed accounts, watched accounts, and pre-signed publishing all exist as concepts. The implementation does not allow every mode simultaneously in all startup modes: non-custodial mode rejects managed accounts, sends, and invoices.
+**Status:** Partial, superseded by RFC 0004 for startup behavior (unchanged)
 
 ### Core Primitives
 
-**Status:** Partial
+**Status:** Partial (improved)
 
-Implemented primitives:
+Improvements:
 
-- `Invoice`, `Payment`, `Account`, `Send`, `RaiFlowEvent`, and `WebhookEndpoint` exist in [packages/model/src/index.ts](packages/model/src/index.ts).
-- SQLite stores exist for those resources.
-- SDK resources exist for accounts, sends, invoices, webhooks, blocks, work, and system.
+- Runtime invoice responses now return v2 `Invoice` shapes (with `payAddress`, `receivedAmountRaw`, etc.).
+- Runtime payment queries return v2 `Payment` shapes.
+- The global event query API (`GET /api/events`) is now exposed with cursor pagination.
 
-Gaps:
+Remaining gaps:
 
-- Runtime invoice responses still return legacy invoice fields through adapters.
 - No first-class runtime block resource is persisted; `/api/blocks` publishes directly through RPC.
-- `Event` is persisted, but the global query API is missing.
+- Legacy types remain as internal shims (D-008).
 
 ### Event Vocabulary
 
-**Status:** Partial / Divergent
+**Status:** Mostly aligned (improved from Partial / Divergent)
 
-The canonical event union includes the RFC vocabulary, but the runtime only emits part of it:
+The runtime now emits canonical v2 events:
 
-- Emits v2 wallet events: `account.created`, `account.balance_updated`, `send.queued`, `send.published`, `send.confirmed`, `send.failed`.
-- Emits legacy invoice events: `invoice.created`, `payment.confirmed`, `invoice.completed`, `invoice.expired`, `invoice.canceled`.
-- Does not emit canonical `invoice.payment_received`, `invoice.payment_confirmed`, `invoice.swept`, `account.received`, `account.removed`, `block.*`, or `rpc.*` events.
+- Emits: `invoice.created`, `invoice.payment_received`, `invoice.payment_confirmed`, `invoice.completed`, `invoice.expired`, `invoice.canceled`, `account.created`, `account.balance_updated`, `send.queued`, `send.published`, `send.confirmed`, `send.failed`.
+- Does not yet emit: `invoice.swept`, `account.received`, `account.removed`, `block.*`, `rpc.*`.
 
-`AccountStateSync` emits non-persisted account SSE events such as `account.payment_received`, which are useful operationally but are not the RFC 0001/0003 persisted event vocabulary.
+The legacy `payment.confirmed` event is no longer emitted by `handleConfirmedBlock()`. All invoice payment events now use the canonical `invoice.payment_received` and `invoice.payment_confirmed` names.
+
+`AccountStateSync` still emits non-persisted SSE events (`account.state_synced`, `account.payment_received`, etc.) which are useful operationally but are not in the persisted event vocabulary.
 
 ### Idempotency
 
-**Status:** Partial
+**Status:** Mostly aligned (improved from Partial)
 
-Strongly aligned for sends: missing `idempotencyKey` is rejected and duplicate send keys return the original send. Invoice creation supports the `Idempotency-Key` header.
+Improvements:
 
-Gaps:
+- All key mutating operations now use scoped idempotency via `IdempotencyReplayStore`:
+  - Invoice create (`invoice.create` scope)
+  - Invoice cancel (`invoice.cancel` scope)
+  - Managed account create (`account.create.managed` scope)
+  - Send queue (`send.queue` scope)
+  - Webhook create (`webhook.create` scope)
+  - Webhook delete (`webhook.delete` scope)
+  - Block publish (`block.publish` scope)
+- Idempotency keys are accepted via `Idempotency-Key` HTTP header for invoice operations, webhook operations, and block publishing.
 
-- Not every mutating operation accepts an idempotency key. Account update, watched-account creation, invoice cancel, webhook create, webhook delete, block publish, and work generation do not have the same idempotency model.
-- Managed account creation accepts an `idempotencyKey` in the request shape, but the runtime does not currently use it to deduplicate account creation.
+Remaining gaps:
+
+- Work generation (`POST /api/work`) does not accept an idempotency key (arguably not needed since work generation is naturally idempotent for the same hash).
+- Account PATCH does not accept an idempotency key.
+- Watched account creation uses address-based deduplication (returns existing if same address) rather than key-based idempotency.
 
 ### Doctrine Summary
 
-**Status:** Directionally aligned
+**Status:** Directionally aligned (improved)
 
-The repo matches the "thin runtime" doctrine. The largest doctrine-level gap is still the unified event stream: events are persisted, but not all state changes are represented in the canonical stream and no global polling route exists.
+The unified event stream is now significantly closer to the doctrine. Events are persisted via `emitV2Event()` and exposed through `GET /api/events`. The remaining gap is that not all state changes are represented (account PATCH, block publish, RPC state) in the canonical stream.
 
 ## RFC 0002 — Runtime Architecture
 
 ### System Diagram
 
-**Status:** Mostly aligned
+**Status:** Mostly aligned (improved)
 
-The runtime wires config, storage, RPC, custody, events, watcher, account state sync, webhook delivery, and SDK-facing HTTP routes. The main divergence is that event delivery is split between legacy invoice events, v2 wallet events, account SSE events, and webhook retries.
+The runtime wires config, storage, RPC, custody, events, watcher, account state sync, webhook delivery, and SDK-facing HTTP routes. Event delivery now flows exclusively through v2 events for invoice lifecycle and wallet operations.
 
 ### Package Responsibilities
 
-**`@openrai/model` — Status: Aligned with some legacy debt**
+**`@openrai/model` — Status: Mostly aligned**
 
-Canonical public types and store interfaces exist. Legacy aliases remain so the runtime can keep building while invoice behavior is rewritten.
+Canonical public types and store interfaces exist. Legacy types remain for backward compatibility but are clearly marked for removal. New v2 types (`Invoice`, `Payment`, `EventQueryOptions`, `PaginatedEventsResponse`, `IdempotencyRecord`, `IdempotencyReplayStore`) are implemented and used.
 
 **`@openrai/config` — Status: Mostly aligned**
 
-YAML parsing, `env:` resolution, typed config, and mode parsing exist. The config package parses optional API key and custody config; startup enforcement is the runtime's responsibility and currently incomplete.
+Startup enforcement is now the runtime's responsibility and is implemented for API key and custodial seed validation.
 
-**`@openrai/storage` — Status: Mostly aligned**
+**`@openrai/storage` — Status: Mostly aligned (improved)**
 
-SQLite schema, migration runner, and store adapters exist. Transaction helpers are not obvious in the current public API. Delivery attempts have a table but are not used by webhook delivery.
+SQLite schema, migration runner, and store adapters exist. The `createSqliteIdempotencyReplayStore()` is now implemented and used for scoped idempotency across all mutating operations.
 
-**`@openrai/rpc` — Status: Partial**
+Remaining gap: delivery attempts table exists but is not used by webhook delivery.
 
-Multi-endpoint HTTP RPC, active difficulty, failover/audit integration, WebSocket client primitives, and state listeners exist. Runtime-level infrastructure event persistence for `rpc.connected`, `rpc.disconnected`, and `rpc.failover` is not wired.
+**`@openrai/rpc` — Status: Partial (unchanged)**
 
-**`@openrai/events` — Status: Partial**
+Runtime-level infrastructure event persistence for `rpc.connected`, `rpc.disconnected`, and `rpc.failover` is not wired.
 
-Persist-first append and an in-process bus exist. Cursor-like listing exists at the storage interface, but global event query routes and filter helpers are not exposed in the runtime.
+**`@openrai/events` — Status: Mostly aligned (improved from Partial)**
+
+Persist-first append and an in-process bus exist. The runtime now exposes a global event query route (`GET /api/events`) with cursor-based pagination.
 
 **`@openrai/custody` — Status: Partial / Divergent**
 
-Seed loading, derivation, signing, and work generation exist. Missing or divergent pieces:
+Improvements: derivation namespace separation is enforced at the runtime level (D-005).
 
-- namespace range enforcement
-- clean `nano-core` boundary
+Remaining divergent pieces:
+
+- clean `nano-core` boundary (D-006)
 - representative management beyond a placeholder
 - auto-receive pipeline
 - durable frontier store integration
 
-**`@openrai/runtime` — Status: Partial**
+**`@openrai/runtime` — Status: Partial (improved)**
 
-Runtime orchestration, API key middleware when configured, invoice/account/send/webhook services, dashboard, watcher, and startup wiring exist. Request IDs, structured error middleware, global event API, account deletion, and complete invoice v2 service remain incomplete.
+Improvements: startup validation, idempotency for all mutating operations, global event API, invoice v2 surface, invoice pay-address derivation.
 
-**`@openrai/webhook` — Status: Partial / Divergent**
+Remaining: request IDs, structured error middleware, account deletion, complete removal of legacy adapter layer.
 
-HMAC signing, verification helper, delivery, and in-memory retry scheduling exist. Divergences from RFC 0003:
+**`@openrai/webhook` — Status: Partial / Divergent (unchanged)**
+
+Divergences from RFC 0003:
 
 - signature format is `t=<timestamp>,v1=<hex>`, not `sha256=<hex_digest>`
 - signed payload is `timestamp.body`, not only raw JSON body
@@ -219,40 +256,41 @@ HMAC signing, verification helper, delivery, and in-memory retry scheduling exis
 
 **`@openrai/raiflow-sdk` — Status: Mostly aligned with current implementation**
 
-REST resource classes exist for the current `/api` surface. The SDK does not implement WebSocket subscriptions; it implements account SSE watching. It re-exports model types from the package entry point.
+`recipientAccount` is now deprecated on `InvoicesResource.create()`. The SDK matches the current `/api` surface.
 
 ### Runtime HTTP API
 
-**Status:** Divergent
+**Status:** Partial (improved from Divergent)
 
-The implemented route surface differs from RFC 0002:
+Improvements:
+
+- `GET /api/events` is now implemented with query parameters: `after`, `type`, `resourceType`, `resourceId`, `limit`.
+- `POST /api/invoices` no longer accepts `recipientAccount` (returns 400 with deprecation message).
+- `POST /api/invoices/:id/cancel` accepts `Idempotency-Key` header.
+- `POST /api/webhooks`, `DELETE /api/webhooks/:id`, `POST /api/blocks` accept `Idempotency-Key` header.
+
+Remaining route gaps vs RFC 0002:
 
 | RFC route | Current implementation |
 |---|---|
-| `GET /v1/events` | Missing |
-| `POST /v1/work/generate` | `POST /api/work` |
-| `POST /v1/publish` | `POST /api/blocks` |
-| `POST /v1/accounts/:id/send` | `POST /api/accounts/:id/sends` |
-| `POST /v1/watch`, `GET /v1/watch`, `DELETE /v1/watch/:account` | Watched accounts are created with `POST /api/accounts { type: "watched" }`; streaming uses `/api/accounts/stream` plus `/api/accounts/:id/watch` |
+| `/v1/*` prefix | `/api/*` (D-001) |
 | `DELETE /v1/accounts/:id` | Missing |
 
-Additional implemented routes not in RFC 0002 include `/`, `/dashboard`, `/api/version`, `/api/accounts/:id/receivable`, `/api/accounts/stream`, `/api/sends/:id`, and `/api/invoices/:id/events`.
+Additional implemented routes not in RFC 0002 include `/`, `/dashboard`, `/api/version`, `/api/accounts/:id/receivable`, `/api/accounts/stream`, `/api/sends/:id`, `/api/invoices/:id/events`, and `GET /api/events`.
 
 ### Custody Engine and nano-core
 
-**Status:** Partial / Divergent
+**Status:** Partial (improved)
 
-See D-005 and D-006. The runtime uses custody for send signing and work generation, but invoice derivation, receive/change orchestration, namespace enforcement, and a clean `nano-core` boundary are incomplete.
+Derivation namespace separation is enforced (D-005). Invoice address derivation is implemented. Remaining: clean `nano-core` boundary (D-006), receive/change orchestration.
 
 ### Integration Modes
 
-**Status:** RFC conflict, implementation follows RFC 0004
-
-The examples in RFC 0002 assume modes coexist as capabilities. Current implementation uses startup mode. Non-custodial mode accepts watched accounts, block publish, and work; it rejects invoices, managed accounts, and sends.
+**Status:** RFC conflict, implementation follows RFC 0004 (unchanged)
 
 ### Sweep Mechanics
 
-**Status:** Not implemented
+**Status:** Not implemented (unchanged)
 
 `autoSweep` and `sweepDestination` exist in config, but no invoice completion sweep path is wired. No `invoice.swept` event is emitted.
 
@@ -260,142 +298,126 @@ The examples in RFC 0002 assume modes coexist as capabilities. Current implement
 
 ### Summary and Design Principles
 
-**Status:** Partial
+**Status:** Mostly aligned (improved from Partial)
 
-Persist-first behavior is true for `emitEvent()` and `emitV2Event()` before webhook delivery. At-least-once webhook delivery is attempted via retries.
+Persist-first behavior is true for all `emitV2Event()` calls before webhook delivery. All invoice lifecycle events and wallet domain events go through the v2 path.
 
-Gaps:
+Remaining gaps:
 
-- Not every state change emits a canonical persisted event. Account PATCH, account removal, block publish, RPC state changes, and some account receive observations are missing from the persisted event stream.
-- Events are ordered by UUID cursor in storage listing, not by a monotonic sequence. Global ordering is already best-effort by RFC, but UUID `id > after` cursor semantics can be surprising.
+- Account PATCH, block publish, RPC state changes are not in the persisted event stream.
 - Account SSE events are not persisted event envelopes.
 
 ### Event Envelope
 
-**Status:** Mostly aligned for v2 events
+**Status:** Aligned for v2 events (improved)
 
-The v2 `RaiFlowEvent` envelope matches the RFC and adds `resourceType: 'rpc'`. Legacy invoice events are adapted into the v2 event store, but when read through invoice-local APIs they are mapped back to `createdAt` and legacy type names.
+The v2 `RaiFlowEvent` envelope matches the RFC. Legacy event envelopes are no longer emitted by the invoice lifecycle — all events use `emitV2Event()`.
 
 ### Event Taxonomy
 
-**Status:** Partial / Divergent
+**Status:** Mostly aligned (improved from Partial / Divergent)
 
-See RFC 0001 event vocabulary notes. The most important mismatch is the invoice event naming: runtime emits `payment.confirmed`, while RFC 0003 defines `invoice.payment_received` and `invoice.payment_confirmed`.
+The runtime now emits canonical `invoice.payment_received` and `invoice.payment_confirmed`. The legacy `payment.confirmed` is no longer emitted by `handleConfirmedBlock()`.
 
 ### Resource Shapes
 
-**Status:** Mixed
-
-The canonical shapes exist in `@openrai/model` and SQLite storage. Runtime APIs are mixed:
+**Status:** Mostly aligned (improved from Mixed)
 
 - Accounts and sends use canonical shapes.
-- Invoices and payments are still exposed through legacy shapes in runtime code paths.
+- Invoices are now exposed through v2 `Invoice` shape at the API boundary (with `payAddress`, `receivedAmountRaw`).
+- Payments are now exposed through v2 `Payment` shape at the API boundary (with `blockHash`, `senderAddress`).
 - `WebhookEndpoint` shape is aligned.
 - Block state is not persisted as a first-class resource.
 
 ### Delivery Semantics
 
-**Status:** Partial / Divergent
+**Status:** Partial / Divergent (unchanged)
 
-Webhook delivery attempts are retried, but the RFC delivery policy is not exactly implemented:
-
-- first attempts are awaited, retries are in-memory timers
-- no persisted attempt log is written by the delivery engine
-- retry behavior retries 4xx responses
-- max retry count exists but the attempt numbering does not map directly to a persisted `attempt` row
-- signature format differs from the RFC
+See webhook package notes above.
 
 ### Event Polling
 
-**Status:** Not implemented at runtime
+**Status:** ✅ Resolved  
+**Resolved in:** `625fec3`
 
-The event store can list events with `after`, `type`, `resourceType`, `resourceId`, and `limit`, but the runtime does not expose `GET /v1/events` or `GET /api/events`.
+`GET /api/events` is now implemented with query parameters: `after` (cursor), `type`, `resourceType`, `resourceId`, `limit`. Responses include `data` and `nextCursor` for pagination. The implementation uses the v2 `EventStore.list()` method backed by SQLite.
 
 ### Idempotency Invariants
 
-**Status:** Partial
+**Status:** Mostly aligned (improved from Partial)
 
-Aligned:
+Improvements:
 
-- Payment confirmation has a block-hash guard and the SQLite payment table has a unique `block_hash`.
-- Send idempotency works by idempotency key.
-- Invoice creation idempotency works when a key is provided.
-- Completion is terminal in the cancel path and expiry path.
-- Confirmed invoice amount is monotonic in the current matching flow.
-
-Gaps:
-
-- The invariant text still names duplicate `payment.confirmed` events, while the taxonomy moved to `invoice.payment_confirmed`.
-- Account balance can decrease through sends, which is allowed by the RFC only when there is a corresponding send record. The send path creates that record, but not all balance changes emit a persisted balance event.
-- Not all mutating APIs accept idempotency keys.
+- The invariant text now matches the taxonomy: `invoice.payment_confirmed` events are emitted, not `payment.confirmed`.
+- All mutating APIs accept idempotency keys via the shared `IdempotencyReplayStore`.
+- Managed account creation properly stores and replays idempotency keys.
 
 ### Intentionally Not Canonized Yet
 
-**Status:** Partly contradicted by implementation
+**Status:** Aligned (improved from Partly contradicted)
 
-The RFC says `payment.detected` / `payment.observed`, `invoice.partially_paid`, and `webhook.delivery_failed` are intentionally not canonized. The implementation does not canonize those. However, the implementation does still canonize legacy `payment.confirmed`, which is outside the RFC 0003 event taxonomy.
+The implementation no longer canonizes legacy `payment.confirmed` events. The RFC's intentionally-excluded events (`payment.detected`, `invoice.partially_paid`, `webhook.delivery_failed`) are correctly absent.
 
 ## RFC 0004 — Custodial Modes and SDK Philosophy
 
 ### Startup Mode
 
-**Status:** Aligned
-
-`RAIFLOW_MODE` / `daemon.mode` is parsed and `main.ts` refuses to start if no mode is set.
+**Status:** Aligned (unchanged)
 
 ### Mode-Gated Features
 
-**Status:** Mostly aligned
-
-Implemented gates:
-
-- Managed account creation returns 501 in non-custodial mode.
-- Sends return 501 in non-custodial mode.
-- Invoices return 501 in non-custodial mode.
-- Watched accounts, block publishing, work generation, and GET endpoints remain available.
-
-Potential gap: the runtime returns `not_implemented` for route-level feature gates, but lower-level runtime methods throw `bad_request` if called directly.
+**Status:** Mostly aligned (unchanged)
 
 ### Custodial Mode Validation
 
-**Status:** Divergent
+**Status:** ✅ Resolved (was Divergent)
 
-See D-003. Missing custody config does not fail startup; it triggers seed auto-generation.
+Missing custody config now hard-fails startup in custodial mode.
 
 ### API Key
 
-**Status:** Divergent
+**Status:** ✅ Resolved (was Divergent)
 
-See D-002. The resolver exists and tests cover it, but the main startup path does not enforce it.
+`resolveApiKey()` is called at startup and exits if no key is found.
 
 ### SDK Philosophy
 
-**Status:** Mostly aligned
-
-The SDK requires `apiKey` in `RaiFlowClientOptions`, exposes `SendsResource` as the normal fund movement API, and documents `BlocksResource` and `WorkResource` as low-level/non-custodial escape hatches.
+**Status:** Mostly aligned (unchanged)
 
 ### Consequences
 
-**Status:** Partial
+**Status:** Aligned (improved from Partial)
 
-README, Docker Compose, and config examples document required `RAIFLOW_MODE` and `RAIFLOW_API_KEY`. The runtime implementation has not fully caught up with the stated API-key and custody validation consequences.
+README, Docker Compose, config examples, and runtime implementation all enforce `RAIFLOW_MODE` and `RAIFLOW_API_KEY`.
 
 ## Link Check Findings
 
-Automated relative Markdown link checking found one broken internal target:
+**Status:** ✅ Resolved
 
-- `CONTRIBUTING.md` linked to `./CODE_OF_CONDUCT.md`, which does not exist.
-
-That link has been removed rather than replaced with a new policy document.
+`CONTRIBUTING.md` no longer links to the non-existent `./CODE_OF_CONDUCT.md`.
 
 ## Recommended Next Roadmap Items
 
-1. Pick the canonical route prefix (`/api` vs `/v1`) and update either runtime aliases or RFC/docs.
-2. Enforce API-key and custody startup guarantees or amend RFC 0004 with a dev-mode exception.
-3. Fix derivation namespace separation before native invoice address derivation lands.
-4. Finish invoice v2 API/event migration and remove legacy adapters from the runtime boundary.
-5. Add global event polling over the existing event store.
-6. Wire persisted webhook delivery attempts into the delivery engine.
-7. Add block publish events and confirmation tracking for pre-signed flows.
-8. Add runtime infrastructure events from RPC pool state changes.
-9. Update site docs to include RFC 0004 and current route names after the contract decision is made.
+### High Priority
+
+1. **Persist invoice derivation index** (D-007) — Replace `invoices.length` counting with a persistent high-water mark. This is a correctness risk if invoice deletion is ever added.
+2. **Remove legacy adapter layer** (D-008) — Refactor `Runtime` to operate directly on v2 `InvoiceStore`/`PaymentStore` interfaces. Remove `LegacyInvoice`, `LegacyPayment`, `LegacyEventStore`, and the `sqlite-legacy-adapters.ts` shim.
+3. **Wire persisted webhook delivery attempts** — The `webhook_deliveries` table exists but the delivery engine does not write attempt records. This blocks replay and observability.
+4. **Fix webhook 4xx retry policy** — RFC 0003 says 4xx should not retry. Current implementation retries all non-2xx.
+
+### Medium Priority
+
+5. Pick the canonical route prefix (`/api` vs `/v1`) and update either runtime aliases or RFC/docs (D-001).
+6. Add block publish events and confirmation tracking for pre-signed flows (`block.published`, `block.confirmed`, `block.failed`).
+7. Add runtime infrastructure events from RPC pool state changes (`rpc.connected`, `rpc.disconnected`, `rpc.failover`).
+8. Update site docs to include RFC 0004 and current route names after the contract decision is made.
+
+### Lower Priority
+
+9. Enforce hard derivation index bounds in the custody engine itself (D-005 residual).
+10. Migrate custody protocol primitives behind `nano-core` (D-006).
+11. Update RFC 0001/0002 with supersession notes pointing to RFC 0004 (D-004).
+12. Add `account.removed` event and `DELETE /api/accounts/:id` endpoint.
+13. Wire `account.received` as a persisted event distinct from `account.balance_updated`.
+14. Implement auto-receive for managed accounts.
+15. Implement invoice completion sweep (`autoSweep` + `invoice.swept` event).

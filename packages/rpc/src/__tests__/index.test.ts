@@ -12,7 +12,7 @@ describe('@openrai/rpc nano-core defaults', () => {
   });
 
   it('uses YAML RPC overrides when provided', () => {
-    const pool = createRpcPool([{ rpc: ['https://rpc.example.com'], ws: [], work: [] }]);
+    const pool = createRpcPool([{ rpc: ['https://rpc.example.com'], ws: [] }]);
     const audit = pool.getAuditReport();
 
     expect(audit.map((entry) => entry.url)).toEqual(['https://rpc.example.com/']);

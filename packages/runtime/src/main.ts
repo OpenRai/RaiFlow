@@ -180,13 +180,12 @@ const legacyEventStore = createLegacySqliteEventStore(eventStore);
 // ---------------------------------------------------------------------------
 
 let rpcPool = createRpcPool([]);
-if (config.nano.rpc.length > 0 || config.nano.ws.length > 0 || config.nano.work.length > 0) {
+if (config.nano.rpc.length > 0 || config.nano.ws.length > 0) {
   rpcPool = createRpcPool([{
     rpc: config.nano.rpc,
     ws: config.nano.ws,
-    work: config.nano.work,
   }]);
-  logger.info('rpc pool initialized', `rpc=${config.nano.rpc.length} ws=${config.nano.ws.length} work=${config.nano.work.length}`);
+  logger.info('rpc pool initialized', `rpc=${config.nano.rpc.length} ws=${config.nano.ws.length}`);
 }
 
 // ---------------------------------------------------------------------------
