@@ -10,7 +10,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
-import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, type Database } from '@openrai/storage';
+import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, createSqliteInvoiceAccountStore, createSqliteReceiveTaskStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { createRpcPool } from '@openrai/rpc';
 import { createCustodyEngine } from '@openrai/custody';
@@ -171,6 +171,8 @@ const invoiceStore = createLegacySqliteInvoiceStore(sqliteInvoiceStore);
 const paymentStore = createLegacySqlitePaymentStore(sqlitePaymentStore, sqliteInvoiceStore);
 const accountStore = createSqliteAccountStore(db);
 const sendStore = createSqliteSendStore(db);
+const invoiceAccountStore = createSqliteInvoiceAccountStore(db);
+const receiveTaskStore = createSqliteReceiveTaskStore(db);
 const webhookStore = createSqliteWebhookStore(db);
 const idempotencyStore = createSqliteIdempotencyReplayStore(db);
 const legacyEventStore = createLegacySqliteEventStore(eventStore);
@@ -221,6 +223,16 @@ if (rpcUrls.length === 0) {
         body: JSON.stringify({ action: 'version' }),
         signal: AbortSignal.timeout(10_000),
       });
+
+      // A 429 means the endpoint is reachable but rate-limited (quota exhausted).
+      // Treat this as a degraded-but-reachable state so the runtime can still
+      // start — the circuit breakers in the polling loops will handle backoff.
+      if (res.status === 429) {
+        const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+        const detail = typeof body['message'] === 'string' ? body['message'] : 'quota exhausted';
+        return { url, vendor: `rate-limited (${detail})` };
+      }
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json() as any;
       if (!body.node_vendor) throw new Error('unexpected response shape');
@@ -298,6 +310,8 @@ const runtime = new Runtime({
   webhookEndpointStore: webhookStore as any,
   accountStore,
   sendStore,
+  invoiceAccountStore,
+  receiveTaskStore,
   custodyEngine,
   rpcPool,
   expiryIntervalMs: 10_000,
