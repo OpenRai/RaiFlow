@@ -1,15 +1,15 @@
 // @openrai/custody — Seed, derivation, signing, PoW, and frontier operations
 
 import type { Account, Send } from '@openrai/model';
-import { WorkProvider } from '@openrai/nano-core';
 import {
   createBlock,
   deriveAddress,
   derivePublicKey,
   deriveSecretKey,
   signBlock as signBlockRaw,
-  computeWork,
 } from 'nanocurrency';
+// @ts-ignore
+import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
 
 export type DerivationPath = { index: number };
 
@@ -49,7 +49,8 @@ export interface CustodyEngine {
     previousFrontier: string,
     derivationIndex?: number,
   ): Promise<SignedBlock>;
-  generateWork(hash: string, difficulty?: string): Promise<string>;
+  generateWork(hash: string): Promise<string>;
+  generateReceiveWork(hash: string): Promise<string>;
 }
 
 export interface SignedBlock {
@@ -71,7 +72,6 @@ export interface FrontierStore {
 
 export function createCustodyEngine(
   config: CustodyConfig,
-  workProvider?: WorkProvider,
 ): CustodyEngine {
   let seed: string | null = null;
   let nextInvoiceIndex = config.derivationStartIndex.invoice;
@@ -164,13 +164,12 @@ export function createCustodyEngine(
       return signAndPackage(ZERO_HASH, '0', representative, previousFrontier, derivationIndex);
     },
 
-    async generateWork(hash: string, difficulty?: string): Promise<string> {
-      if (workProvider) {
-        return workProvider.generate(hash, difficulty ?? 'fffffff800000000');
-      }
-      const result = await computeWork(hash);
-      if (!result) throw new Error('Work generation failed');
-      return result;
+    async generateWork(hash: string): Promise<string> {
+      return rspowGenerate(hash, WorkType.Send);
+    },
+
+    async generateReceiveWork(hash: string): Promise<string> {
+      return rspowGenerate(hash, WorkType.Receive);
     },
   };
 }

@@ -1,7 +1,7 @@
 # RaiFlow Progress
 
 **Purpose:** Bootstrap document for new coding sessions. Contains current architecture context, active milestone, and immediate next steps.
-**Last updated:** 2026-05-18 (roadmap and RFC divergence audit)
+**Last updated:** 2026-05-22 (Phase 1–5 complete: deterministic HD invoice derivation, JIT receive orchestration, SDK surface, full test coverage)
 
 ---
 
@@ -50,7 +50,7 @@ packages/
 **M2 — RPC + Custody** — ✅ **Complete**
 
 - RPC pool with multi-node failover, JSON-RPC client, WebSocket client for confirmations
-- Custody engine with seed management, BIP32 derivation, block signing, PoW generation via nano-core
+- Custody engine with seed management, BIP32 derivation, block signing, PoW generation via `nano-rspow-node` (NAPI-RS native, `WorkType.Send` always)
 
 ---
 
@@ -81,12 +81,17 @@ Exit criterion: can create a managed account, derive addresses, send XNO, query 
 **M4/M5 — Invoice + Delivery Convergence** — *active*
 
 Current frontier:
-- Invoice creation now derives deterministic per-invoice pay addresses in a dedicated derivation namespace; caller `recipientAccount` is rejected as deprecated.
-- Runtime API responses for invoice/payment resources are now canonical v2 shapes, and invoice payment lifecycle emits canonical `invoice.payment_received` / `invoice.payment_confirmed` events.
-- Global polling endpoint (`GET /api/events`) is now wired to the persisted v2 event store.
-- Mutating operations now use scoped persisted idempotency replay for invoice create/cancel, managed account create, send queue, webhook create/delete, and block publish.
-- Startup now hard-fails when API key is missing, and custodial mode now hard-fails when custody seed/representative are missing.
+- Invoice creation derives deterministic per-invoice pay addresses via `deriveInvoiceIndex` (blake2b hash of `accountKey + '\0' + invoiceKey`); `accountKey` is required, `invoiceKey` optional.
+- `invoice_accounts` table caches `(accountKey, invoiceKey) → derivationIndex + address`; collision-safe `getOrCreate`.
+- `ReceiveOrchestrator` handles JIT receive-block publishing: Heisenberg triggers on `createInvoice`, `getInvoice`, `getAccount`, `handleConfirmedBlock`; background worker polls at 500ms; max 3 retries then `receive.failed` (opt-in event).
+- Runtime exposes `GET /api/invoices?accountKey=`, `/api/invoice-accounts/:key/balance`, `/aggregated-balance`, `/invoices`.
+- SDK `InvoiceAccountsResource` with `getBalance`, `getAggregatedBalance`, `listInvoices`; `CreateInvoiceOptions` requires `accountKey`.
+- Full test coverage: `deriveInvoiceIndex` determinism/range (6 tests), `ReceiveOrchestrator` enqueue/process/retry/confirm (12 tests), `createInvoice` accountKey semantics (3 tests), `getInvoicesByAccountKey` (2 tests).
+- All 209 tests passing across all packages.
+
+Next:
 - Wire webhook delivery attempts to persisted storage and recover retries after restart.
+- Persist and surface `account.received`, `block.published`, `block.confirmed`, `block.failed`, `rpc.*` events through the unified runtime event surface.
 - See `ROADMAP_DIVERGENCE.md` for the current RFC-vs-implementation audit.
 
 ---

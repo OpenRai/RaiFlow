@@ -12,6 +12,11 @@ export {
   type PublishBlockResult,
 } from './resources/Blocks.js';
 export {
+  InvoiceAccountsResource,
+  type InvoiceAccountBalance,
+  type InvoiceAccountAggregatedBalance,
+} from './resources/InvoiceAccounts.js';
+export {
   InvoicesResource,
   type CreateInvoiceOptions,
   type ListInvoicesOptions,

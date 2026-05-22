@@ -3,6 +3,8 @@
 import { NanoClient } from '@openrai/nano-core';
 import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock } from '@openrai/model';
+// @ts-ignore
+import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
 
 export interface RpcNodeConfig {
   rpc: string[];
@@ -13,7 +15,7 @@ export interface RpcClient {
   accountInfo(account: string): Promise<AccountInfoResponse | undefined>;
   accountsReceivable(account: string): Promise<Receivable[]>;
   process(block: string): Promise<ProcessResponse>;
-  workGenerate(hash: string, difficulty?: string, blockType?: 'send' | 'receive'): Promise<WorkGenerateResponse>;
+  workGenerate(hash: string): Promise<WorkGenerateResponse>;
   getAuditReport(): EndpointAuditRecord[];
 }
 
@@ -45,13 +47,6 @@ export interface RpcPool {
   getActiveNode(): RpcClient | undefined;
   onStateChange(listener: (state: RpcPoolState) => void): () => void;
   getAuditReport(): EndpointAuditRecord[];
-  getActiveDifficulty(): Promise<ActiveDifficulty>;
-  invalidateDifficultyCache(): void;
-}
-
-export interface ActiveDifficulty {
-  send: string;
-  receive: string;
 }
 
 export interface RpcPoolState {
@@ -106,7 +101,6 @@ class Semaphore {
 class PooledRpcClient implements RpcClient {
   constructor(
     private readonly client: NanoClient,
-    private readonly getDifficulty: () => Promise<ActiveDifficulty>,
     private readonly semaphore: Semaphore,
   ) {}
 
@@ -235,17 +229,8 @@ class PooledRpcClient implements RpcClient {
     return this.client.rpcPool.postJson<ProcessResponse>({ action: 'process', block });
   }
 
-  async workGenerate(hash: string, difficulty?: string, blockType?: 'send' | 'receive'): Promise<WorkGenerateResponse> {
-    let effectiveDifficulty: string;
-    if (difficulty) {
-      effectiveDifficulty = difficulty;
-    } else {
-      const active = await this.getDifficulty();
-      effectiveDifficulty = blockType === 'receive' ? active.receive : active.send;
-    }
-    return {
-      work: await this.client.workProvider.generate(hash, effectiveDifficulty),
-    };
+  async workGenerate(hash: string): Promise<WorkGenerateResponse> {
+    return { work: await rspowGenerate(hash, WorkType.Send) };
   }
 
   getAuditReport(): EndpointAuditRecord[] {
@@ -264,29 +249,6 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   // setup never fans out more requests than it can handle, which would trigger
   // cascading cooldown exhaustion ("All endpoints exhausted").
   let semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
-
-  const DIFFICULTY_CACHE_TTL_MS = 60_000;
-  let difficultyCache: { send: string; receive: string; fetchedAt: number } | null = null;
-
-  async function getActiveDifficulty(): Promise<ActiveDifficulty> {
-    const now = Date.now();
-    if (difficultyCache && now - difficultyCache.fetchedAt < DIFFICULTY_CACHE_TTL_MS) {
-      return { send: difficultyCache.send, receive: difficultyCache.receive };
-    }
-    const raw = await client.rpcPool.postJson<{
-      network_minimum: string;
-      network_receive_minimum: string;
-      network_current: string;
-      network_receive_current: string;
-    }>({ action: 'active_difficulty' });
-
-    difficultyCache = { send: raw.network_current, receive: raw.network_receive_current, fetchedAt: now };
-    return { send: raw.network_current, receive: raw.network_receive_current };
-  }
-
-  function invalidateDifficultyCache(): void {
-    difficultyCache = null;
-  }
 
   function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
     const rpc = configuredRpcUrls(configuredNodes);
@@ -318,7 +280,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   refreshClient();
 
   function buildClient(): RpcClient {
-    return new PooledRpcClient(client, getActiveDifficulty, semaphore);
+    return new PooledRpcClient(client, semaphore);
   }
 
   return {
@@ -357,9 +319,6 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     getAuditReport(): EndpointAuditRecord[] {
       return client.rpcPool.getAuditReport();
     },
-
-    getActiveDifficulty,
-    invalidateDifficultyCache,
   };
 }
 

@@ -108,6 +108,9 @@ importers:
       '@openrai/nano-core':
         specifier: 2.4.11
         version: 2.4.11
+      nano-rspow-node:
+        specifier: ^0.5.7
+        version: 0.5.7
       nanocurrency:
         specifier: ^2.5.0
         version: 2.5.0
@@ -133,10 +136,17 @@ importers:
         version: 5.9.3
 
   packages/model:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
     devDependencies:
       typescript:
         specifier: ^5.8.2
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@25.5.0)
 
   packages/raiflow-sdk:
     dependencies:
@@ -168,6 +178,9 @@ importers:
       '@openrai/nano-core':
         specifier: 2.4.11
         version: 2.4.11
+      nano-rspow-node:
+        specifier: ^0.5.7
+        version: 0.5.7
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -668,6 +681,10 @@ packages:
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [win32]
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -1604,6 +1621,35 @@ packages:
 
   nano-pow-with-fallback@1.2.6:
     resolution: {integrity: sha512-kYOmJqS0GkDhU71HfTOGJ41H3PtxkywYpnrCGBR9ju1AWFFFBVhkn5tJaIw0RQw/VOaAXdB2F9OcrOi0gK255Q==}
+
+  nano-rspow-node-darwin-arm64@0.5.7:
+    resolution: {integrity: sha512-3EigPGagVfodVQDjKnAzhY2Ivm564vN1kSZJ7uBH9PoGzTqVYx+TsCf3aiYKFd8WYs9bzbSVgJ8xhjy/IDkJ1Q==}
+    cpu: [arm64]
+    os: [darwin]
+
+  nano-rspow-node-darwin-x64@0.5.7:
+    resolution: {integrity: sha512-8QyQAB+Dp25Ufu0XYu4oQ9aOEldty78L1XjSGGCr3xwDtRFwwD/L3kEM4VCI7LrjWPdkuk/4eqmkPI5PTk+Y9g==}
+    cpu: [x64]
+    os: [darwin]
+
+  nano-rspow-node-linux-arm64-gnu@0.5.7:
+    resolution: {integrity: sha512-il2bPMmUu3ZByIJspyqG5JXCOXGzh8WGG4Vb/8KSOnNXG/a6UIy6FSBaqAX+RjOUjjOzfx3VxY+/NJXE5+I0Hg==}
+    cpu: [arm64]
+    os: [linux]
+
+  nano-rspow-node-linux-x64-gnu@0.5.7:
+    resolution: {integrity: sha512-Q2f34dYfFO4Fmj6199NvYDFvYfJ2iQ4Gicq8m9Vzjm71LTTAHhYGrrQQgpbs+hl9/HAaX5XVWfut1dk27/052w==}
+    cpu: [x64]
+    os: [linux]
+
+  nano-rspow-node-win32-x64-msvc@0.5.7:
+    resolution: {integrity: sha512-sBRFhvV9wBcS18ej263/b6YzAwXRv0B07Lgu8Im/Km6DpF0v/C77FY0x24X2MQLQ69TF8jbp6o+idpxIf1h3Dg==}
+    cpu: [x64]
+    os: [win32]
+
+  nano-rspow-node@0.5.7:
+    resolution: {integrity: sha512-l2XhoK5hFMOj1Pl+WaZ+Eu0aNOo85AemUDudXlVvpionGKgrklj5dmE5ZJ465PI82iNGSTwBfbvOWnwHGcR4yw==}
+    hasBin: true
 
   nanocurrency@2.5.0:
     resolution: {integrity: sha512-zMDlgBCML0vMGvldsZN1Np93vwiMjaBLCkOM2tXv0LNIpty8HghDMZiNRzfBPkP70oRhRU+hOpVCEpTzZK5gDQ==}
@@ -2596,6 +2642,8 @@ snapshots:
   '@next/swc-win32-x64-msvc@14.2.33':
     optional: true
 
+  '@noble/hashes@1.8.0': {}
+
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
       '@nodelib/fs.stat': 2.0.5
@@ -3535,6 +3583,29 @@ snapshots:
       blakejs: 1.2.1
       nanocurrency: 2.5.0
       webgpu: 0.1.16
+
+  nano-rspow-node-darwin-arm64@0.5.7:
+    optional: true
+
+  nano-rspow-node-darwin-x64@0.5.7:
+    optional: true
+
+  nano-rspow-node-linux-arm64-gnu@0.5.7:
+    optional: true
+
+  nano-rspow-node-linux-x64-gnu@0.5.7:
+    optional: true
+
+  nano-rspow-node-win32-x64-msvc@0.5.7:
+    optional: true
+
+  nano-rspow-node@0.5.7:
+    optionalDependencies:
+      nano-rspow-node-darwin-arm64: 0.5.7
+      nano-rspow-node-darwin-x64: 0.5.7
+      nano-rspow-node-linux-arm64-gnu: 0.5.7
+      nano-rspow-node-linux-x64-gnu: 0.5.7
+      nano-rspow-node-win32-x64-msvc: 0.5.7
 
   nanocurrency@2.5.0:
     dependencies:

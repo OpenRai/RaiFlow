@@ -8,33 +8,21 @@ import { SendOrchestrator } from '../send-orchestrator.js';
 
 const TEST_ACCOUNT_ADDRESS = 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg';
 
-interface MockRpcPool extends RpcPool {
-  getClient: ReturnType<typeof vi.fn>;
-  getActiveDifficulty: ReturnType<typeof vi.fn>;
-  invalidateDifficultyCache: ReturnType<typeof vi.fn>;
-}
-
-function createMockRpcPool(overrides?: Partial<{
-  getClient: ReturnType<typeof vi.fn>;
-  getActiveDifficulty: ReturnType<typeof vi.fn>;
-  invalidateDifficultyCache: ReturnType<typeof vi.fn>;
-}>): MockRpcPool {
+function createMockRpcPool(): RpcPool {
   return {
     getClient: vi.fn(),
-    getActiveDifficulty: vi.fn(),
-    invalidateDifficultyCache: vi.fn(),
     addNode: vi.fn(),
     removeNode: vi.fn(),
     getActiveNode: vi.fn(),
     onStateChange: vi.fn(),
     getAuditReport: vi.fn(),
-    ...overrides,
   };
 }
 
 function createMockCustodyEngine(overrides?: Partial<{
   signSend: ReturnType<typeof vi.fn>;
   generateWork: ReturnType<typeof vi.fn>;
+  generateReceiveWork: ReturnType<typeof vi.fn>;
 }>): CustodyEngine {
   return {
     loadSeed: vi.fn(),
@@ -47,6 +35,7 @@ function createMockCustodyEngine(overrides?: Partial<{
     signReceive: vi.fn(),
     signChange: vi.fn(),
     generateWork: vi.fn(),
+    generateReceiveWork: vi.fn(),
     ...overrides,
   };
 }
@@ -139,7 +128,7 @@ describe('SendOrchestrator', () => {
   let sendStore: ReturnType<typeof createMockSendStore>;
   let accountStore: ReturnType<typeof createMockAccountStore>;
   let custodyEngine: ReturnType<typeof createMockCustodyEngine>;
-  let rpcPool: MockRpcPool;
+  let rpcPool: RpcPool;
   let emittedEvents: RaiFlowEvent[];
   let orchestrator: SendOrchestrator;
 
@@ -155,12 +144,12 @@ describe('SendOrchestrator', () => {
       sendStore,
       accountStore,
       custodyEngine,
-      rpcPool as unknown as RpcPool,
+      rpcPool,
       async (event) => { emittedEvents.push(event); },
     );
   });
 
-  it('publishes send with correct difficulty on happy path', async () => {
+  it('publishes send on happy path', async () => {
     const send = makeSend();
     const account = makeAccount();
 
@@ -169,10 +158,6 @@ describe('SendOrchestrator', () => {
     (sendStore.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...send, status: 'published' });
     (custodyEngine.signSend as ReturnType<typeof vi.fn>).mockResolvedValue(makeSignedBlock());
     (custodyEngine.generateWork as ReturnType<typeof vi.fn>).mockResolvedValue('work000000000000000');
-    (rpcPool.getActiveDifficulty as ReturnType<typeof vi.fn>).mockResolvedValue({
-      send: 'fffffff97b994000',
-      receive: 'ffffffdabf470000',
-    });
 
     const mockClient = {
       accountInfo: vi.fn().mockResolvedValue({
@@ -187,10 +172,7 @@ describe('SendOrchestrator', () => {
 
     await orchestrator.tick();
 
-    expect(custodyEngine.generateWork).toHaveBeenCalledWith(
-      expect.any(String),
-      'fffffff97b994000',
-    );
+    expect(custodyEngine.generateWork).toHaveBeenCalledWith(expect.any(String));
     expect(mockClient.process).toHaveBeenCalledTimes(1);
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'published' }));
   });
@@ -206,10 +188,6 @@ describe('SendOrchestrator', () => {
     (custodyEngine.generateWork as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce('work000000000000000')
       .mockResolvedValueOnce('work111111111111111');
-    (rpcPool.getActiveDifficulty as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ send: 'fffffff97b994000', receive: 'ffffffdabf470000' })
-      .mockResolvedValueOnce({ send: 'fffffff800000000', receive: 'fffffe0000000000' });
-    (rpcPool.invalidateDifficultyCache as ReturnType<typeof vi.fn>).mockClear();
 
     const mockClient = {
       accountInfo: vi.fn().mockResolvedValue({
@@ -226,8 +204,6 @@ describe('SendOrchestrator', () => {
 
     await orchestrator.tick();
 
-    expect(rpcPool.invalidateDifficultyCache).toHaveBeenCalledTimes(1);
-    expect(rpcPool.getActiveDifficulty).toHaveBeenCalledTimes(2);
     expect(custodyEngine.generateWork).toHaveBeenCalledTimes(2);
     expect(mockClient.process).toHaveBeenCalledTimes(2);
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'published' }));
@@ -244,9 +220,6 @@ describe('SendOrchestrator', () => {
     (custodyEngine.generateWork as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce('work000000000000000')
       .mockResolvedValueOnce('work111111111111111');
-    (rpcPool.getActiveDifficulty as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ send: 'fffffff97b994000', receive: 'ffffffdabf470000' })
-      .mockResolvedValueOnce({ send: 'fffffff800000000', receive: 'fffffe0000000000' });
 
     const mockClient = {
       accountInfo: vi.fn().mockResolvedValue({
@@ -277,10 +250,6 @@ describe('SendOrchestrator', () => {
     (sendStore.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...send, status: 'failed' });
     (custodyEngine.signSend as ReturnType<typeof vi.fn>).mockResolvedValue(makeSignedBlock());
     (custodyEngine.generateWork as ReturnType<typeof vi.fn>).mockResolvedValue('work000000000000000');
-    (rpcPool.getActiveDifficulty as ReturnType<typeof vi.fn>).mockResolvedValue({
-      send: 'fffffff97b994000',
-      receive: 'ffffffdabf470000',
-    });
 
     const mockClient = {
       accountInfo: vi.fn().mockResolvedValue({
@@ -295,13 +264,12 @@ describe('SendOrchestrator', () => {
 
     await orchestrator.tick();
 
-    expect(rpcPool.invalidateDifficultyCache).not.toHaveBeenCalled();
     expect(mockClient.process).toHaveBeenCalledTimes(1);
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'failed' }));
     expect(emittedEvents).toContainEqual(expect.objectContaining({ type: 'send.failed' }));
   });
 
-  it('fails immediately when work rejection retry also fails (signature false positive)', async () => {
+  it('fails immediately when work rejection retry also fails', async () => {
     const send = makeSend();
     const account = makeAccount();
 
@@ -312,9 +280,6 @@ describe('SendOrchestrator', () => {
     (custodyEngine.generateWork as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce('work000000000000000')
       .mockResolvedValueOnce('work111111111111111');
-    (rpcPool.getActiveDifficulty as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ send: 'fffffff97b994000', receive: 'ffffffdabf470000' })
-      .mockResolvedValueOnce({ send: 'fffffff800000000', receive: 'fffffe0000000000' });
 
     const mockClient = {
       accountInfo: vi.fn().mockResolvedValue({
@@ -331,7 +296,6 @@ describe('SendOrchestrator', () => {
 
     await orchestrator.tick();
 
-    expect(rpcPool.invalidateDifficultyCache).toHaveBeenCalledTimes(1);
     expect(mockClient.process).toHaveBeenCalledTimes(2);
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'failed' }));
     expect(emittedEvents).toContainEqual(expect.objectContaining({
@@ -356,7 +320,6 @@ describe('SendOrchestrator', () => {
 
     await orchestrator.tick();
 
-    // Should NOT have called process — transient RPC error should abort before signing
     expect(mockClient.process).not.toHaveBeenCalled();
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'failed' }));
     expect(emittedEvents).toContainEqual(expect.objectContaining({

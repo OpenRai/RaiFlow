@@ -1,5 +1,6 @@
 import { AccountsResource } from './resources/Accounts.js';
 import { BlocksResource } from './resources/Blocks.js';
+import { InvoiceAccountsResource } from './resources/InvoiceAccounts.js';
 import { InvoicesResource } from './resources/Invoices.js';
 import { SendsResource } from './resources/Sends.js';
 import { SystemResource } from './resources/System.js';
@@ -19,6 +20,7 @@ export interface RaiFlowClientOptions {
 export class RaiFlowClient {
   public accounts: AccountsResource;
   public blocks: BlocksResource;
+  public invoiceAccounts: InvoiceAccountsResource;
   public invoices: InvoicesResource;
   public sends: SendsResource;
   public system: SystemResource;
@@ -36,6 +38,7 @@ export class RaiFlowClient {
     this.basePath = options.basePath ?? '/api';
     this.accounts = new AccountsResource(this);
     this.blocks = new BlocksResource(this);
+    this.invoiceAccounts = new InvoiceAccountsResource(this);
     this.invoices = new InvoicesResource(this);
     this.sends = new SendsResource(this);
     this.system = new SystemResource(this);

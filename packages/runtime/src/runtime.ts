@@ -26,12 +26,21 @@ import type {
   Payment,
   EventQueryOptions,
   PaginatedEventsResponse,
+  InvoiceAccountStore,
+  InvoiceAccount,
+  ReceiveTaskStore,
+  ReceiveTask,
+  ReceiveTaskStatus,
 } from '@openrai/model';
-import { RaiFlowError } from '@openrai/model';
+import { RaiFlowError, deriveInvoiceIndex } from '@openrai/model';
 import { NanoAddress } from '@openrai/nano-core';
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
 import type { RunMode } from '@openrai/config';
+import {
+  createSqliteInvoiceAccountStore,
+  createSqliteReceiveTaskStore,
+} from '@openrai/storage';
 import {
   createWebhookDelivery,
   createWebhookEndpointStore,
@@ -44,6 +53,7 @@ import {
   createIdempotencyReplayStore,
 } from './stores.js';
 import { SendOrchestrator } from './send-orchestrator.js';
+import { ReceiveOrchestrator } from './receive-orchestrator.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,6 +129,8 @@ export interface RuntimeConfig {
   expiryIntervalMs?: number;
   accountStore?: AccountStore;
   sendStore?: SendStore;
+  invoiceAccountStore?: InvoiceAccountStore;
+  receiveTaskStore?: ReceiveTaskStore;
   custodyEngine?: CustodyEngine;
   rpcPool?: RpcPool;
   watcher?: WatcherLike;
@@ -142,9 +154,94 @@ const IDEMPOTENCY_SCOPE = {
   blockPublish: 'block.publish',
 } as const;
 
+function createInMemoryInvoiceAccountStore(): InvoiceAccountStore {
+  void createSqliteInvoiceAccountStore;
+  const byKey = new Map<string, InvoiceAccount>();
+  const byIndex = new Map<number, InvoiceAccount>();
+
+  function storeKey(accountKey: string, invoiceKey: string | null): string {
+    return `${accountKey}\0${invoiceKey ?? ''}`;
+  }
+
+  return {
+    async getOrCreate(accountKey, invoiceKey, derivationIndex, deriveAddress) {
+      const key = storeKey(accountKey, invoiceKey);
+      const existing = byKey.get(key);
+      if (existing) return existing;
+
+      const collision = byIndex.get(derivationIndex);
+      if (collision && (collision.accountKey !== accountKey || collision.invoiceKey !== invoiceKey)) {
+        throw new Error(
+          `Derivation index collision: index ${derivationIndex} is already assigned to (${collision.accountKey}, ${collision.invoiceKey ?? 'null'})`,
+        );
+      }
+
+      const created: InvoiceAccount = {
+        accountKey,
+        invoiceKey,
+        derivationIndex,
+        address: deriveAddress(derivationIndex),
+        createdAt: new Date().toISOString(),
+      };
+      byKey.set(key, created);
+      byIndex.set(derivationIndex, created);
+      return created;
+    },
+    async get(accountKey, invoiceKey) {
+      return byKey.get(storeKey(accountKey, invoiceKey));
+    },
+    async listByAccountKey(accountKey) {
+      return [...byKey.values()].filter((account) => account.accountKey === accountKey);
+    },
+  };
+}
+
+function createInMemoryReceiveTaskStore(): ReceiveTaskStore {
+  void createSqliteReceiveTaskStore;
+  const tasks = new Map<string, ReceiveTask>();
+  const byPendingHash = new Map<string, string>();
+
+  return {
+    async create(task) {
+      if (byPendingHash.has(task.pendingBlockHash)) {
+        throw new Error(`ReceiveTask for hash already exists: ${task.pendingBlockHash}`);
+      }
+      const created: ReceiveTask = {
+        ...task,
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+      };
+      tasks.set(created.id, created);
+      byPendingHash.set(created.pendingBlockHash, created.id);
+      return created;
+    },
+    async get(id) {
+      return tasks.get(id);
+    },
+    async getByPendingBlockHash(hash) {
+      const id = byPendingHash.get(hash);
+      return id ? tasks.get(id) : undefined;
+    },
+    async listByStatus(status: ReceiveTaskStatus) {
+      return [...tasks.values()]
+        .filter((task) => task.status === status)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    },
+    async update(id, patch) {
+      const existing = tasks.get(id);
+      if (!existing) throw new Error(`ReceiveTask ${id} not found`);
+      const updated = { ...existing, ...patch };
+      tasks.set(id, updated);
+      return updated;
+    },
+  };
+}
+
 function legacyToV2Invoice(invoice: LegacyInvoice, idempotencyKey?: string): Invoice {
   return {
     id: invoice.id,
+    accountKey: invoice.accountKey ?? '',
+    invoiceKey: invoice.invoiceKey ?? null,
     status: invoice.status,
     payAddress: invoice.recipientAccount,
     expectedAmountRaw: invoice.expectedAmountRaw,
@@ -160,6 +257,7 @@ function legacyToV2Invoice(invoice: LegacyInvoice, idempotencyKey?: string): Inv
     createdAt: invoice.createdAt,
     updatedAt: invoice.createdAt,
     completionPolicy: invoice.completionPolicy ?? { type: 'at_least' },
+    derivationIndex: invoice.derivationIndex ?? null,
   };
 }
 
@@ -171,6 +269,8 @@ function v2ToLegacyInvoice(invoice: Invoice): LegacyInvoice {
     expectedAmountRaw: invoice.expectedAmountRaw,
     confirmedAmountRaw: invoice.receivedAmountRaw,
     recipientAccount: invoice.payAddress,
+    accountKey: invoice.accountKey ?? undefined,
+    invoiceKey: invoice.invoiceKey ?? undefined,
     createdAt: invoice.createdAt,
     expiresAt: invoice.expiresAt ?? undefined,
     completedAt: invoice.completedAt ?? undefined,
@@ -215,6 +315,10 @@ export class Runtime implements WatcherSink {
   private readonly webhookDelivery: WebhookDelivery;
   private readonly expiryIntervalMs: number;
   private expiryTimer: ReturnType<typeof setInterval> | undefined;
+  private invoiceAccountStore?: InvoiceAccountStore;
+  private receiveTaskStore?: ReceiveTaskStore;
+  private receiveOrchestrator?: ReceiveOrchestrator;
+  private receiveWorkerInterval?: ReturnType<typeof setInterval>;
   private readonly listeners = new Map<string, Set<EventListener>>();
   private readonly sendOrchestrator?: SendOrchestrator;
   watcher?: WatcherLike;
@@ -232,6 +336,8 @@ export class Runtime implements WatcherSink {
     this.expiryIntervalMs = config.expiryIntervalMs ?? 10_000;
     this.accountStore = config.accountStore;
     this.sendStore = config.sendStore;
+    this.invoiceAccountStore = config.invoiceAccountStore ?? createInMemoryInvoiceAccountStore();
+    this.receiveTaskStore = config.receiveTaskStore ?? createInMemoryReceiveTaskStore();
     this.custodyEngine = config.custodyEngine;
     this.rpcPool = config.rpcPool;
     this.watcher = config.watcher;
@@ -251,6 +357,15 @@ export class Runtime implements WatcherSink {
         (event) => this.emitV2Event(event),
       );
     }
+
+    if (this.custodyEngine && this.receiveTaskStore && this.rpcPool) {
+      this.receiveOrchestrator = new ReceiveOrchestrator(
+        this.receiveTaskStore,
+        this.custodyEngine,
+        this.rpcPool,
+        (event: unknown) => this.emitV2Event(event as RaiFlowEvent),
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -268,6 +383,18 @@ export class Runtime implements WatcherSink {
       (this.expiryTimer as NodeJS.Timeout).unref();
     }
     this.sendOrchestrator?.start();
+    if (this.receiveOrchestrator && this.receiveWorkerInterval === undefined) {
+      this.receiveWorkerInterval = setInterval(() => {
+        void this.receiveOrchestrator!.processNext();
+      }, 500);
+      if (
+        typeof this.receiveWorkerInterval === 'object' &&
+        this.receiveWorkerInterval !== null &&
+        'unref' in this.receiveWorkerInterval
+      ) {
+        (this.receiveWorkerInterval as NodeJS.Timeout).unref();
+      }
+    }
   }
 
   /** Stop the expiry scheduler, send orchestrator, and shut down webhook delivery. */
@@ -277,6 +404,10 @@ export class Runtime implements WatcherSink {
       this.expiryTimer = undefined;
     }
     this.sendOrchestrator?.stop();
+    if (this.receiveWorkerInterval !== undefined) {
+      clearInterval(this.receiveWorkerInterval);
+      this.receiveWorkerInterval = undefined;
+    }
     this.webhookDelivery.shutdown();
   }
 
@@ -290,6 +421,8 @@ export class Runtime implements WatcherSink {
       expectedAmountRaw?: string;
       /** Amount in XNO (human-readable). Converted to raw via `xnoToRaw`. */
       expectedAmount?: string;
+      accountKey: string;
+      invoiceKey?: string;
       expiresAt?: string;
       metadata?: Record<string, unknown>;
       completionPolicy?: CompletionPolicy;
@@ -303,6 +436,13 @@ export class Runtime implements WatcherSink {
     }
     if (!this.custodyEngine) {
       throw RaiFlowError.badRequest('Custody engine not configured');
+    }
+    if (!params.accountKey) {
+      throw RaiFlowError.badRequest(
+        'accountKey is required. Use a stable identifier for the payer or payment context ' +
+        '(e.g. a customer ID, username, or purpose string). This ensures the derived address ' +
+        'is recoverable if your database is lost.',
+      );
     }
 
     const resolvedAmountRaw =
@@ -321,8 +461,27 @@ export class Runtime implements WatcherSink {
       }
     }
 
-    const nextInvoiceIndex = await this.getNextInvoiceDerivationIndex();
-    const payAddress = this.custodyEngine.deriveInvoiceAddress({ index: nextInvoiceIndex });
+    const invoiceKey = params.invoiceKey ?? null;
+    const derivationIndex = deriveInvoiceIndex(
+      params.accountKey,
+      invoiceKey,
+      this.invoiceDerivationStartIndex,
+    );
+
+    const invoiceAccountStore = this.invoiceAccountStore;
+    if (!invoiceAccountStore) {
+      throw RaiFlowError.badRequest('Invoice account store not configured');
+    }
+
+    const invoiceAccount = await invoiceAccountStore.getOrCreate(
+      params.accountKey,
+      invoiceKey,
+      derivationIndex,
+      (idx) => this.custodyEngine!.deriveInvoiceAddress({ index: idx }),
+    );
+
+    const payAddress = invoiceAccount.address;
+
     const invoice: LegacyInvoice = {
       id: randomUUID(),
       status: 'open',
@@ -330,6 +489,9 @@ export class Runtime implements WatcherSink {
       expectedAmountRaw: resolvedAmountRaw,
       confirmedAmountRaw: '0',
       recipientAccount: payAddress,
+      derivationIndex,
+      accountKey: params.accountKey,
+      invoiceKey: invoiceKey ?? undefined,
       createdAt: new Date().toISOString(),
       expiresAt: params.expiresAt,
       metadata: params.metadata,
@@ -359,17 +521,88 @@ export class Runtime implements WatcherSink {
       resourceType: 'invoice',
     });
 
+    this.receiveOrchestrator?.enqueueReceivables(payAddress, derivationIndex);
+
     return legacyToV2Invoice(stored, idempotencyKey);
   }
 
   async getInvoice(id: string): Promise<Invoice | undefined> {
     const invoice = await this.invoiceStore.get(id);
-    return invoice ? legacyToV2Invoice(invoice) : undefined;
+    if (!invoice) return undefined;
+    if (invoice.derivationIndex != null) {
+      this.receiveOrchestrator?.enqueueReceivables(
+        (invoice as LegacyInvoice & { payAddress?: string }).payAddress ?? invoice.recipientAccount,
+        invoice.derivationIndex,
+      );
+    }
+    return legacyToV2Invoice(invoice);
   }
 
   async listInvoices(filter?: { status?: InvoiceStatus }): Promise<Invoice[]> {
     const invoices = await this.invoiceStore.list(filter);
     return invoices.map((invoice) => legacyToV2Invoice(invoice));
+  }
+
+  async getInvoicesByAccountKey(accountKey: string): Promise<Invoice[]> {
+    const invoices = await this.invoiceStore.list();
+    return invoices
+      .filter((inv) => (inv as LegacyInvoice & { accountKey?: string }).accountKey === accountKey)
+      .map((inv) => legacyToV2Invoice(inv));
+  }
+
+  async getInvoiceAccountBalance(
+    accountKey: string,
+    invoiceKey: string | null,
+  ): Promise<{ balanceRaw: string; pendingRaw: string; address: string } | undefined> {
+    const account = await this.invoiceAccountStore?.get(accountKey, invoiceKey);
+    if (!account) return undefined;
+
+    this.receiveOrchestrator?.enqueueReceivables(account.address, account.derivationIndex);
+
+    const client = this.rpcPool?.getClient();
+    if (!client) {
+      return {
+        balanceRaw: '0',
+        pendingRaw: '0',
+        address: account.address,
+      };
+    }
+
+    const info = await client.accountInfo(account.address).catch(() => undefined);
+    const receivable = await client.accountsReceivable(account.address).catch(() => []);
+    const pendingRaw = receivable
+      .reduce((sum, block) => sum + BigInt(block.amount), 0n)
+      .toString();
+
+    return {
+      balanceRaw: info?.balance ?? '0',
+      pendingRaw,
+      address: account.address,
+    };
+  }
+
+  async getInvoiceAccountAggregatedBalance(accountKey: string): Promise<{
+    confirmedAmountRaw: string;
+    pendingAmountRaw: string;
+    invoiceCount: number;
+    addresses: string[];
+  }> {
+    const invoices = await this.getInvoicesByAccountKey(accountKey);
+    const accounts = await this.invoiceAccountStore?.listByAccountKey(accountKey) ?? [];
+    let confirmed = 0n;
+    let pending = 0n;
+    for (const inv of invoices) {
+      confirmed += BigInt(inv.receivedAmountRaw ?? '0');
+      if (inv.status === 'open') {
+        pending += BigInt(inv.expectedAmountRaw ?? '0');
+      }
+    }
+    return {
+      confirmedAmountRaw: confirmed.toString(),
+      pendingAmountRaw: pending.toString(),
+      invoiceCount: invoices.length,
+      addresses: [...new Set(accounts.map((a) => a.address))],
+    };
   }
 
   async cancelInvoice(id: string, idempotencyKey?: string): Promise<Invoice> {
@@ -534,7 +767,11 @@ export class Runtime implements WatcherSink {
 
   async getAccount(id: string): Promise<Account | undefined> {
     if (!this.accountStore) return undefined;
-    return this.accountStore.get(id);
+    const account = await this.accountStore.get(id);
+    if (account?.derivationIndex != null) {
+      this.receiveOrchestrator?.enqueueReceivables(account.address, account.derivationIndex);
+    }
+    return account;
   }
 
   async updateAccount(id: string, patch: { label?: string; representative?: string }): Promise<Account> {
@@ -806,86 +1043,94 @@ export class Runtime implements WatcherSink {
 
     // Idempotency guard: if we already processed this block for invoice matching, skip.
     const existingPayment = await this.paymentStore.getByBlockHash(block.blockHash);
-    if (existingPayment !== undefined) {
-      return;
+    if (existingPayment === undefined) {
+      // Find open invoices for the recipient account, sorted oldest-first (FIFO).
+      const openInvoices = await this.invoiceStore.getByRecipientAccount(
+        block.recipientAccount,
+        'open',
+      );
+
+      if (openInvoices.length > 0) {
+        // Sort by createdAt ascending — oldest first.
+        openInvoices.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+        const invoice = openInvoices[0]!;
+
+        // Create the payment record.
+        const payment = await this.paymentStore.create({
+          id: randomUUID(),
+          invoiceId: invoice.id,
+          status: 'confirmed',
+          currency: 'XNO',
+          amountRaw: block.amountRaw,
+          recipientAccount: block.recipientAccount,
+          senderAccount: block.senderAccount,
+          sendBlockHash: block.blockHash,
+          confirmedAt: block.confirmedAt,
+        });
+
+        // Update confirmed amount on the invoice.
+        const newConfirmedRaw = (
+          BigInt(invoice.confirmedAmountRaw) + BigInt(block.amountRaw)
+        ).toString();
+
+        const updatedInvoice = await this.invoiceStore.update(invoice.id, {
+          confirmedAmountRaw: newConfirmedRaw,
+        });
+
+        // Emit payment.confirmed
+        const v2Invoice = legacyToV2Invoice(updatedInvoice);
+        const v2Payment = legacyToV2Payment(payment);
+
+        await this.emitV2Event({
+          id: randomUUID(),
+          type: 'invoice.payment_received',
+          timestamp: new Date().toISOString(),
+          data: { payment: v2Payment, invoice: v2Invoice },
+          resourceId: invoice.id,
+          resourceType: 'invoice',
+        });
+
+        await this.emitV2Event({
+          id: randomUUID(),
+          type: 'invoice.payment_confirmed',
+          timestamp: new Date().toISOString(),
+          data: { payment: v2Payment, invoice: v2Invoice },
+          resourceId: invoice.id,
+          resourceType: 'invoice',
+        });
+
+        // Check if invoice is now fully paid.
+        const isComplete =
+          invoice.completionPolicy?.type === 'exact'
+            ? BigInt(newConfirmedRaw) === BigInt(invoice.expectedAmountRaw)
+            : BigInt(newConfirmedRaw) >= BigInt(invoice.expectedAmountRaw);
+        if (isComplete) {
+          const completedInvoice = await this.invoiceStore.update(invoice.id, {
+            status: 'completed',
+            completedAt: new Date().toISOString(),
+          });
+
+          await this.emitV2Event({
+            id: randomUUID(),
+            type: 'invoice.completed',
+            timestamp: new Date().toISOString(),
+            data: { invoice: legacyToV2Invoice(completedInvoice) },
+            resourceId: completedInvoice.id,
+            resourceType: 'invoice',
+          });
+        }
+      }
     }
 
-    // Find open invoices for the recipient account, sorted oldest-first (FIFO).
-    const openInvoices = await this.invoiceStore.getByRecipientAccount(
-      block.recipientAccount,
-      'open',
-    );
+    await this.receiveOrchestrator?.handleConfirmedReceive(block.blockHash);
 
-    if (openInvoices.length === 0) return;
-
-    // Sort by createdAt ascending — oldest first.
-    openInvoices.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-    const invoice = openInvoices[0]!;
-
-    // Create the payment record.
-    const payment = await this.paymentStore.create({
-      id: randomUUID(),
-      invoiceId: invoice.id,
-      status: 'confirmed',
-      currency: 'XNO',
-      amountRaw: block.amountRaw,
-      recipientAccount: block.recipientAccount,
-      senderAccount: block.senderAccount,
-      sendBlockHash: block.blockHash,
-      confirmedAt: block.confirmedAt,
-    });
-
-    // Update confirmed amount on the invoice.
-    const newConfirmedRaw = (
-      BigInt(invoice.confirmedAmountRaw) + BigInt(block.amountRaw)
-    ).toString();
-
-    const updatedInvoice = await this.invoiceStore.update(invoice.id, {
-      confirmedAmountRaw: newConfirmedRaw,
-    });
-
-    // Emit payment.confirmed
-    const v2Invoice = legacyToV2Invoice(updatedInvoice);
-    const v2Payment = legacyToV2Payment(payment);
-
-    await this.emitV2Event({
-      id: randomUUID(),
-      type: 'invoice.payment_received',
-      timestamp: new Date().toISOString(),
-      data: { payment: v2Payment, invoice: v2Invoice },
-      resourceId: invoice.id,
-      resourceType: 'invoice',
-    });
-
-    await this.emitV2Event({
-      id: randomUUID(),
-      type: 'invoice.payment_confirmed',
-      timestamp: new Date().toISOString(),
-      data: { payment: v2Payment, invoice: v2Invoice },
-      resourceId: invoice.id,
-      resourceType: 'invoice',
-    });
-
-    // Check if invoice is now fully paid.
-    const isComplete =
-      invoice.completionPolicy?.type === 'exact'
-        ? BigInt(newConfirmedRaw) === BigInt(invoice.expectedAmountRaw)
-        : BigInt(newConfirmedRaw) >= BigInt(invoice.expectedAmountRaw);
-    if (isComplete) {
-      const completedInvoice = await this.invoiceStore.update(invoice.id, {
-        status: 'completed',
-        completedAt: new Date().toISOString(),
-      });
-
-      await this.emitV2Event({
-        id: randomUUID(),
-        type: 'invoice.completed',
-        timestamp: new Date().toISOString(),
-        data: { invoice: legacyToV2Invoice(completedInvoice) },
-        resourceId: completedInvoice.id,
-        resourceType: 'invoice',
-      });
+    const confirmedAccount = await this.accountStore?.getByAddress(block.recipientAccount);
+    const confirmedDerivationIndex = confirmedAccount?.derivationIndex
+      ?? (await this.invoiceStore.getByRecipientAccount(block.recipientAccount, 'open'))[0]?.derivationIndex
+      ?? null;
+    if (confirmedDerivationIndex != null) {
+      this.receiveOrchestrator?.enqueueReceivables(block.recipientAccount, confirmedDerivationIndex);
     }
   }
 
@@ -974,10 +1219,5 @@ export class Runtime implements WatcherSink {
       this.managedDerivationStartIndex - 1,
     );
     return maxIndex + 1;
-  }
-
-  private async getNextInvoiceDerivationIndex(): Promise<number> {
-    const invoices = await this.invoiceStore.list();
-    return this.invoiceDerivationStartIndex + invoices.length;
   }
 }

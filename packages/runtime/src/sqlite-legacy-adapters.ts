@@ -54,6 +54,8 @@ function mapV2MetadataToLegacy(
 function toV2Invoice(invoice: LegacyInvoice, idempotencyKey?: string): Invoice {
   return {
     id: invoice.id,
+    accountKey: invoice.accountKey ?? '',
+    invoiceKey: invoice.invoiceKey ?? null,
     status: invoice.status,
     payAddress: invoice.recipientAccount,
     expectedAmountRaw: invoice.expectedAmountRaw,
@@ -67,6 +69,7 @@ function toV2Invoice(invoice: LegacyInvoice, idempotencyKey?: string): Invoice {
     createdAt: invoice.createdAt,
     updatedAt: invoice.createdAt,
     completionPolicy: invoice.completionPolicy ?? { type: 'at_least' },
+    derivationIndex: invoice.derivationIndex ?? null,
   };
 }
 
@@ -80,6 +83,8 @@ function toLegacyInvoice(invoice: Invoice): LegacyInvoice {
     expectedAmountRaw: invoice.expectedAmountRaw,
     confirmedAmountRaw: invoice.receivedAmountRaw,
     recipientAccount: invoice.payAddress,
+    accountKey: invoice.accountKey ?? undefined,
+    invoiceKey: invoice.invoiceKey ?? undefined,
     createdAt: invoice.createdAt,
     expiresAt: invoice.expiresAt ?? undefined,
     completedAt: invoice.completedAt ?? undefined,
@@ -87,6 +92,7 @@ function toLegacyInvoice(invoice: Invoice): LegacyInvoice {
     expiredAt: legacyMeta.expiredAt,
     metadata: legacyMeta.metadata,
     completionPolicy: invoice.completionPolicy,
+    derivationIndex: invoice.derivationIndex ?? undefined,
   };
 }
 

@@ -21,8 +21,6 @@ function createMockRpcPool() {
     getClient: vi.fn().mockReturnValue({
       accountInfo: vi.fn(),
     }),
-    getActiveDifficulty: vi.fn(),
-    invalidateDifficultyCache: vi.fn(),
     addNode: vi.fn(),
     removeNode: vi.fn(),
     getActiveNode: vi.fn(),

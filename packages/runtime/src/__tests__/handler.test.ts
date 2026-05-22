@@ -220,7 +220,7 @@ describe('POST /api/invoices', () => {
     const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { expectedAmountRaw: ONE_XNO },
+      body: { accountKey: 'acct-1', expectedAmountRaw: ONE_XNO },
     }));
 
     expect(res.status).toBe(201);
@@ -247,7 +247,7 @@ describe('POST /api/invoices', () => {
     const handler = createHandler(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
+      body: { accountKey: 'acct-1', recipientAccount: TEST_ACCOUNT, expectedAmountRaw: ONE_XNO },
     }));
 
     expect(res.status).toBe(400);
@@ -262,11 +262,11 @@ describe('POST /api/invoices', () => {
     const idemKey = 'test-idem-key';
 
     const res1 = await handler(req('POST', '/api/invoices', {
-      body: { expectedAmountRaw: ONE_XNO },
+      body: { accountKey: 'acct-1', expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
     const res2 = await handler(req('POST', '/api/invoices', {
-      body: { expectedAmountRaw: ONE_XNO },
+      body: { accountKey: 'acct-1', expectedAmountRaw: ONE_XNO },
       headers: { 'Idempotency-Key': idemKey },
     }));
 
@@ -282,6 +282,7 @@ describe('POST /api/invoices', () => {
 
     const res = await handler(req('POST', '/api/invoices', {
       body: {
+        accountKey: 'acct-1',
         expectedAmountRaw: ONE_XNO,
         completionPolicy: { type: 'exact' },
       },
@@ -297,7 +298,7 @@ describe('POST /api/invoices', () => {
     const handler = createHandlerWithRuntime(runtime, createTestConfig());
 
     const res = await handler(req('POST', '/api/invoices', {
-      body: { expectedAmountRaw: ONE_XNO },
+      body: { accountKey: 'acct-1', expectedAmountRaw: ONE_XNO },
     }));
 
     expect(res.status).toBe(201);
@@ -333,6 +334,92 @@ describe('GET /api/invoices', () => {
 
     const body = await parseJson(res) as { data: unknown[] };
     expect(body.data).toHaveLength(1);
+  });
+
+  it('filters by accountKey query param', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: ONE_XNO });
+    await runtime.createInvoice({ accountKey: 'acct-b', expectedAmountRaw: ONE_XNO });
+
+    const res = await handler(req('GET', '/api/invoices?accountKey=acct-a'));
+    const body = await parseJson(res) as { data: Array<{ accountKey: string }> };
+
+    expect(res.status).toBe(200);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]!.accountKey).toBe('acct-a');
+  });
+});
+
+describe('GET /api/invoice-accounts/*', () => {
+  it('returns account-scoped invoices', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: ONE_XNO });
+    await runtime.createInvoice({ accountKey: 'acct-b', expectedAmountRaw: ONE_XNO });
+
+    const res = await handler(req('GET', '/api/invoice-accounts/acct-a/invoices'));
+    const body = await parseJson(res) as { data: Array<{ accountKey: string }> };
+
+    expect(res.status).toBe(200);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]!.accountKey).toBe('acct-a');
+  });
+
+  it('returns invoice account balance', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: ONE_XNO });
+
+    const res = await handler(req('GET', '/api/invoice-accounts/acct-a/balance'));
+    const body = await parseJson(res) as { address: string; balanceRaw: string; pendingRaw: string };
+
+    expect(res.status).toBe(200);
+    expect(body.address).toBe(invoice.payAddress);
+    expect(typeof body.balanceRaw).toBe('string');
+    expect(typeof body.pendingRaw).toBe('string');
+  });
+});
+
+describe('GET /api/events types filtering', () => {
+  it('excludes opt-in receive.* events unless explicitly requested', async () => {
+    const events = [
+      {
+        id: 'evt-1',
+        type: 'invoice.created',
+        timestamp: new Date().toISOString(),
+        data: {},
+        resourceId: 'inv-1',
+        resourceType: 'invoice' as const,
+      },
+      {
+        id: 'evt-2',
+        type: 'receive.failed',
+        timestamp: new Date().toISOString(),
+        data: {},
+        resourceId: 'rt-1',
+        resourceType: 'block' as const,
+      },
+    ];
+
+    const runtime = new Runtime({
+      v2EventStore: {
+        append: vi.fn(),
+        list: vi.fn().mockResolvedValue(events),
+      },
+    });
+    const handler = createHandler(runtime, createTestConfig());
+
+    const defaultRes = await handler(req('GET', '/api/events'));
+    const defaultBody = await parseJson(defaultRes) as { data: Array<{ type: string }> };
+    expect(defaultBody.data.map((e) => e.type)).toEqual(['invoice.created']);
+
+    const optInRes = await handler(req('GET', '/api/events?types=receive.failed'));
+    const optInBody = await parseJson(optInRes) as { data: Array<{ type: string }> };
+    expect(optInBody.data.map((e) => e.type)).toEqual(['receive.failed']);
   });
 });
 

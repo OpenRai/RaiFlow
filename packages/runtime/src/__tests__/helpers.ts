@@ -99,6 +99,7 @@ export function req(
 
 export async function createTestInvoice(runtime: Runtime) {
   return runtime.createInvoice({
+    accountKey: 'test-account-key',
     expectedAmountRaw: ONE_XNO,
   });
 }

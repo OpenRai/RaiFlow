@@ -2,6 +2,8 @@
 
 import type {
   Invoice,
+  InvoiceAccount,
+  InvoiceAccountStore,
   InvoiceStore,
   InvoiceStatus,
   Payment,
@@ -13,6 +15,9 @@ import type {
   Send,
   SendStore,
   SendStatus,
+  ReceiveTask,
+  ReceiveTaskStatus,
+  ReceiveTaskStore,
   EventStore,
   RaiFlowEvent,
   WebhookEndpoint,
@@ -21,6 +26,7 @@ import type {
   IdempotencyReplayStore,
   IdempotencyRecord,
 } from '@openrai/model';
+import { randomUUID } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
 
 export type Database = BetterSqlite3.Database;
@@ -235,6 +241,65 @@ export function createMigrationRunner(db: Database): MigrationRunner {
         `);
       },
     },
+    {
+      id: 3,
+      name: '003_invoice_derivation_index',
+      up: (db) => {
+        db.exec(`
+          ALTER TABLE invoices ADD COLUMN derivation_index INTEGER;
+        `);
+      },
+    },
+    {
+      id: 4,
+      name: '004_invoice_accounts',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE invoice_accounts (
+            account_key TEXT NOT NULL,
+            invoice_key TEXT,
+            derivation_index INTEGER NOT NULL UNIQUE,
+            address TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (account_key, invoice_key)
+          );
+        `);
+      },
+    },
+    {
+      id: 5,
+      name: '005_receive_tasks',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE receive_tasks (
+            id TEXT PRIMARY KEY,
+            account_address TEXT NOT NULL,
+            derivation_index INTEGER NOT NULL,
+            pending_block_hash TEXT NOT NULL UNIQUE,
+            amount_raw TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            published_at TEXT,
+            confirmed_at TEXT,
+            failed_at TEXT,
+            fail_reason TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0
+          );
+        `);
+      },
+    },
+    {
+      id: 6,
+      name: '006_invoices_account_invoice_keys',
+      up: (db) => {
+        db.exec(`
+          ALTER TABLE invoices ADD COLUMN account_key TEXT NOT NULL DEFAULT '';
+        `);
+        db.exec(`
+          ALTER TABLE invoices ADD COLUMN invoice_key TEXT;
+        `);
+      },
+    },
   ];
 
   return {
@@ -262,6 +327,8 @@ export function createMigrationRunner(db: Database): MigrationRunner {
 function rowToInvoice(row: Record<string, unknown>): Invoice {
   return {
     id: row.id as string,
+    accountKey: (row.account_key as string) ?? '',
+    invoiceKey: (row.invoice_key as string | null) ?? null,
     status: row.status as InvoiceStatus,
     payAddress: row.pay_address as string,
     expectedAmountRaw: row.expected_amount_raw as string,
@@ -275,12 +342,15 @@ function rowToInvoice(row: Record<string, unknown>): Invoice {
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     completionPolicy: JSON.parse(row.completion_policy as string),
+    derivationIndex: row.derivation_index != null ? (row.derivation_index as number) : null,
   };
 }
 
 function invoiceToRow(invoice: Invoice): Record<string, unknown> {
   return {
     id: invoice.id,
+    account_key: invoice.accountKey,
+    invoice_key: invoice.invoiceKey ?? null,
     status: invoice.status,
     pay_address: invoice.payAddress,
     expected_amount_raw: invoice.expectedAmountRaw,
@@ -294,19 +364,20 @@ function invoiceToRow(invoice: Invoice): Record<string, unknown> {
     created_at: invoice.createdAt,
     updated_at: invoice.updatedAt,
     completion_policy: JSON.stringify(invoice.completionPolicy),
+    derivation_index: invoice.derivationIndex ?? null,
   };
 }
 
 export function createSqliteInvoiceStore(db: Database): InvoiceStore {
   const insert = db.prepare(`
     INSERT INTO invoices (
-      id, status, pay_address, expected_amount_raw, received_amount_raw,
+      id, account_key, invoice_key, status, pay_address, expected_amount_raw, received_amount_raw,
       memo, metadata, idempotency_key, expires_at, completed_at, canceled_at,
-      created_at, updated_at, completion_policy
+      created_at, updated_at, completion_policy, derivation_index
     ) VALUES (
-      @id, @status, @pay_address, @expected_amount_raw, @received_amount_raw,
+      @id, @account_key, @invoice_key, @status, @pay_address, @expected_amount_raw, @received_amount_raw,
       @memo, @metadata, @idempotency_key, @expires_at, @completed_at, @canceled_at,
-      @created_at, @updated_at, @completion_policy
+      @created_at, @updated_at, @completion_policy, @derivation_index
     )
   `);
 
@@ -354,11 +425,13 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
       const row = invoiceToRow(updated);
       db.prepare(`
         UPDATE invoices SET
+          account_key = @account_key, invoice_key = @invoice_key,
           status = @status, pay_address = @pay_address, expected_amount_raw = @expected_amount_raw,
           received_amount_raw = @received_amount_raw, memo = @memo, metadata = @metadata,
           idempotency_key = @idempotency_key, expires_at = @expires_at, completed_at = @completed_at,
           canceled_at = @canceled_at, created_at = @created_at, updated_at = @updated_at,
-          completion_policy = @completion_policy
+          completion_policy = @completion_policy,
+          derivation_index = @derivation_index
         WHERE id = @id
       `).run(row);
       return updated;
@@ -376,6 +449,166 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
     async getByIdempotencyKey(key: string): Promise<string | undefined> {
       const row = db.prepare('SELECT resource_id FROM idempotency_keys WHERE key = ?').get(key) as { resource_id: string } | undefined;
       return row?.resource_id;
+    },
+  };
+}
+
+function rowToInvoiceAccount(row: Record<string, unknown>): InvoiceAccount {
+  return {
+    accountKey: row.account_key as string,
+    invoiceKey: row.invoice_key as string | null,
+    derivationIndex: row.derivation_index as number,
+    address: row.address as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+export function createSqliteInvoiceAccountStore(db: Database): InvoiceAccountStore {
+  return {
+    async getOrCreate(accountKey, invoiceKey, derivationIndex, deriveAddress) {
+      const existing = db
+        .prepare(
+          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
+        )
+        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown> | undefined;
+
+      if (existing) return rowToInvoiceAccount(existing);
+
+      const collision = db
+        .prepare('SELECT account_key, invoice_key FROM invoice_accounts WHERE derivation_index = ?')
+        .get(derivationIndex) as { account_key: string; invoice_key: string | null } | undefined;
+
+      if (collision && (collision.account_key !== accountKey || collision.invoice_key !== invoiceKey)) {
+        throw new Error(
+          `Derivation index collision: index ${derivationIndex} is already assigned to (${collision.account_key}, ${collision.invoice_key ?? 'null'})`,
+        );
+      }
+
+      const address = deriveAddress(derivationIndex);
+      const createdAt = new Date().toISOString();
+      db.prepare(
+        'INSERT OR IGNORE INTO invoice_accounts (account_key, invoice_key, derivation_index, address, created_at) VALUES (?, ?, ?, ?, ?)',
+      ).run(accountKey, invoiceKey, derivationIndex, address, createdAt);
+
+      const row = db
+        .prepare(
+          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
+        )
+        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown>;
+
+      return rowToInvoiceAccount(row);
+    },
+
+    async get(accountKey, invoiceKey) {
+      const row = db
+        .prepare(
+          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
+        )
+        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown> | undefined;
+      return row ? rowToInvoiceAccount(row) : undefined;
+    },
+
+    async listByAccountKey(accountKey) {
+      const rows = db
+        .prepare('SELECT * FROM invoice_accounts WHERE account_key = ? ORDER BY created_at ASC')
+        .all(accountKey) as Record<string, unknown>[];
+      return rows.map(rowToInvoiceAccount);
+    },
+  };
+}
+
+function rowToReceiveTask(row: Record<string, unknown>): ReceiveTask {
+  return {
+    id: row.id as string,
+    accountAddress: row.account_address as string,
+    derivationIndex: row.derivation_index as number,
+    pendingBlockHash: row.pending_block_hash as string,
+    amountRaw: row.amount_raw as string,
+    status: row.status as ReceiveTaskStatus,
+    createdAt: row.created_at as string,
+    publishedAt: row.published_at as string | null,
+    confirmedAt: row.confirmed_at as string | null,
+    failedAt: row.failed_at as string | null,
+    failReason: row.fail_reason as string | null,
+    retryCount: row.retry_count as number,
+  };
+}
+
+export function createSqliteReceiveTaskStore(db: Database): ReceiveTaskStore {
+  return {
+    async create(task) {
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const full: ReceiveTask = { ...task, id, createdAt };
+      db.prepare(`
+        INSERT INTO receive_tasks (
+          id, account_address, derivation_index, pending_block_hash, amount_raw,
+          status, created_at, published_at, confirmed_at, failed_at, fail_reason, retry_count
+        ) VALUES (
+          @id, @account_address, @derivation_index, @pending_block_hash, @amount_raw,
+          @status, @created_at, @published_at, @confirmed_at, @failed_at, @fail_reason, @retry_count
+        )
+      `).run({
+        id,
+        account_address: full.accountAddress,
+        derivation_index: full.derivationIndex,
+        pending_block_hash: full.pendingBlockHash,
+        amount_raw: full.amountRaw,
+        status: full.status,
+        created_at: createdAt,
+        published_at: full.publishedAt ?? null,
+        confirmed_at: full.confirmedAt ?? null,
+        failed_at: full.failedAt ?? null,
+        fail_reason: full.failReason ?? null,
+        retry_count: full.retryCount ?? 0,
+      });
+      return full;
+    },
+
+    async get(id) {
+      const row = db.prepare('SELECT * FROM receive_tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      return row ? rowToReceiveTask(row) : undefined;
+    },
+
+    async getByPendingBlockHash(hash) {
+      const row = db
+        .prepare('SELECT * FROM receive_tasks WHERE pending_block_hash = ?')
+        .get(hash) as Record<string, unknown> | undefined;
+      return row ? rowToReceiveTask(row) : undefined;
+    },
+
+    async listByStatus(status) {
+      const rows = db
+        .prepare('SELECT * FROM receive_tasks WHERE status = ? ORDER BY created_at ASC')
+        .all(status) as Record<string, unknown>[];
+      return rows.map(rowToReceiveTask);
+    },
+
+    async update(id, patch) {
+      const existing = await this.get(id);
+      if (!existing) throw new Error(`ReceiveTask ${id} not found`);
+      const updated = { ...existing, ...patch };
+      db.prepare(`
+        UPDATE receive_tasks SET
+          account_address = @account_address, derivation_index = @derivation_index,
+          pending_block_hash = @pending_block_hash, amount_raw = @amount_raw,
+          status = @status, published_at = @published_at, confirmed_at = @confirmed_at,
+          failed_at = @failed_at, fail_reason = @fail_reason, retry_count = @retry_count
+        WHERE id = @id
+      `).run({
+        id: updated.id,
+        account_address: updated.accountAddress,
+        derivation_index: updated.derivationIndex,
+        pending_block_hash: updated.pendingBlockHash,
+        amount_raw: updated.amountRaw,
+        status: updated.status,
+        published_at: updated.publishedAt ?? null,
+        confirmed_at: updated.confirmedAt ?? null,
+        failed_at: updated.failedAt ?? null,
+        fail_reason: updated.failReason ?? null,
+        retry_count: updated.retryCount,
+      });
+      return updated;
     },
   };
 }

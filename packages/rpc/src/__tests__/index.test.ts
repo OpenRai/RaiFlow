@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createRpcPool, createWsClient } from '../index.js';
-import { setupClientWithDifficultyMocks } from './helpers.js';
+
+vi.mock('nano-rspow-node', () => ({
+  generateWork: vi.fn().mockResolvedValue('test-work'),
+  WorkType: { Send: 'send', Receive: 'receive' },
+}));
 
 describe('@openrai/rpc nano-core defaults', () => {
   it('uses nano-core default RPC endpoints when no nodes are configured', () => {
@@ -31,86 +35,23 @@ describe('@openrai/rpc nano-core defaults', () => {
 
     expect(audit.map((entry) => entry.url)).toEqual(['wss://ws.example.com/']);
   });
-
-  it('getActiveDifficulty fetches network_current/network_receive_current and caches for 60s', async () => {
-    const pool = createRpcPool([]);
-    const client = pool.getClient();
-
-    const rawPool = (pool as any).client as { rpcPool: { postJson: (...args: unknown[]) => unknown } };
-    const originalPostJson = rawPool?.rpcPool?.postJson;
-    if (!originalPostJson) {
-      expect(true).toBe(true);
-      return;
-    }
-    let callCount = 0;
-    rawPool.rpcPool.postJson = async (...args: unknown[]) => {
-      callCount++;
-      return originalPostJson(...args);
-    };
-
-    const result1 = await pool.getActiveDifficulty();
-    const result2 = await pool.getActiveDifficulty();
-
-    expect(callCount).toBe(1);
-    expect(result1.send).toBeTruthy();
-    expect(result1.receive).toBeTruthy();
-    expect(result2.send).toBe(result1.send);
-    expect(result2.receive).toBe(result1.receive);
-  });
 });
 
-describe('@openrai/rpc difficulty caching', () => {
-  let pool: ReturnType<typeof createRpcPool>;
-  let client: ReturnType<typeof pool.getClient>;
-
-  beforeEach(() => {
-    pool = createRpcPool([]);
-    client = pool.getClient();
-  });
-
+describe('@openrai/rpc workGenerate', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('calls active_difficulty once for two workGenerate calls without difficulty', async () => {
-    const { client, activeDifficultyCalls, workGenerateMock } = setupClientWithDifficultyMocks({ trackCalls: true });
+  it('workGenerate calls rspow with WorkType.Send and returns work string', async () => {
+    // @ts-ignore
+    const { generateWork } = await import('nano-rspow-node');
+    const pool = createRpcPool([]);
+    const client = pool.getClient();
 
-    await client.workGenerate('hash1');
-    await client.workGenerate('hash2');
+    const result = await client.workGenerate('abc123');
 
-    expect(activeDifficultyCalls.length).toBe(1);
-    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'fffffff97b994000');
-    expect(workGenerateMock).toHaveBeenCalledWith('hash2', 'fffffff97b994000');
-  });
-
-  it('uses explicit difficulty when provided', async () => {
-    const workGenerateMock = vi.fn().mockResolvedValue({ work: 'test-work' });
-    const rawClient = (client as any).client;
-    rawClient.workProvider.generate = workGenerateMock;
-
-    await client.workGenerate('hash1', 'fffffff800000000');
-
-    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'fffffff800000000');
-    expect(workGenerateMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('workGenerate(hash, undefined, "receive") uses receive difficulty', async () => {
-    const { client, workGenerateMock } = setupClientWithDifficultyMocks();
-
-    await client.workGenerate('hash1', undefined, 'receive');
-
-    expect(workGenerateMock).toHaveBeenCalledWith('hash1', 'ffffffdabf470000');
-  });
-
-  it('invalidateDifficultyCache forces a fresh fetch', async () => {
-    const { pool, client, activeDifficultyCalls, workGenerateMock } = setupClientWithDifficultyMocks({ trackCalls: true });
-
-    await pool.getActiveDifficulty();
-    expect(activeDifficultyCalls.length).toBe(1);
-
-    pool.invalidateDifficultyCache();
-    await pool.getActiveDifficulty();
-    expect(activeDifficultyCalls.length).toBe(2);
+    expect(generateWork).toHaveBeenCalledWith('abc123', 'send');
+    expect(result).toEqual({ work: 'test-work' });
   });
 });
 
@@ -128,8 +69,6 @@ describe('@openrai/rpc accountsReceivable', () => {
   });
 
   function mockPostJson(handler: (payload: Record<string, unknown>) => unknown) {
-    // Mock at the rpcCall level — this is what accountInfo/accountsReceivable
-    // now use internally to avoid poisoning the EndpointPool with app-level errors.
     const pooledClient = client as any;
     const originalRpcCall = pooledClient.rpcCall?.bind(pooledClient);
     if (pooledClient.rpcCall) {
@@ -169,7 +108,7 @@ describe('@openrai/rpc accountsReceivable', () => {
 
   it('returns empty array when response has no blocks field', async () => {
     mockPostJson(() => {
-      return {} as any; // node returns empty object (no blocks key)
+      return {} as any;
     });
 
     const result = await client.accountsReceivable('nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');

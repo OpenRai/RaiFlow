@@ -198,52 +198,73 @@ const rpcUrls = config.nano.rpc;
 if (rpcUrls.length === 0) {
   logger.warn('no nano RPC endpoints configured — runtime will operate in degraded mode');
 } else {
-  const results = await Promise.allSettled(
-    rpcUrls.map(async (url) => {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  let backoffMs = 1000;
+  const maxBackoffMs = 60_000;
 
-      // Handle basic auth in URL
-      let cleanUrl = url;
-      try {
-        const parsed = new URL(url);
-        if (parsed.username || parsed.password) {
-          const credentials = btoa(`${parsed.username}:${parsed.password}`);
-          headers['Authorization'] = `Basic ${credentials}`;
-          parsed.username = '';
-          parsed.password = '';
-          cleanUrl = parsed.toString();
+  while (true) {
+    const results = await Promise.allSettled(
+      rpcUrls.map(async (url) => {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+        // Handle basic auth in URL
+        let cleanUrl = url;
+        try {
+          const parsed = new URL(url);
+          if (parsed.username || parsed.password) {
+            const credentials = btoa(`${parsed.username}:${parsed.password}`);
+            headers['Authorization'] = `Basic ${credentials}`;
+            parsed.username = '';
+            parsed.password = '';
+            cleanUrl = parsed.toString();
+          }
+        } catch {
+          // Ignore URL parsing errors, fetch will catch them
         }
-      } catch {
-        // Ignore URL parsing errors, fetch will catch them
+
+        const res = await fetch(cleanUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ action: 'version' }),
+          signal: AbortSignal.timeout(10_000),
+        });
+
+        // A 429 means the endpoint is reachable but rate-limited (quota exhausted).
+        // Treat this as a degraded-but-reachable state so the runtime can still
+        // start — the circuit breakers in the polling loops will handle backoff.
+        if (res.status === 429) {
+          const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+          const detail = typeof body['message'] === 'string' ? body['message'] : 'quota exhausted';
+          return { url, vendor: `rate-limited (${detail})` };
+        }
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json() as any;
+        if (!body.node_vendor) throw new Error('unexpected response shape');
+        return { url, vendor: body.node_vendor };
+      }),
+    );
+
+    const succeeded = results.filter((r): r is PromiseFulfilledResult<{ url: string; vendor: string }> => r.status === 'fulfilled');
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+    if (succeeded.length > 0) {
+      for (const s of succeeded) {
+        logger.info(`RPC endpoint OK: ${s.value.url} (${s.value.vendor})`);
       }
 
-      const res = await fetch(cleanUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ action: 'version' }),
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      // A 429 means the endpoint is reachable but rate-limited (quota exhausted).
-      // Treat this as a degraded-but-reachable state so the runtime can still
-      // start — the circuit breakers in the polling loops will handle backoff.
-      if (res.status === 429) {
-        const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-        const detail = typeof body['message'] === 'string' ? body['message'] : 'quota exhausted';
-        return { url, vendor: `rate-limited (${detail})` };
+      if (failed.length > 0) {
+        for (let i = 0; i < rpcUrls.length; i++) {
+          const result = results[i];
+          if (result?.status === 'rejected') {
+            const reason = (result as PromiseRejectedResult).reason;
+            logger.warn(`RPC endpoint unreachable (degraded): ${rpcUrls[i]} — ${reason}`);
+          }
+        }
+        logger.warn(`${failed.length}/${rpcUrls.length} RPC endpoints unreachable — operating in degraded mode`);
       }
+      break;
+    }
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = await res.json() as any;
-      if (!body.node_vendor) throw new Error('unexpected response shape');
-      return { url, vendor: body.node_vendor };
-    }),
-  );
-
-  const succeeded = results.filter((r): r is PromiseFulfilledResult<{ url: string; vendor: string }> => r.status === 'fulfilled');
-  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-
-  if (succeeded.length === 0) {
     for (let i = 0; i < rpcUrls.length; i++) {
       const result = results[i];
       const reason = result?.status === 'rejected'
@@ -251,26 +272,14 @@ if (rpcUrls.length === 0) {
         : 'unknown';
       logger.error(`RPC endpoint unreachable: ${rpcUrls[i]} — ${reason}`);
     }
+
     logger.error(
-      'FATAL: all configured Nano RPC endpoints are unreachable. ' +
-      'The runtime cannot operate without RPC access. Exiting.',
+      `FATAL: all configured Nano RPC endpoints are unreachable. ` +
+      `The runtime cannot operate without RPC access. Retrying in ${backoffMs / 1000}s...`,
     );
-    process.exit(1);
-  }
 
-  for (const s of succeeded) {
-    logger.info(`RPC endpoint OK: ${s.value.url} (${s.value.vendor})`);
-  }
-
-  if (failed.length > 0) {
-    for (let i = 0; i < rpcUrls.length; i++) {
-      const result = results[i];
-      if (result?.status === 'rejected') {
-        const reason = (result as PromiseRejectedResult).reason;
-        logger.warn(`RPC endpoint unreachable (degraded): ${rpcUrls[i]} — ${reason}`);
-      }
-    }
-    logger.warn(`${failed.length}/${rpcUrls.length} RPC endpoints unreachable — operating in degraded mode`);
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
   }
 }
 

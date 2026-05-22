@@ -1,4 +1,18 @@
+/// <reference lib="dom" />
 // @openrai/model — Canonical shared types and schemas for RaiFlow v2
+
+import { blake2b } from '@noble/hashes/blake2b';
+
+export function deriveInvoiceIndex(
+  accountKey: string,
+  invoiceKey: string | null,
+  startIndex: number,
+): number {
+  const input = accountKey + '\0' + (invoiceKey ?? '');
+  const hash = blake2b(new TextEncoder().encode(input), { dkLen: 32 });
+  const uint32 = ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
+  return startIndex + (uint32 % (2 ** 27));
+}
 
 // ---------------------------------------------------------------------------
 // Statuses
@@ -35,6 +49,8 @@ export type CompletionPolicy =
 
 export interface Invoice {
   id: string;
+  accountKey: string;
+  invoiceKey: string | null;
   status: InvoiceStatus;
   payAddress: string;
   expectedAmountRaw: string;
@@ -48,6 +64,15 @@ export interface Invoice {
   createdAt: string;
   updatedAt: string;
   completionPolicy: CompletionPolicy;
+  derivationIndex: number | null;
+}
+
+export interface InvoiceAccount {
+  accountKey: string;
+  invoiceKey: string | null;
+  derivationIndex: number;
+  address: string;
+  createdAt: string;
 }
 
 export interface Payment {
@@ -86,6 +111,23 @@ export interface Send {
   createdAt: string;
   publishedAt: string | null;
   confirmedAt: string | null;
+}
+
+export type ReceiveTaskStatus = 'pending' | 'processing' | 'published' | 'confirmed' | 'failed';
+
+export interface ReceiveTask {
+  id: string;
+  accountAddress: string;
+  derivationIndex: number;
+  pendingBlockHash: string;
+  amountRaw: string;
+  status: ReceiveTaskStatus;
+  createdAt: string;
+  publishedAt: string | null;
+  confirmedAt: string | null;
+  failedAt: string | null;
+  failReason: string | null;
+  retryCount: number;
 }
 
 export interface Receivable {
@@ -323,6 +365,8 @@ export interface AccountEvent {
 // ---------------------------------------------------------------------------
 
 export interface CreateInvoiceRequest {
+  accountKey: string;
+  invoiceKey?: string;
   expectedAmountRaw: string;
   memo?: string;
   metadata?: Record<string, string>;
@@ -361,8 +405,7 @@ export interface PublishBlockRequest {
 
 export interface WorkGenerateRequest {
   hash: string;
-  difficulty?: string;
-  blockType?: 'send' | 'receive';
+
 }
 
 export interface CreateWebhookRequest {
@@ -405,6 +448,17 @@ export interface InvoiceStore {
   getByIdempotencyKey(key: string): Promise<string | undefined>;
 }
 
+export interface InvoiceAccountStore {
+  getOrCreate(
+    accountKey: string,
+    invoiceKey: string | null,
+    derivationIndex: number,
+    deriveAddress: (index: number) => string,
+  ): Promise<InvoiceAccount>;
+  get(accountKey: string, invoiceKey: string | null): Promise<InvoiceAccount | undefined>;
+  listByAccountKey(accountKey: string): Promise<InvoiceAccount[]>;
+}
+
 export interface PaymentStore {
   create(payment: Payment): Promise<Payment>;
   get(id: string): Promise<Payment | undefined>;
@@ -428,6 +482,14 @@ export interface SendStore {
   listByStatus(status: SendStatus): Promise<Send[]>;
   getByIdempotencyKey(key: string): Promise<Send | undefined>;
   update(id: string, patch: Partial<Send>): Promise<Send>;
+}
+
+export interface ReceiveTaskStore {
+  create(task: Omit<ReceiveTask, 'id' | 'createdAt'>): Promise<ReceiveTask>;
+  get(id: string): Promise<ReceiveTask | undefined>;
+  getByPendingBlockHash(hash: string): Promise<ReceiveTask | undefined>;
+  listByStatus(status: ReceiveTaskStatus): Promise<ReceiveTask[]>;
+  update(id: string, patch: Partial<ReceiveTask>): Promise<ReceiveTask>;
 }
 
 export interface EventStore {
@@ -462,6 +524,11 @@ export interface ConfirmedBlock {
 
 export interface WatcherSink {
   handleConfirmedBlock(block: ConfirmedBlock): Promise<void>;
+}
+
+export interface CustodyEngine {
+  generateWork(hash: string): Promise<string>;
+  generateReceiveWork(hash: string): Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +568,9 @@ export interface LegacyInvoice {
   expectedAmountRaw: string;
   confirmedAmountRaw: string;
   recipientAccount: string;
+  accountKey?: string;
+  invoiceKey?: string;
+  derivationIndex?: number;
   createdAt: string;
   expiresAt?: string;
   completedAt?: string;

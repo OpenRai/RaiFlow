@@ -12,20 +12,95 @@ import {
 describe('createInvoice', () => {
   it('derives payAddress and defaults status/amount fields', async () => {
     const { runtime } = createTestRuntime();
-    const invoice = await runtime.createInvoice({ expectedAmountRaw: ONE_XNO });
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-1', expectedAmountRaw: ONE_XNO });
 
     expect(invoice.status).toBe('open');
     expect(invoice.receivedAmountRaw).toBe('0');
     expect(invoice.payAddress.startsWith('nano_') || invoice.payAddress.startsWith('xrb_')).toBe(true);
+    expect(invoice.accountKey).toBe('acct-1');
   });
 
   it('is idempotent by key and returns the original invoice', async () => {
     const { runtime } = createTestRuntime();
-    const inv1 = await runtime.createInvoice({ expectedAmountRaw: ONE_XNO }, 'inv-create-1');
-    const inv2 = await runtime.createInvoice({ expectedAmountRaw: ONE_XNO }, 'inv-create-1');
+    const inv1 = await runtime.createInvoice({ accountKey: 'acct-1', expectedAmountRaw: ONE_XNO }, 'inv-create-1');
+    const inv2 = await runtime.createInvoice({ accountKey: 'acct-1', expectedAmountRaw: ONE_XNO }, 'inv-create-1');
 
     expect(inv1.id).toBe(inv2.id);
     expect(inv1.payAddress).toBe(inv2.payAddress);
+  });
+});
+
+describe('createInvoice — accountKey required', () => {
+  it('rejects with error when accountKey is missing/empty', async () => {
+    const { runtime } = createTestRuntime();
+
+    await expect(
+      runtime.createInvoice({ expectedAmountRaw: ONE_XNO } as never),
+    ).rejects.toThrow('accountKey is required');
+    await expect(
+      runtime.createInvoice({ accountKey: '', expectedAmountRaw: ONE_XNO }),
+    ).rejects.toThrow('accountKey is required');
+  });
+
+  it('same accountKey + same invoiceKey → same payAddress across two separate createInvoice calls', async () => {
+    const { runtime } = createTestRuntime();
+
+    const inv1 = await runtime.createInvoice({
+      accountKey: 'acct-stable',
+      invoiceKey: 'inv-key-1',
+      expectedAmountRaw: ONE_XNO,
+    });
+    const inv2 = await runtime.createInvoice({
+      accountKey: 'acct-stable',
+      invoiceKey: 'inv-key-1',
+      expectedAmountRaw: HALF_XNO,
+    });
+
+    expect(inv1.id).not.toBe(inv2.id);
+    expect(inv1.payAddress).toBe(inv2.payAddress);
+  });
+
+  it('same accountKey + different invoiceKey → different payAddress', async () => {
+    const { runtime } = createTestRuntime();
+
+    const inv1 = await runtime.createInvoice({
+      accountKey: 'acct-scope',
+      invoiceKey: 'inv-key-1',
+      expectedAmountRaw: ONE_XNO,
+    });
+    const inv2 = await runtime.createInvoice({
+      accountKey: 'acct-scope',
+      invoiceKey: 'inv-key-2',
+      expectedAmountRaw: ONE_XNO,
+    });
+
+    expect(inv1.payAddress).not.toBe(inv2.payAddress);
+  });
+});
+
+describe('getInvoicesByAccountKey', () => {
+  it('returns invoices matching accountKey', async () => {
+    const { runtime } = createTestRuntime();
+
+    const acctA1 = await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: ONE_XNO });
+    const acctA2 = await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: HALF_XNO });
+    await runtime.createInvoice({ accountKey: 'acct-b', expectedAmountRaw: ONE_XNO });
+
+    const invoices = await runtime.getInvoicesByAccountKey('acct-a');
+    const ids = invoices.map((invoice) => invoice.id);
+
+    expect(ids).toContain(acctA1.id);
+    expect(ids).toContain(acctA2.id);
+    expect(invoices.every((invoice) => invoice.accountKey === 'acct-a')).toBe(true);
+  });
+
+  it('returns empty array for unknown accountKey', async () => {
+    const { runtime } = createTestRuntime();
+
+    await runtime.createInvoice({ accountKey: 'known-account', expectedAmountRaw: ONE_XNO });
+
+    const invoices = await runtime.getInvoicesByAccountKey('unknown-account');
+    expect(invoices).toEqual([]);
   });
 });
 

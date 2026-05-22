@@ -496,18 +496,14 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
   if (parts[0] === 'work' && method === 'POST' && parts.length === 1) {
     const body = await req.json() as Record<string, unknown>;
-    const { hash, difficulty, blockType } = body;
+    const { hash } = body;
     if (typeof hash !== 'string') {
       return errorResponse('Missing required field: hash', 'bad_request', 400);
     }
     const client = runtime.rpcPool?.getClient();
     if (!client) return errorResponse('RPC not configured', 'bad_request', 400);
     try {
-      const result = await client.workGenerate(
-        hash,
-        typeof difficulty === 'string' ? difficulty : undefined,
-        blockType === 'receive' ? 'receive' : undefined,
-      );
+      const result = await client.workGenerate(hash);
       return json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'RPC error';
@@ -539,18 +535,57 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
   if (parts[0] === 'events' && method === 'GET' && parts.length === 1) {
     const after = url.searchParams.get('after') ?? undefined;
     const type = url.searchParams.get('type') ?? undefined;
+    const typesParam = url.searchParams.get('types');
+    const requestedTypes = typesParam
+      ? typesParam.split(',').map((t) => t.trim()).filter(Boolean)
+      : null;
+    const OPT_IN_EVENT_TYPES = new Set(['receive.confirmed', 'receive.failed']);
     const resourceType = url.searchParams.get('resourceType') ?? undefined;
     const resourceId = url.searchParams.get('resourceId') ?? undefined;
     const limitParam = url.searchParams.get('limit');
     const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
     const result = await runtime.listEvents({
       after,
-      type,
+      type: requestedTypes ? undefined : type,
       resourceType,
       resourceId,
       limit: Number.isFinite(limit) ? limit : undefined,
     });
-    return json(result);
+    const filteredEvents = result.data.filter((event) => {
+      if (OPT_IN_EVENT_TYPES.has(event.type) && !requestedTypes?.includes(event.type)) {
+        return false;
+      }
+      if (requestedTypes && !requestedTypes.includes(event.type)) {
+        return false;
+      }
+      return true;
+    });
+    return json({ data: filteredEvents, nextCursor: result.nextCursor });
+  }
+
+  if (parts[0] === 'invoice-accounts') {
+    const accountKey = parts[1] ? decodeURIComponent(parts[1]) : undefined;
+
+    if (!accountKey) {
+      return errorResponse('accountKey is required', 'bad_request', 400);
+    }
+
+    if (method === 'GET' && parts.length === 3 && parts[2] === 'balance') {
+      const invoiceKeyParam = url.searchParams.get('invoiceKey');
+      const result = await runtime.getInvoiceAccountBalance(accountKey, invoiceKeyParam);
+      if (!result) return errorResponse('Invoice account not found', 'not_found', 404);
+      return json(result);
+    }
+
+    if (method === 'GET' && parts.length === 3 && parts[2] === 'aggregated-balance') {
+      const result = await runtime.getInvoiceAccountAggregatedBalance(accountKey);
+      return json(result);
+    }
+
+    if (method === 'GET' && parts.length === 3 && parts[2] === 'invoices') {
+      const invoices = await runtime.getInvoicesByAccountKey(accountKey);
+      return json({ data: invoices });
+    }
   }
 
   if (parts[0] === 'invoices') {
@@ -565,7 +600,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       }
 
       const body = await req.json() as Record<string, unknown>;
-      const { recipientAccount, expectedAmountRaw, expiresAt, metadata, completionPolicy } = body;
+      const { recipientAccount, expectedAmountRaw, accountKey, invoiceKey, expiresAt, metadata, completionPolicy } = body;
       if (recipientAccount !== undefined) {
         return errorResponse(
           'recipientAccount is deprecated and no longer accepted. Remove it; RaiFlow now derives payAddress per invoice.',
@@ -580,12 +615,21 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           400,
         );
       }
+      if (typeof accountKey !== 'string' || accountKey.length === 0) {
+        return errorResponse(
+          'Missing required field: accountKey',
+          'bad_request',
+          400,
+        );
+      }
 
       const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
 
       const invoice = await runtime.createInvoice(
         {
           expectedAmountRaw,
+          accountKey,
+          invoiceKey: typeof invoiceKey === 'string' ? invoiceKey : undefined,
           expiresAt: typeof expiresAt === 'string' ? expiresAt : undefined,
           metadata: typeof metadata === 'object' && metadata !== null
             ? (metadata as Record<string, unknown>)
@@ -602,6 +646,12 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
     // GET /api/invoices
     if (method === 'GET' && parts.length === 1) {
+      const accountKey = url.searchParams.get('accountKey');
+      if (accountKey) {
+        const invoices = await runtime.getInvoicesByAccountKey(accountKey);
+        return json({ data: invoices });
+      }
+
       const statusParam = url.searchParams.get('status') ?? undefined;
       const filter = statusParam !== undefined
         ? { status: statusParam as InvoiceStatus }

@@ -81,9 +81,8 @@ export class SendOrchestrator {
         account.derivationIndex ?? undefined,
       );
 
-      // 4. Generate work using current send difficulty
-      const difficulty = await this.rpcPool.getActiveDifficulty();
-      const work = await this.custodyEngine.generateWork(signed.hash, difficulty.send);
+      // 4. Generate work
+      const work = await this.custodyEngine.generateWork(signed.hash);
 
       // 5. Build final block JSON with work included
       const blockJson = JSON.parse(signed.contents);
@@ -97,10 +96,8 @@ export class SendOrchestrator {
         const message = processErr instanceof Error ? processErr.message : String(processErr);
         if (!message.includes(WORK_REJECTION_MESSAGE)) throw processErr;
 
-        // Work was rejected — invalidate cache, regenerate at fresh difficulty, retry once
-        this.rpcPool.invalidateDifficultyCache();
-        const freshDifficulty = await this.rpcPool.getActiveDifficulty();
-        const newWork = await this.custodyEngine.generateWork(signed.hash, freshDifficulty.send);
+        // Work was rejected — regenerate and retry once
+        const newWork = await this.custodyEngine.generateWork(signed.hash);
         blockJson.work = newWork;
         result = await client.process(JSON.stringify(blockJson));
       }
