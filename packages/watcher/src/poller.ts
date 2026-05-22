@@ -26,6 +26,11 @@ export interface PollerConfig {
   intervalMs?: number;
   /** Initial set of accounts to watch. */
   accounts: string[];
+  /**
+   * How long to pause polling after a 429 rate-limit response (ms).
+   * Default: 5 minutes.
+   */
+  rateLimitBackoffMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,6 +40,7 @@ export interface PollerConfig {
 export class NanoPoller {
   private readonly rpc: NanoRpcClient;
   private readonly intervalMs: number;
+  private readonly rateLimitBackoffMs: number;
 
   private watchedAccounts: Set<string>;
   private sink: WatcherSink | null = null;
@@ -45,9 +51,13 @@ export class NanoPoller {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
+  /** Timestamp (Date.now()) until which polling is suppressed due to rate-limiting. */
+  private rateLimitedUntil = 0;
+
   constructor(config: PollerConfig) {
     this.rpc = config.rpc;
     this.intervalMs = config.intervalMs ?? 5_000;
+    this.rateLimitBackoffMs = config.rateLimitBackoffMs ?? 5 * 60_000;
     this.watchedAccounts = new Set(config.accounts);
   }
 
@@ -97,6 +107,10 @@ export class NanoPoller {
   private async poll(): Promise<void> {
     if (!this.running || this.watchedAccounts.size === 0) return;
 
+    if (Date.now() < this.rateLimitedUntil) {
+      return; // still in rate-limit backoff — skip this cycle
+    }
+
     const accounts = Array.from(this.watchedAccounts);
 
     let receivable: Record<string, string[]>;
@@ -105,7 +119,12 @@ export class NanoPoller {
     } catch (err) {
       // Transient RPC errors should not crash the poller.
       const message = err instanceof Error ? err.message : String(err);
-      console.debug(`[poller] accounts_receivable RPC failed: ${message}`);
+      if (message.includes('429')) {
+        this.rateLimitedUntil = Date.now() + this.rateLimitBackoffMs;
+        console.debug(`[poller] rate limited (429) — pausing for ${this.rateLimitBackoffMs / 1000}s`);
+      } else {
+        console.debug(`[poller] accounts_receivable RPC failed: ${message}`);
+      }
       return;
     }
 
@@ -119,6 +138,11 @@ export class NanoPoller {
           blockInfo = await this.rpc.blockInfo(hash);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          if (message.includes('429')) {
+            this.rateLimitedUntil = Date.now() + this.rateLimitBackoffMs;
+            console.debug(`[poller] rate limited (429) on block_info — pausing for ${this.rateLimitBackoffMs / 1000}s`);
+            return; // abort remainder of this poll cycle
+          }
           console.debug(`[poller] block_info RPC failed for ${hash}: ${message}`);
           continue;
         }

@@ -13,6 +13,8 @@ import type { WatcherLike } from './runtime.js';
 export interface AccountStateSyncOptions {
   reconcileIntervalMs?: number;
   initialSyncDelayMs?: number;
+  /** How long to pause all reconciliation after a 429 rate-limit response (ms). Default: 5 minutes. */
+  rateLimitBackoffMs?: number;
 }
 
 export class AccountStateSync implements WatcherSink {
@@ -20,6 +22,10 @@ export class AccountStateSync implements WatcherSink {
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly reconcileIntervalMs: number;
   private readonly initialSyncDelayMs: number;
+  private readonly rateLimitBackoffMs: number;
+
+  /** Timestamp (Date.now()) until which reconciliation is suppressed due to rate-limiting. */
+  private rateLimitedUntil = 0;
 
   constructor(
     private readonly rpcPool: RpcPool,
@@ -31,6 +37,7 @@ export class AccountStateSync implements WatcherSink {
   ) {
     this.reconcileIntervalMs = options?.reconcileIntervalMs ?? 30_000;
     this.initialSyncDelayMs = options?.initialSyncDelayMs ?? 750;
+    this.rateLimitBackoffMs = options?.rateLimitBackoffMs ?? 5 * 60_000;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -129,13 +136,25 @@ export class AccountStateSync implements WatcherSink {
   // -----------------------------------------------------------------------
 
   private async reconcile(): Promise<void> {
+    if (Date.now() < this.rateLimitedUntil) {
+      return; // still in rate-limit backoff — skip this cycle entirely
+    }
+
     for (const [address, { id }] of this.watchedAccounts) {
       try {
         await this.reconcileAccount(address, id);
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('429')) {
+          this.rateLimitedUntil = Date.now() + this.rateLimitBackoffMs;
+          console.warn(
+            `[account-state-sync] rate limited (429) — pausing reconciliation for ${this.rateLimitBackoffMs / 1000}s`,
+          );
+          return; // abort the rest of this reconciliation sweep
+        }
         console.warn(
           `[account-state-sync] reconciliation failed for ${address}:`,
-          err instanceof Error ? err.message : err,
+          message,
         );
       }
     }
@@ -147,9 +166,12 @@ export class AccountStateSync implements WatcherSink {
     try {
       info = await client.accountInfo(address);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Re-throw 429s so the outer reconcile() loop can apply backoff.
+      if (message.includes('429')) throw err;
       console.warn(
         `[account-state-sync] reconciliation RPC failed for ${address}:`,
-        err instanceof Error ? err.message : err,
+        message,
       );
       return;
     }
