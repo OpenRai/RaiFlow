@@ -23,6 +23,6 @@ logging:
   level: "info"
   format: "json"
 
-# custody:
-#   seed: "env:RAIFLOW_CUSTODY_SEED"
-#   representative: "env:RAIFLOW_CUSTODY_REP"
+custody:
+  seed: "env:RAIFLOW_CUSTODY_SEED"
+  representative: "env:RAIFLOW_CUSTODY_REP"
