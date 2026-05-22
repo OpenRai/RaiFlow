@@ -42,6 +42,11 @@ RUN pnpm prune --prod
 # Stage 2: Runtime
 FROM node:22-bookworm-slim
 WORKDIR /app
+
+# Install runtime dependencies for native OpenCL / PoW
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ocl-icd-libopencl1 \
+    && rm -rf /var/lib/apt/lists/*
 # Copy production node_modules, packages, and root config
 COPY --from=builder /app/node_modules/ ./node_modules/
 COPY --from=builder /app/packages/ ./packages/
