@@ -8,7 +8,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@openrai/nano-core": "2.4.11",
+    "@openrai/nano-core": "^3.0.2",
     "@openrai/raiflow-sdk": "workspace:*",
     "express": "^4.19.0"
   },
