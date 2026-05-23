@@ -338,6 +338,14 @@ const subscriptionManager = new SubscriptionManager();
 // Mutable reference to break the Watcher <-> AccountStateSync cycle
 let watcher: Watcher | undefined;
 
+const reconcileIntervalMs = process.env['RAIFLOW_RECONCILE_INTERVAL_MS']
+  ? parseInt(process.env['RAIFLOW_RECONCILE_INTERVAL_MS'], 10)
+  : 900_000; // default to 15 minutes to stay under standard RPC quotas
+
+const pollIntervalMs = process.env['RAIFLOW_POLL_INTERVAL_MS']
+  ? parseInt(process.env['RAIFLOW_POLL_INTERVAL_MS'], 10)
+  : 30_000; // default to 30 seconds to stay under standard RPC quotas
+
 const accountStateSync = new AccountStateSync(
   rpcPool,
   accountStore,
@@ -347,7 +355,7 @@ const accountStateSync = new AccountStateSync(
   },
   (event) => subscriptionManager.publish(event),
   (block) => runtime.handleConfirmedBlock(block),
-  { reconcileIntervalMs: 30_000, initialSyncDelayMs: 750 },
+  { reconcileIntervalMs, initialSyncDelayMs: 750 },
 );
 
 // ---------------------------------------------------------------------------
@@ -359,7 +367,7 @@ watcher = new Watcher({
   rpcUrl: config.nano.rpc[0],
   accounts: [],
   sink: accountStateSync,
-  pollIntervalMs: 5000,
+  pollIntervalMs,
 });
 
 // Seed state sync with existing accounts
