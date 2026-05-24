@@ -8,11 +8,6 @@ export interface RuntimeVersion {
   version: string;
 }
 
-export interface SdkVersion {
-  runtimeVersion: string;
-  sdkVersion: string;
-}
-
 export class SystemResource {
   constructor(private client: RaiFlowClient) {}
 

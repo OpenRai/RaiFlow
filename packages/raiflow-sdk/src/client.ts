@@ -83,6 +83,7 @@ export class RaiFlowClient {
       throw new Error(`RaiFlow API error ${res.status}: ${text}`);
     }
     if (res.status === 204) return undefined as T;
-    return res.json() as Promise<T>;
+    const data: unknown = await res.json();
+    return data as T;
   }
 }

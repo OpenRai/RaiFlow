@@ -80,7 +80,7 @@ export class SseConnection {
     const payload = line.slice(6).trim();
     if (!payload) return;
     try {
-      const event = JSON.parse(payload) as AccountEvent;
+      const event = JSON.parse(payload) as unknown as AccountEvent;
       const set = this.listeners.get(event.accountAddress);
       if (set) {
         for (const listener of set) listener(event);
