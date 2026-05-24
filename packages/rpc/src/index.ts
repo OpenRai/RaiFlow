@@ -3,7 +3,6 @@
 import { NanoClient } from '@openrai/nano-core';
 import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock } from '@openrai/model';
-// @ts-ignore
 import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
 
 export interface RpcNodeConfig {

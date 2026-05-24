@@ -3,7 +3,7 @@ import { createRpcPool, createWsClient } from '../index.js';
 
 vi.mock('nano-rspow-node', () => ({
   generateWork: vi.fn().mockResolvedValue('test-work'),
-  WorkType: { Send: 'send', Receive: 'receive' },
+  WorkType: { Send: 'Send', Receive: 'Receive', Epoch1: 'Epoch1', Dev: 'Dev' },
 }));
 
 describe('@openrai/rpc nano-core defaults', () => {
@@ -43,14 +43,13 @@ describe('@openrai/rpc workGenerate', () => {
   });
 
   it('workGenerate calls rspow with WorkType.Send and returns work string', async () => {
-    // @ts-ignore
     const { generateWork } = await import('nano-rspow-node');
     const pool = createRpcPool([]);
     const client = pool.getClient();
 
     const result = await client.workGenerate('abc123');
 
-    expect(generateWork).toHaveBeenCalledWith('abc123', 'send');
+    expect(generateWork).toHaveBeenCalledWith('abc123', 'Send');
     expect(result).toEqual({ work: 'test-work' });
   });
 });

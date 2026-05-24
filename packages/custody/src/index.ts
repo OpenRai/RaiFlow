@@ -8,7 +8,6 @@ import {
   deriveSecretKey,
   signBlock as signBlockRaw,
 } from 'nanocurrency';
-// @ts-ignore
 import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
 
 export type DerivationPath = { index: number };
