@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { NanoRpcClient } from '../rpc.js';
 import { NanoWebSocketClient } from '../websocket.js';
+
+vi.mock('nano-rspow-node', () => ({
+  generateWork: vi.fn().mockResolvedValue('test-work'),
+  WorkType: { Send: 'Send', Receive: 'Receive', Epoch1: 'Epoch1', Dev: 'Dev' },
+}));
 
 describe('@openrai/watcher nano-core defaults', () => {
   it('constructs RPC client without an explicit URL and uses nano-core defaults', () => {

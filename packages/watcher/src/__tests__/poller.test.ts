@@ -3,6 +3,11 @@ import { NanoPoller } from '../poller.js';
 import type { NanoRpcClient } from '../rpc.js';
 import type { WatcherSink } from '@openrai/model';
 
+vi.mock('nano-rspow-node', () => ({
+  generateWork: vi.fn().mockResolvedValue('test-work'),
+  WorkType: { Send: 'Send', Receive: 'Receive', Epoch1: 'Epoch1', Dev: 'Dev' },
+}));
+
 describe('NanoPoller', () => {
   const receivableVariants = [
     {
