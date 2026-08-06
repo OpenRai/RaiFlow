@@ -47,6 +47,8 @@ export interface MigrationRunner {
   getApplied(): string[];
 }
 
+export const SCHEMA_VERSION = 3;
+
 export function createDatabase(path: string): Database {
   const db = new BetterSqlite3(path);
   db.pragma('journal_mode = WAL');
@@ -55,6 +57,33 @@ export function createDatabase(path: string): Database {
 }
 
 export function createMigrationRunner(db: Database): MigrationRunner {
+  const tables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+  `).all() as Array<{ name: string }>;
+  const hasSchemaMetadata = tables.some((table) => table.name === 'schema_metadata');
+  if (tables.length > 0 && !hasSchemaMetadata) {
+    throw new Error(
+      'This database predates RaiFlow v3 and cannot be upgraded in place. Start with a new v3 database.',
+    );
+  }
+  if (hasSchemaMetadata) {
+    const row = db.prepare('SELECT version FROM schema_metadata WHERE id = 1').get() as { version: number } | undefined;
+    if (!row || row.version !== SCHEMA_VERSION) {
+      throw new Error(`Unsupported RaiFlow schema version: ${row?.version ?? 'missing'}; expected ${SCHEMA_VERSION}`);
+    }
+  } else {
+    db.exec(`
+      CREATE TABLE schema_metadata (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.prepare('INSERT INTO schema_metadata (id, version, created_at) VALUES (1, ?, ?)')
+      .run(SCHEMA_VERSION, new Date().toISOString());
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS migrations (
       id INTEGER PRIMARY KEY,
@@ -99,6 +128,7 @@ export function createMigrationRunner(db: Database): MigrationRunner {
 
           CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
+            account_key TEXT UNIQUE,
             type TEXT NOT NULL,
             address TEXT NOT NULL UNIQUE,
             label TEXT,
@@ -125,7 +155,8 @@ export function createMigrationRunner(db: Database): MigrationRunner {
           );
 
           CREATE TABLE IF NOT EXISTS events (
-            id TEXT PRIMARY KEY,
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
             type TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             resource_id TEXT NOT NULL,
@@ -182,8 +213,8 @@ export function createMigrationRunner(db: Database): MigrationRunner {
             PRIMARY KEY (account_id, block_hash)
           );
 
-          CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_type, resource_id, id);
-          CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, id);
+          CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_type, resource_id, sequence);
+          CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, sequence);
           CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
           CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id, id);
           CREATE INDEX IF NOT EXISTS idx_payments_block_hash ON payments(block_hash);
@@ -303,19 +334,20 @@ export function createMigrationRunner(db: Database): MigrationRunner {
   ];
 
   return {
-    up(): Promise<void> {
+    async up(): Promise<void> {
       for (const m of migrations) {
         const row = db.prepare('SELECT id FROM migrations WHERE id = ?').get(m.id);
         if (!row) {
-          m.up(db);
-          db.prepare('INSERT INTO migrations (id, name, applied_at) VALUES (?, ?, ?)').run(
-            m.id,
-            m.name,
-            new Date().toISOString(),
-          );
+          db.transaction(() => {
+            m.up(db);
+            db.prepare('INSERT INTO migrations (id, name, applied_at) VALUES (?, ?, ?)').run(
+              m.id,
+              m.name,
+              new Date().toISOString(),
+            );
+          })();
         }
       }
-      return Promise.resolve();
     },
     getApplied(): string[] {
       const rows = db.prepare('SELECT name FROM migrations ORDER BY id').all() as { name: string }[];
@@ -665,6 +697,7 @@ export function createSqlitePaymentStore(db: Database): PaymentStore {
 function rowToAccount(row: Record<string, unknown>): Account {
   return {
     id: row.id as string,
+    accountKey: row.account_key as string | null,
     type: row.type as AccountType,
     address: row.address as string,
     label: row.label as string | null,
@@ -682,10 +715,11 @@ export function createSqliteAccountStore(db: Database): AccountStore {
   return {
     async create(account: Account): Promise<Account> {
       db.prepare(`
-        INSERT INTO accounts (id, type, address, label, balance_raw, pending_raw, frontier, representative, derivation_index, created_at, updated_at)
-        VALUES (@id, @type, @address, @label, @balance_raw, @pending_raw, @frontier, @representative, @derivation_index, @created_at, @updated_at)
+        INSERT INTO accounts (id, account_key, type, address, label, balance_raw, pending_raw, frontier, representative, derivation_index, created_at, updated_at)
+        VALUES (@id, @account_key, @type, @address, @label, @balance_raw, @pending_raw, @frontier, @representative, @derivation_index, @created_at, @updated_at)
       `).run({
         id: account.id,
+        account_key: account.accountKey,
         type: account.type,
         address: account.address,
         label: account.label,
@@ -725,12 +759,13 @@ export function createSqliteAccountStore(db: Database): AccountStore {
       const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
       db.prepare(`
         UPDATE accounts SET
-          type = @type, address = @address, label = @label, balance_raw = @balance_raw,
+          account_key = @account_key, type = @type, address = @address, label = @label, balance_raw = @balance_raw,
           pending_raw = @pending_raw, frontier = @frontier, representative = @representative,
           derivation_index = @derivation_index, created_at = @created_at, updated_at = @updated_at
         WHERE id = @id
       `).run({
         id: updated.id,
+        account_key: updated.accountKey,
         type: updated.type,
         address: updated.address,
         label: updated.label,
@@ -743,6 +778,11 @@ export function createSqliteAccountStore(db: Database): AccountStore {
         updated_at: updated.updatedAt,
       });
       return updated;
+    },
+
+    async delete(id: string): Promise<boolean> {
+      const result = db.prepare('DELETE FROM accounts WHERE id = ?').run(id);
+      return result.changes > 0;
     },
   };
 }
@@ -837,6 +877,7 @@ export function createSqliteSendStore(db: Database): SendStore {
 
 function rowToEvent(row: Record<string, unknown>): RaiFlowEvent {
   return {
+    sequence: row.sequence as number,
     id: row.id as string,
     type: row.type as string,
     timestamp: row.timestamp as string,
@@ -868,8 +909,11 @@ export function createSqliteEventStore(db: Database): EventStore {
       const params: unknown[] = [];
 
       if (options?.after) {
-        conditions.push('id > ?');
-        params.push(options.after);
+        if (!/^\d+$/.test(options.after)) {
+          throw new Error('event cursor must be a positive integer sequence');
+        }
+        conditions.push('sequence > ?');
+        params.push(Number(options.after));
       }
       if (options?.type) {
         conditions.push('type = ?');
@@ -885,7 +929,7 @@ export function createSqliteEventStore(db: Database): EventStore {
       }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-      const sql = `SELECT * FROM events ${where} ORDER BY id ASC LIMIT ${limit + 1}`;
+      const sql = `SELECT * FROM events ${where} ORDER BY sequence ASC LIMIT ${limit + 1}`;
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
       return rows.slice(0, limit).map(rowToEvent);
     },

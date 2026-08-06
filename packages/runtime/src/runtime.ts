@@ -32,10 +32,16 @@ import type {
   ReceiveTask,
   ReceiveTaskStatus,
 } from '@openrai/model';
-import { RaiFlowError, deriveInvoiceIndex } from '@openrai/model';
+import {
+  RaiFlowError,
+  deriveInvoiceIndex,
+  deriveManagedIndex,
+  INVOICE_DERIVATION_START,
+  MANAGED_DERIVATION_START,
+} from '@openrai/model';
 import { NanoAddress } from '@openrai/nano-core';
 import type { CustodyEngine } from '@openrai/custody';
-import type { RpcPool } from '@openrai/rpc';
+import type { RpcPool, RpcPoolState } from '@openrai/rpc';
 import type { RunMode } from '@openrai/config';
 import {
   createSqliteInvoiceAccountStore,
@@ -148,6 +154,9 @@ const IDEMPOTENCY_SCOPE = {
   invoiceCreate: 'invoice.create',
   invoiceCancel: 'invoice.cancel',
   accountCreateManaged: 'account.create.managed',
+  accountCreateWatched: 'account.create.watched',
+  accountUpdate: 'account.update',
+  accountDelete: 'account.delete',
   sendQueue: 'send.queue',
   webhookCreate: 'webhook.create',
   webhookDelete: 'webhook.delete',
@@ -321,6 +330,8 @@ export class Runtime implements WatcherSink {
   private receiveWorkerInterval?: ReturnType<typeof setInterval>;
   private readonly listeners = new Map<string, Set<EventListener>>();
   private readonly sendOrchestrator?: SendOrchestrator;
+  private readonly processingConfirmedBlocks = new Set<string>();
+  private readonly processedConfirmedBlocks = new Set<string>();
   watcher?: WatcherLike;
 
   constructor(config: RuntimeConfig = {}) {
@@ -341,8 +352,8 @@ export class Runtime implements WatcherSink {
     this.custodyEngine = config.custodyEngine;
     this.rpcPool = config.rpcPool;
     this.watcher = config.watcher;
-    this.invoiceDerivationStartIndex = config.derivationStartIndex?.invoice ?? 0;
-    this.managedDerivationStartIndex = config.derivationStartIndex?.managed ?? 1_000_000;
+    this.invoiceDerivationStartIndex = config.derivationStartIndex?.invoice ?? INVOICE_DERIVATION_START;
+    this.managedDerivationStartIndex = config.derivationStartIndex?.managed ?? MANAGED_DERIVATION_START;
 
     if (this.invoiceDerivationStartIndex === this.managedDerivationStartIndex) {
       throw new Error('Invoice and managed derivation start indices must not overlap');
@@ -668,6 +679,7 @@ export class Runtime implements WatcherSink {
   }
 
   async createManagedAccount(params: {
+    accountKey: string;
     label?: string;
     representative?: string;
     idempotencyKey?: string;
@@ -683,6 +695,9 @@ export class Runtime implements WatcherSink {
     if (!this.accountStore) {
       throw RaiFlowError.badRequest( 'Account store not configured');
     }
+    if (!params.accountKey) {
+      throw RaiFlowError.badRequest('accountKey is required for managed accounts');
+    }
 
     if (params.idempotencyKey) {
       const replay = await this.idempotencyStore.get(
@@ -695,11 +710,18 @@ export class Runtime implements WatcherSink {
       }
     }
 
-    const nextIndex = await this.getNextManagedDerivationIndex();
+    const managedAccounts = await this.accountStore.list({ type: 'managed' });
+    const existingByKey = managedAccounts.find((account) => account.accountKey === params.accountKey);
+    if (existingByKey) return existingByKey;
+    const nextIndex = deriveManagedIndex(params.accountKey);
+    if (managedAccounts.some((account) => account.derivationIndex === nextIndex)) {
+      throw RaiFlowError.conflict(`Managed account derivation collision at index ${nextIndex}`);
+    }
     const address = this.custodyEngine.deriveManagedAccount({ index: nextIndex });
 
     const account: Account = {
       id: randomUUID(),
+      accountKey: params.accountKey,
       type: 'managed',
       address,
       label: params.label ?? null,
@@ -727,6 +749,7 @@ export class Runtime implements WatcherSink {
   async createWatchedAccount(params: {
     address: string;
     label?: string;
+    idempotencyKey: string;
   }): Promise<Account> {
     if (!this.accountStore) {
       throw RaiFlowError.badRequest( 'Account store not configured');
@@ -738,6 +761,15 @@ export class Runtime implements WatcherSink {
       throw RaiFlowError.badRequest( `Invalid Nano address: ${params.address}`);
     }
 
+    const replay = await this.idempotencyStore.get(
+      IDEMPOTENCY_SCOPE.accountCreateWatched,
+      params.idempotencyKey,
+    );
+    if (replay) {
+      const replayed = await this.accountStore.get(replay.resourceId);
+      if (replayed) return replayed;
+    }
+
     const existing = await this.accountStore.getByAddress(params.address);
     if (existing) {
       return existing;
@@ -745,6 +777,7 @@ export class Runtime implements WatcherSink {
 
     const account: Account = {
       id: randomUUID(),
+      accountKey: null,
       type: 'watched',
       address: params.address,
       label: params.label ?? null,
@@ -757,7 +790,14 @@ export class Runtime implements WatcherSink {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.persistAccount(account);
+    const created = await this.persistAccount(account);
+    await this.idempotencyStore.put(
+      IDEMPOTENCY_SCOPE.accountCreateWatched,
+      params.idempotencyKey,
+      'account',
+      created.id,
+    );
+    return created;
   }
 
   async listAccounts(filter?: { type?: AccountType }): Promise<Account[]> {
@@ -774,16 +814,59 @@ export class Runtime implements WatcherSink {
     return account;
   }
 
-  async updateAccount(id: string, patch: { label?: string; representative?: string }): Promise<Account> {
+  async updateAccount(id: string, patch: { label?: string; representative?: string }, idempotencyKey: string): Promise<Account> {
     if (!this.accountStore) {
       throw RaiFlowError.badRequest( 'Account store not configured');
+    }
+    const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.accountUpdate, idempotencyKey);
+    if (replay) {
+      if (replay.resourceId !== id) throw RaiFlowError.conflict('Idempotency key belongs to another account');
+      const replayed = await this.accountStore.get(id);
+      if (replayed) return replayed;
     }
     const existing = await this.accountStore.get(id);
     if (!existing) {
       throw RaiFlowError.notFound('Account', id);
     }
     const updated = await this.accountStore.update(id, patch);
+    await this.idempotencyStore.put(IDEMPOTENCY_SCOPE.accountUpdate, idempotencyKey, 'account', id);
     return updated;
+  }
+
+  async deleteAccount(id: string, idempotencyKey: string): Promise<Account | undefined> {
+    if (!this.accountStore) {
+      throw RaiFlowError.badRequest('Account store not configured');
+    }
+    const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.accountDelete, idempotencyKey);
+    if (replay) {
+      if (replay.resourceId !== id) throw RaiFlowError.conflict('Idempotency key belongs to another account');
+      return undefined;
+    }
+    const account = await this.accountStore.get(id);
+    if (!account) throw RaiFlowError.notFound('Account', id);
+    if (BigInt(account.balanceRaw) !== 0n || BigInt(account.pendingRaw) !== 0n) {
+      throw RaiFlowError.conflict('Account must have zero balance and zero pending balance before removal');
+    }
+    if (this.sendStore) {
+      const sends = await this.sendStore.listByAccount(id);
+      if (sends.length > 0) {
+        throw RaiFlowError.conflict('Account has send history and cannot be removed without losing audit records');
+      }
+    }
+
+    const deleted = await this.accountStore.delete(id);
+    if (!deleted) throw RaiFlowError.notFound('Account', id);
+    this.watcher?.removeAccount(account.address);
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'account.removed',
+      timestamp: new Date().toISOString(),
+      data: { account },
+      resourceId: account.id,
+      resourceType: 'account',
+    });
+    await this.idempotencyStore.put(IDEMPOTENCY_SCOPE.accountDelete, idempotencyKey, 'account', id);
+    return account;
   }
 
   // -------------------------------------------------------------------------
@@ -908,7 +991,8 @@ export class Runtime implements WatcherSink {
     });
     const hasNext = rows.length > limit;
     const data = hasNext ? rows.slice(0, limit) : rows;
-    const nextCursor = hasNext ? data[data.length - 1]?.id ?? null : null;
+    const lastSequence = data[data.length - 1]?.sequence;
+    const nextCursor = hasNext && lastSequence !== undefined ? String(lastSequence) : null;
     return { data, nextCursor };
   }
 
@@ -975,7 +1059,32 @@ export class Runtime implements WatcherSink {
         result.hash,
       );
     }
+    await this.emitV2Event({
+      id: randomUUID(),
+      type: 'block.published',
+      timestamp: new Date().toISOString(),
+      data: { blockHash: result.hash },
+      resourceId: result.hash,
+      resourceType: 'block',
+    });
     return result;
+  }
+
+  async recordRpcState(state: RpcPoolState): Promise<void> {
+    const activeUrl = state.activeNode?.rpc[0];
+    const previousUrl = state.previousNode?.rpc[0];
+    const type = `rpc.${state.status}` as RaiFlowEventType;
+    const data = state.status === 'failover'
+      ? { fromUrl: previousUrl ?? '', toUrl: activeUrl ?? '' }
+      : { nodeUrl: activeUrl ?? previousUrl ?? '' };
+    await this.emitV2Event({
+      id: randomUUID(),
+      type,
+      timestamp: new Date().toISOString(),
+      data,
+      resourceId: activeUrl ?? previousUrl ?? 'rpc',
+      resourceType: 'rpc',
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1000,6 +1109,19 @@ export class Runtime implements WatcherSink {
   // -------------------------------------------------------------------------
 
   async handleConfirmedBlock(block: ConfirmedBlock): Promise<void> {
+    if (this.processedConfirmedBlocks.has(block.blockHash) || this.processingConfirmedBlocks.has(block.blockHash)) {
+      return;
+    }
+    this.processingConfirmedBlocks.add(block.blockHash);
+    try {
+      await this.ingestConfirmedBlock(block);
+      this.processedConfirmedBlocks.add(block.blockHash);
+    } finally {
+      this.processingConfirmedBlocks.delete(block.blockHash);
+    }
+  }
+
+  private async ingestConfirmedBlock(block: ConfirmedBlock): Promise<void> {
     // --- Send confirmation tracking ---
     if (this.sendStore) {
       const send = await this.sendStore.getByBlockHash(block.blockHash);

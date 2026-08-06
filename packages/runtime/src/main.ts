@@ -12,8 +12,14 @@ import { readFileSync } from 'node:fs';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
 import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, createSqliteInvoiceAccountStore, createSqliteReceiveTaskStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
+import { INVOICE_DERIVATION_START, MANAGED_DERIVATION_START } from '@openrai/model';
 import { createRpcPool } from '@openrai/rpc';
-import { createCustodyEngine } from '@openrai/custody';
+import {
+  createOwsCustodyProvider,
+  createProviderCustodyEngine,
+  type CustodyEngine,
+  type OwsBindings,
+} from '@openrai/custody';
 import { Watcher } from '@openrai/watcher';
 import { createHandler } from './handler.js';
 import { Runtime } from './runtime.js';
@@ -59,8 +65,8 @@ if (!config.daemon.mode) {
   console.error(
     [
       '[raiflow] RAIFLOW_MODE is required. Set it to "custodial" or "non-custodial".',
-      '  custodial:      RaiFlow manages keys, derives accounts, signs blocks, generates PoW.',
-      '                  Requires RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP.',
+      '  custodial:      RaiFlow asks OWS to derive accounts and sign blocks, then generates PoW.',
+      '                  Requires custody.wallet and custody.representative.',
       '  non-custodial:  RaiFlow acts as a relay and monitor. All signing happens client-side.',
       '                  Some features (invoices, managed accounts, sends) are unavailable.',
     ].join('\n'),
@@ -86,9 +92,9 @@ try {
 }
 
 if (mode === 'custodial') {
-  if (!config.custody?.seed || !config.custody?.representative) {
+  if (!config.custody?.wallet || !config.custody?.representative) {
     console.error(
-      '[raiflow] custodial mode requires both RAIFLOW_CUSTODY_SEED and RAIFLOW_CUSTODY_REP (or custody.seed/representative in raiflow.yml).',
+      '[raiflow] custodial mode requires custody.wallet and custody.representative in raiflow.yml.',
     );
     process.exit(1);
   }
@@ -198,9 +204,6 @@ const rpcUrls = config.nano.rpc;
 if (rpcUrls.length === 0) {
   logger.warn('no nano RPC endpoints configured — runtime will operate in degraded mode');
 } else {
-  let backoffMs = 1000;
-  const maxBackoffMs = 60_000;
-
   while (true) {
     const results = await Promise.allSettled(
       rpcUrls.map(async (url) => {
@@ -273,13 +276,10 @@ if (rpcUrls.length === 0) {
       logger.error(`RPC endpoint unreachable: ${rpcUrls[i]} — ${reason}`);
     }
 
-    logger.error(
-      `FATAL: all configured Nano RPC endpoints are unreachable. ` +
-      `The runtime cannot operate without RPC access. Retrying in ${backoffMs / 1000}s...`,
+    logger.warn(
+      'all configured Nano RPC endpoints are currently unreachable; starting in not-ready mode so health and diagnostics remain available',
     );
-
-    await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
+    break;
   }
 }
 
@@ -288,23 +288,63 @@ if (rpcUrls.length === 0) {
 // ---------------------------------------------------------------------------
 
 const DERIVATION_START_INDEX = {
-  invoice: 0,
-  managed: 1_000_000,
+  invoice: INVOICE_DERIVATION_START,
+  managed: MANAGED_DERIVATION_START,
 };
 if (DERIVATION_START_INDEX.invoice === DERIVATION_START_INDEX.managed) {
   logger.error('invoice and managed derivation namespaces overlap');
   process.exit(1);
 }
 
-let custodyEngine: ReturnType<typeof createCustodyEngine> | undefined;
+let custodyEngine: CustodyEngine | undefined;
 if (config.custody) {
-  custodyEngine = createCustodyEngine({
-    seed: config.custody.seed,
-    representative: config.custody.representative,
-    derivationStartIndex: DERIVATION_START_INDEX,
-  });
-  custodyEngine.loadSeed(config.custody.seed);
-  logger.info('custody engine initialized');
+  try {
+    // These packages are loaded only in custodial mode. Keeping the boundary
+    // structural makes the runtime testable with an in-memory provider while
+    // production key operations stay inside OWS.
+    const owsModuleName = '@open-wallet-standard/core';
+    const nanoCoreModuleName = '@openrai/nano-core';
+    const [ows, nanoCore] = await Promise.all([
+      import(owsModuleName),
+      import(nanoCoreModuleName),
+    ]);
+    const bindings = ows as unknown as Partial<OwsBindings>;
+    if (
+      typeof bindings.deriveWalletAddress !== 'function'
+      || typeof bindings.signTransaction !== 'function'
+    ) {
+      throw new Error('installed OWS binding does not provide indexed wallet derivation and signing');
+    }
+    if (
+      typeof nanoCore.stateBlockSigningPayload !== 'function'
+      || typeof nanoCore.hashStateBlock !== 'function'
+    ) {
+      throw new Error('installed @openrai/nano-core does not provide canonical state-block encoding');
+    }
+
+    const provider = createOwsCustodyProvider({
+      bindings: bindings as OwsBindings,
+      wallet: config.custody.wallet,
+      credential: config.custody.credential,
+      vaultPath: config.custody.vaultPath,
+    });
+    const readiness = await provider.readiness();
+    if (!readiness.ready) {
+      throw new Error(readiness.error ?? 'OWS custody provider unavailable');
+    }
+    custodyEngine = createProviderCustodyEngine({
+      provider,
+      representative: config.custody.representative,
+      codec: {
+        stateBlockSigningPayload: nanoCore.stateBlockSigningPayload,
+        hashStateBlock: nanoCore.hashStateBlock,
+      },
+    });
+    logger.info('OWS custody engine initialized', `wallet=${config.custody.wallet}`);
+  } catch (err) {
+    logger.error('failed to initialize OWS custody:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +367,12 @@ const runtime = new Runtime({
   mode,
   idempotencyStore,
   derivationStartIndex: DERIVATION_START_INDEX,
+});
+
+rpcPool.onStateChange((state) => {
+  void runtime.recordRpcState(state).catch((error) => {
+    logger.error('failed to persist RPC state event:', error instanceof Error ? error.message : String(error));
+  });
 });
 
 // ---------------------------------------------------------------------------

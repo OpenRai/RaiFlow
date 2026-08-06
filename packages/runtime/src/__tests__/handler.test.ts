@@ -41,7 +41,7 @@ describe('auth middleware', () => {
     const html = await res.text();
     expect(html).toContain('RaiFlow');
     expect(html).toContain('/dashboard');
-    expect(html).toContain('/api/health');
+    expect(html).toContain('/health/ready');
   });
 
   it('returns 401 for missing Authorization header when apiKey is set', async () => {
@@ -112,7 +112,7 @@ describe('GET / (wayfinder)', () => {
     const html = await res.text();
     expect(html).toContain('RaiFlow');
     expect(html).toContain('href="/dashboard"');
-    expect(html).toContain('href="/api/health"');
+    expect(html).toContain('href="/health/ready"');
   });
 });
 
@@ -172,6 +172,53 @@ describe('GET /api/health', () => {
 
     expect(res.status).toBe(200);
     expect(await parseJson(res)).toEqual({ status: 'ok' });
+  });
+});
+
+describe('v3 routing and diagnostics', () => {
+  it('reports readiness from a live RPC probe, not configured URLs alone', async () => {
+    const healthCheck = vi.fn().mockResolvedValue(undefined);
+    const runtime = new Runtime({
+      rpcPool: { getClient: () => ({ healthCheck }) } as never,
+    });
+    const handler = createHandler(runtime, createTestConfig({ apiKey: undefined }));
+
+    const ready = await handler(new Request('http://localhost/health/ready'));
+    expect(ready.status).toBe(200);
+    healthCheck.mockRejectedValueOnce(new Error('rpc unavailable'));
+    const unavailable = await handler(new Request('http://localhost/health/ready'));
+    expect(unavailable.status).toBe(503);
+  });
+
+  it('does not expose the legacy /api prefix', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig({ apiKey: undefined }));
+    const res = await handler(new Request('http://localhost/api/invoices'));
+    expect(res.status).toBe(404);
+  });
+
+  it('requires an idempotency header for durable mutations', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig({ apiKey: undefined }));
+    const res = await handler(new Request('http://localhost/v1/invoices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountKey: 'account', expectedAmountRaw: '1' }),
+    }));
+    expect(res.status).toBe(400);
+    expect(await parseJson(res)).toMatchObject({ error: { code: 'bad_request' } });
+  });
+
+  it('preserves or creates a request id on every response', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig({ apiKey: undefined }));
+    const supplied = await handler(new Request('http://localhost/health/live', {
+      headers: { 'X-Request-Id': 'request-123' },
+    }));
+    expect(supplied.headers.get('X-Request-Id')).toBe('request-123');
+
+    const generated = await handler(new Request('http://localhost/not-found'));
+    expect(generated.headers.get('X-Request-Id')).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
 
@@ -693,6 +740,7 @@ describe('GET /api/accounts/:id/receivable', () => {
 
     vi.spyOn(runtime, 'getAccount').mockResolvedValue({
       id: FAKE_ACCOUNT_ID,
+      accountKey: null,
       type: 'watched',
       address: FAKE_ADDRESS,
       label: null,

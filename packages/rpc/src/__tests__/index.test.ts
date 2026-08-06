@@ -138,3 +138,31 @@ describe('@openrai/rpc accountsReceivable', () => {
     });
   });
 });
+
+describe('@openrai/rpc process', () => {
+  it('rejects Nano RPC application errors and malformed success responses', async () => {
+    const client = createRpcPool([]).getClient() as any;
+    client.rpcCall = vi.fn().mockResolvedValueOnce({ error: 'Old block' });
+    await expect(client.process('{}')).rejects.toThrow('Old block');
+
+    client.rpcCall = vi.fn().mockResolvedValueOnce({});
+    await expect(client.process('{}')).rejects.toThrow('did not include a block hash');
+  });
+
+  it('returns a validated process hash', async () => {
+    const client = createRpcPool([]).getClient() as any;
+    client.rpcCall = vi.fn().mockResolvedValue({ hash: 'ABC' });
+    await expect(client.process('{}')).resolves.toEqual({ hash: 'ABC' });
+  });
+});
+
+describe('@openrai/rpc healthCheck', () => {
+  it('requires a successful version response with a node vendor', async () => {
+    const client = createRpcPool([]).getClient() as any;
+    client.rpcCall = vi.fn().mockResolvedValueOnce({ node_vendor: 'Nano V28' });
+    await expect(client.healthCheck()).resolves.toBeUndefined();
+
+    client.rpcCall = vi.fn().mockResolvedValueOnce({});
+    await expect(client.healthCheck()).rejects.toThrow('node_vendor');
+  });
+});

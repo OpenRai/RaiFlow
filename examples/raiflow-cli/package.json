@@ -1,6 +1,6 @@
 {
   "name": "raiflow-cli",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "RaiFlow CLI for querying runtime status",
   "type": "module",
   "bin": {

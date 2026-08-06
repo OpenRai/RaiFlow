@@ -1,7 +1,7 @@
 // @openrai/raiflow-sdk — SDK client tests
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RaiFlowClient } from '../client.js';
+import { RaiFlowApiError, RaiFlowClient } from '../client.js';
 import type { Invoice, Payment, RaiFlowEvent, WebhookEndpoint } from '@openrai/model';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +70,18 @@ const TEST_ENDPOINT: WebhookEndpoint = {
 // ---------------------------------------------------------------------------
 
 describe('RaiFlowClient', () => {
+  it('throws a typed error with code and request id', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: 'conflict', message: 'already exists' } }),
+      { status: 409, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'req-1' } },
+    )));
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000', apiKey: 'key' });
+
+    const error = await client.invoices.get('invoice-1').catch((caught) => caught);
+    expect(error).toBeInstanceOf(RaiFlowApiError);
+    expect(error).toMatchObject({ status: 409, code: 'conflict', requestId: 'req-1' });
+  });
+
   describe('initialization', () => {
     it('creates client with baseUrl', () => {
       const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
@@ -102,7 +114,7 @@ describe('RaiFlowClient', () => {
     });
     await client.invoices.create({
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
-    });
+    }, 'custom-path-create');
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     expect(call[0]).toBe('http://localhost:3000/v2/invoices');
@@ -122,17 +134,17 @@ describe('InvoicesResource', () => {
     vi.stubGlobal('fetch', mockFetch);
   });
 
-  it('create sends POST to /api/invoices', async () => {
+  it('create sends POST to /v1/invoices', async () => {
     mockFetch.mockResolvedValueOnce(mockResponse(TEST_INVOICE, { status: 201 }));
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
     const invoice = await client.invoices.create({
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
-    });
+    }, 'create-invoice');
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices');
     expect(call[1]?.method).toBe('POST');
     expect(invoice).toEqual(TEST_INVOICE);
   });
@@ -159,7 +171,7 @@ describe('InvoicesResource', () => {
     await client.invoices.create({
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
       completionPolicy: { type: 'exact' },
-    });
+    }, 'create-exact-invoice');
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     const body = JSON.parse(call[1]?.body as string);
@@ -174,7 +186,7 @@ describe('InvoicesResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices/inv-1');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1');
     expect(invoice).toEqual(TEST_INVOICE);
   });
 
@@ -186,7 +198,7 @@ describe('InvoicesResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices');
     expect(result.data).toHaveLength(1);
   });
 
@@ -197,18 +209,18 @@ describe('InvoicesResource', () => {
     await client.invoices.list({ status: 'open' });
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices?status=open');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices?status=open');
   });
 
   it('cancel sends POST to /api/invoices/:id/cancel', async () => {
     mockFetch.mockResolvedValueOnce(mockResponse({ ...TEST_INVOICE, status: 'canceled' }));
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
-    const invoice = await client.invoices.cancel('inv-1');
+    const invoice = await client.invoices.cancel('inv-1', 'cancel-invoice');
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices/inv-1/cancel');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/cancel');
     expect(call[1]?.method).toBe('POST');
     expect(invoice.status).toBe('canceled');
   });
@@ -221,7 +233,7 @@ describe('InvoicesResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices/inv-1/payments');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/payments');
     expect(result.data).toHaveLength(1);
   });
 
@@ -233,7 +245,7 @@ describe('InvoicesResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices/inv-1/events');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/events');
     expect(result.data).toHaveLength(1);
   });
 
@@ -244,7 +256,7 @@ describe('InvoicesResource', () => {
     await client.invoices.listEvents('inv-1', { after: 'evt-1' });
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/invoices/inv-1/events?after=evt-1');
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/events?after=evt-1');
   });
 
   it('throws on non-ok response', async () => {
@@ -263,7 +275,7 @@ describe('InvoicesResource', () => {
     });
     await client.invoices.create({
       expectedAmountRaw: TEST_INVOICE.expectedAmountRaw,
-    });
+    }, 'create-with-auth');
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     expect((call[1]?.headers as Record<string, string>)['Authorization']).toBe('Bearer secret-key');
@@ -282,18 +294,18 @@ describe('WebhooksResource', () => {
     vi.stubGlobal('fetch', mockFetch);
   });
 
-  it('create sends POST to /api/webhooks', async () => {
+  it('create sends POST to /v1/webhooks', async () => {
     mockFetch.mockResolvedValueOnce(mockResponse(TEST_ENDPOINT, { status: 201 }));
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
     const endpoint = await client.webhooks.create({
       url: 'https://example.com/hook',
       eventTypes: ['invoice.created'],
-    });
+    }, 'create-webhook');
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/webhooks');
+    expect(call[0]).toBe('http://localhost:3000/v1/webhooks');
     expect(call[1]?.method).toBe('POST');
     expect(endpoint).toEqual(TEST_ENDPOINT);
   });
@@ -306,7 +318,7 @@ describe('WebhooksResource', () => {
       url: 'https://example.com/hook',
       eventTypes: ['invoice.created'],
       secret: 'my-secret',
-    });
+    }, 'create-webhook-with-secret');
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     const body = JSON.parse(call[1]?.body as string);
@@ -321,19 +333,19 @@ describe('WebhooksResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/webhooks');
+    expect(call[0]).toBe('http://localhost:3000/v1/webhooks');
     expect(result.data).toHaveLength(1);
   });
 
-  it('delete sends DELETE to /api/webhooks/:id', async () => {
+  it('delete sends DELETE to /v1/webhooks/:id', async () => {
     mockFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
-    await client.webhooks.delete('wh-1');
+    await client.webhooks.delete('wh-1', 'delete-webhook');
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/webhooks/wh-1');
+    expect(call[0]).toBe('http://localhost:3000/v1/webhooks/wh-1');
     expect(call[1]?.method).toBe('DELETE');
   });
 });
@@ -358,7 +370,7 @@ describe('SystemResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/health');
+    expect(call[0]).toBe('http://localhost:3000/health/live');
     expect(call[1]?.method).toBe('GET');
     expect(result.status).toBe('ok');
   });
@@ -371,8 +383,22 @@ describe('SystemResource', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/api/version');
+    expect(call[0]).toBe('http://localhost:3000/v1/version');
     expect(call[1]?.method).toBe('GET');
     expect(result.version).toBe('v1.2.3');
+  });
+});
+
+describe('EventsResource', () => {
+  it('polls the global sequence cursor endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ data: [], nextCursor: null }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000', apiKey: 'key' });
+
+    await client.events.list({ after: '41', type: 'send.confirmed', limit: 50 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/v1/events?after=41&type=send.confirmed&limit=50',
+    );
   });
 });

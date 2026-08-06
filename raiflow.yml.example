@@ -35,5 +35,8 @@ logging:
 
 # Required for custodial mode:
 # custody:
-#   seed: "env:RAIFLOW_CUSTODY_SEED"
+#   provider: "ows"
+#   wallet: "env:RAIFLOW_OWS_WALLET"
+#   credential: "env:RAIFLOW_OWS_CREDENTIAL"
+#   vaultPath: "env:RAIFLOW_OWS_VAULT_PATH"
 #   representative: "env:RAIFLOW_CUSTODY_REP"

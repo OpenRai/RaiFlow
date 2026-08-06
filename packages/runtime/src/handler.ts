@@ -28,6 +28,11 @@ function errorResponse(
   return json({ error: { message, code } }, status);
 }
 
+function withRequestId(response: Response, requestId: string): Response {
+  response.headers.set('X-Request-Id', requestId);
+  return response;
+}
+
 interface ParsedRoute {
   url: URL;
   parts: string[];
@@ -64,6 +69,11 @@ function getPathSegment(
   return parts[index];
 }
 
+function idempotencyKey(req: Request): string | undefined {
+  const value = req.headers.get('Idempotency-Key')?.trim();
+  return value || undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -91,8 +101,11 @@ function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
     return undefined;
   }
 
-  // Exempt health check (GET /api/health) and version (GET /api/version)
-  if (method === 'GET' && parts.length === 2 && parts[0] === 'api' && (parts[1] === 'health' || parts[1] === 'version')) {
+  // Health endpoints are intentionally unauthenticated for orchestrator probes.
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && (parts[1] === 'live' || parts[1] === 'ready')) {
+    return undefined;
+  }
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'v1' && parts[1] === 'version') {
     return undefined;
   }
 
@@ -120,14 +133,16 @@ export function createHandler(
   subscriptionManager?: SubscriptionManager,
 ): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
+    const requestId = req.headers.get('x-request-id')?.trim() || randomUUID();
     try {
       const authFailure = checkAuth(req, config);
-      if (authFailure) return authFailure;
+      if (authFailure) return withRequestId(authFailure, requestId);
 
-      return await route(req, runtime, config, version, accountStateSync, subscriptionManager);
+      const response = await route(req, runtime, config, version, accountStateSync, subscriptionManager);
+      return withRequestId(response, requestId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
-      return errorResponse(message, 'internal_error', 500);
+      return withRequestId(errorResponse(message, 'internal_error', 500), requestId);
     }
   };
 }
@@ -161,7 +176,7 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
     <p>Nano payment runtime</p>
     <div class="links">
       <a href="/dashboard">Dashboard</a>
-      <a href="/api/health">API Health</a>
+      <a href="/health/ready">API Health</a>
     </div>
   </main>
 </body>
@@ -187,8 +202,26 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
     });
   }
 
-  // /api/* — API routes (strip 'api' prefix)
-  if (parts[0] === 'api') {
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && parts[1] === 'live') {
+    return json({ status: 'ok' });
+  }
+
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && parts[1] === 'ready') {
+    let rpcReady = false;
+    try {
+      const client = runtime.rpcPool?.getClient();
+      if (client) {
+        await client.healthCheck();
+        rpcReady = true;
+      }
+    } catch {
+      rpcReady = false;
+    }
+    return json({ status: rpcReady ? 'ready' : 'not_ready', checks: { rpc: rpcReady } }, rpcReady ? 200 : 503);
+  }
+
+  // v3 exposes one canonical API prefix. Legacy /api routes intentionally 404.
+  if (parts[0] === 'v1') {
     return routeApi(parts.slice(1), url, method, req, runtime, version, accountStateSync, subscriptionManager);
   }
 
@@ -197,12 +230,7 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
 }
 
 async function routeApi(parts: string[], url: URL, method: string, req: Request, runtime: Runtime, version?: string, accountStateSync?: AccountStateSync, subscriptionManager?: SubscriptionManager): Promise<Response> {
-  // GET /api/health
-  if (method === 'GET' && parts.length === 1 && parts[0] === 'health') {
-    return json({ status: 'ok' });
-  }
-
-  // GET /api/version
+  // GET /v1/version
   if (method === 'GET' && parts.length === 1 && parts[0] === 'version') {
     return json({ version: version ?? 'dev' });
   }
@@ -277,7 +305,9 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     // POST /api/accounts
     if (method === 'POST' && parts.length === 1) {
       const body = await req.json() as Record<string, unknown>;
-      const { type, label, representative, address, idempotencyKey } = body;
+      const { type, accountKey, label, representative, address } = body;
+      const mutationKey = idempotencyKey(req);
+      if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
 
       if (type !== 'managed' && type !== 'watched') {
         return errorResponse('Missing or invalid field: type (must be "managed" or "watched")', 'bad_request', 400);
@@ -293,10 +323,14 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
       try {
         if (type === 'managed') {
+          if (typeof accountKey !== 'string' || accountKey.length === 0) {
+            return errorResponse('Missing required field: accountKey', 'bad_request', 400);
+          }
           const account = await runtime.createManagedAccount({
+            accountKey,
             label: typeof label === 'string' ? label : undefined,
             representative: typeof representative === 'string' ? representative : undefined,
-            idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+            idempotencyKey: mutationKey,
           });
           return json(account, 201);
         } else {
@@ -306,6 +340,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           const account = await runtime.createWatchedAccount({
             address,
             label: typeof label === 'string' ? label : undefined,
+            idempotencyKey: mutationKey,
           });
           return json(account, 201);
         }
@@ -340,14 +375,30 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
       // PATCH /api/accounts/:id
       if (method === 'PATCH' && parts.length === 2) {
+        const mutationKey = idempotencyKey(req);
+        if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
         const body = await req.json() as Record<string, unknown>;
         const patch: { label?: string; representative?: string } = {};
         if (typeof body.label === 'string') patch.label = body.label;
         if (typeof body.representative === 'string') patch.representative = body.representative;
 
         try {
-          const account = await runtime.updateAccount(accountId, patch);
+          const account = await runtime.updateAccount(accountId, patch, mutationKey);
           return json(account);
+        } catch (err) {
+          const handled = handleRaiFlowError(err);
+          if (handled) return handled;
+          throw err;
+        }
+      }
+
+      if (method === 'DELETE' && parts.length === 2) {
+        const mutationKey = idempotencyKey(req);
+        if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
+        try {
+          const removed = await runtime.deleteAccount(accountId, mutationKey);
+          if (removed) accountStateSync?.removeAccount(removed.address);
+          return new Response(null, { status: 204 });
         } catch (err) {
           const handled = handleRaiFlowError(err);
           if (handled) return handled;
@@ -404,18 +455,19 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       if (method === 'POST' && parts.length === 3 && parts[2] === 'sends') {
         if (runtime.mode === 'non-custodial') {
           return errorResponse(
-            'Sends are not available in non-custodial mode. Use POST /api/blocks to publish pre-signed blocks.',
+            'Sends are not available in non-custodial mode. Use POST /v1/blocks to publish pre-signed blocks.',
             'not_implemented',
             501,
           );
         }
 
         const body = await req.json() as Record<string, unknown>;
-        const { destination, amountRaw, idempotencyKey } = body;
+        const { destination, amountRaw } = body;
+        const mutationKey = idempotencyKey(req);
 
-        if (typeof destination !== 'string' || typeof amountRaw !== 'string' || typeof idempotencyKey !== 'string') {
+        if (typeof destination !== 'string' || typeof amountRaw !== 'string' || !mutationKey) {
           return errorResponse(
-            'Missing required fields: destination, amountRaw, idempotencyKey',
+            'Missing destination, amountRaw, or Idempotency-Key header',
             'bad_request',
             400,
           );
@@ -426,7 +478,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
             accountId,
             destination,
             amountRaw,
-            idempotencyKey,
+            idempotencyKey: mutationKey,
           });
           return json(send, 201);
         } catch (err) {
@@ -475,9 +527,10 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     if (typeof block !== 'string') {
       return errorResponse('Missing required field: block (JSON string)', 'bad_request', 400);
     }
-    const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+    const mutationKey = idempotencyKey(req);
+    if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
     try {
-      const result = await runtime.publishBlock(block, idempotencyKey);
+      const result = await runtime.publishBlock(block, mutationKey);
       return json(result, 201);
     } catch (err) {
       const handled = handleRaiFlowError(err);
@@ -531,6 +584,45 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
   // ---------------------------------------------------------------------------
   // Invoices
   // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'events' && parts[1] === 'stream' && method === 'GET' && parts.length === 2) {
+    let cursor = url.searchParams.get('after') ?? undefined;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const pump = async (): Promise<void> => {
+          if (stopped) return;
+          try {
+            const page = await runtime.listEvents({ after: cursor, limit: 100 });
+            for (const event of page.data) {
+              controller.enqueue(encoder.encode(`id: ${event.sequence ?? event.id}\ndata: ${JSON.stringify(event)}\n\n`));
+              cursor = event.sequence !== undefined ? String(event.sequence) : event.id;
+            }
+            controller.enqueue(encoder.encode(': keepalive\n\n'));
+          } catch (error) {
+            controller.error(error);
+            stopped = true;
+            return;
+          }
+          timer = setTimeout(() => void pump(), 1_000);
+        };
+        void pump();
+      },
+      cancel() {
+        stopped = true;
+        if (timer !== undefined) clearTimeout(timer);
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    });
+  }
 
   if (parts[0] === 'events' && method === 'GET' && parts.length === 1) {
     const after = url.searchParams.get('after') ?? undefined;
@@ -623,7 +715,8 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         );
       }
 
-      const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+      const mutationKey = idempotencyKey(req);
+      if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
 
       const invoice = await runtime.createInvoice(
         {
@@ -638,7 +731,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
             ? (completionPolicy as { type: 'exact' | 'at_least' })
             : undefined,
         },
-        idempotencyKey,
+        mutationKey,
       );
 
       return json(invoice, 201);
@@ -675,8 +768,9 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       // POST /api/invoices/:id/cancel
       if (method === 'POST' && parts.length === 3 && parts[2] === 'cancel') {
         try {
-          const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
-          const invoice = await runtime.cancelInvoice(invoiceId, idempotencyKey);
+          const mutationKey = idempotencyKey(req);
+          if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
+          const invoice = await runtime.cancelInvoice(invoiceId, mutationKey);
           return json(invoice);
         } catch (err) {
           const handled = handleRaiFlowError(err);
@@ -733,6 +827,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       };
       if (typeof secret === 'string') createInputRaw['secret'] = secret;
       const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+      if (!idempotencyKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
       const endpoint = await runtime.createWebhookEndpoint(
         createInputRaw as unknown as CreateEndpointInput,
         idempotencyKey,
@@ -751,6 +846,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     if (method === 'DELETE' && parts.length === 2) {
       const webhookId = parts[1]!;
       const idempotencyKey = req.headers.get('Idempotency-Key') ?? undefined;
+      if (!idempotencyKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
       const deleted = await runtime.deleteWebhookEndpoint(webhookId, idempotencyKey);
       if (!deleted) {
         return errorResponse(`Webhook not found: ${webhookId}`, 'not_found', 404);

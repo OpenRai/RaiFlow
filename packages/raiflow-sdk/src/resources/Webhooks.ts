@@ -10,19 +10,19 @@ export interface CreateWebhookOptions {
 export class WebhooksResource {
   constructor(private client: RaiFlowClient) {}
 
-  public async create(options: CreateWebhookOptions): Promise<WebhookEndpoint> {
+  public async create(options: CreateWebhookOptions, idempotencyKey: string): Promise<WebhookEndpoint> {
     return this.client.request<WebhookEndpoint>('POST', '/webhooks', {
       url: options.url,
       eventTypes: options.eventTypes,
       ...(options.secret ? { secret: options.secret } : {}),
-    });
+    }, { 'Idempotency-Key': idempotencyKey });
   }
 
   public async list(): Promise<{ data: WebhookEndpoint[] }> {
     return this.client.request<{ data: WebhookEndpoint[] }>('GET', '/webhooks');
   }
 
-  public async delete(id: string): Promise<void> {
-    await this.client.request<void>('DELETE', `/webhooks/${id}`);
+  public async delete(id: string, idempotencyKey: string): Promise<void> {
+    await this.client.request<void>('DELETE', `/webhooks/${id}`, undefined, { 'Idempotency-Key': idempotencyKey });
   }
 }

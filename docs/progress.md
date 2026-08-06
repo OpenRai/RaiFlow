@@ -1,7 +1,7 @@
 # RaiFlow Progress
 
 **Purpose:** Bootstrap document for new coding sessions. Contains current architecture context, active milestone, and immediate next steps.
-**Last updated:** 2026-05-22 (Phase 1–5 complete: deterministic HD invoice derivation, JIT receive orchestration, SDK surface, full test coverage)
+**Last updated:** 2026-08-04 (v3 foundation hardening: `/v1`, OWS custody boundary, monotonic events, required idempotency)
 
 ---
 
@@ -33,7 +33,7 @@ packages/
   storage/     — store contracts, SQLite driver, migrations
   rpc/         — multi-node RPC, WS, failover, confirmation tracking
   events/      — event bus, persistence, querying
-  custody/     — seed, derivation, signing, PoW, frontier ops
+  custody/     — OWS boundary, derivation, signing, PoW, frontier ops
   runtime/     — HTTP API, services, orchestration
   webhook/     — HMAC signing, delivery engine
   raiflow-sdk/ — typed JS/TS client
@@ -50,7 +50,8 @@ packages/
 **M2 — RPC + Custody** — ✅ **Complete**
 
 - RPC pool with multi-node failover, JSON-RPC client, WebSocket client for confirmations
-- Custody engine with seed management, BIP32 derivation, block signing, PoW generation via `nano-rspow-node` (NAPI-RS native, `WorkType.Send` always)
+- Provider-backed custody engine delegates indexed derivation and signing to OWS; RaiFlow rejects raw seed configuration.
+- Canonical state-block construction and hashing live in `@openrai/nano-core`; send and receive PoW use the correct frontier/account roots.
 
 ---
 
@@ -63,16 +64,14 @@ packages/
 - `handleConfirmedBlock` transitions sends from `published` to `confirmed` by block hash and updates account balances on incoming receives.
 - **Account Watch Pool** (`AccountStateSync`) performs initial sync and 30s periodic reconciliation for all watched accounts, emitting `AccountEvent`s. Initial sync now defends against transient RPC failures (logs warning, continues startup) and spaces bulk sync calls with a 750ms delay to avoid rate-limit cooldowns.
 - **SubscriptionManager** deduplicates SSE connections and fans out `AccountEvent`s to subscribed clients.
-- **SSE stream** (`GET /api/accounts/stream`) with `X-Raiflow-Stream-Id` header, plus `POST/DELETE /api/accounts/:id/watch` for dynamic subscribe/unsubscribe.
+- **SSE streams** under `/v1`, including ordered global events at `GET /v1/events/stream`.
 - **SDK** adds `accounts.watch()` returning an `AsyncIterable<AccountEvent>`, backed by a shared `SseConnection` with auto-reconnect.
 - Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime enforces Bearer auth when an API key is configured.
 - Pre-signed block publishing and work-generation APIs are exposed through both the runtime and SDK.
 
 Remaining wallet follow-ups:
-- Persist and surface `account.received`, `block.published`, `block.confirmed`, `block.failed`, `rpc.connected`, `rpc.disconnected`, and `rpc.failover` through the unified runtime event surface.
-- Add account deletion/removal semantics.
-- Add full auto-receive for managed accounts.
-- Harden restart recovery for queued and published sends.
+- Persist generic operation leases so queued sends and receives recover safely across process crashes.
+- Add durable confirmation tracking for pre-signed published blocks.
 
 Exit criterion: can create a managed account, derive addresses, send XNO, query send status.
 
@@ -84,15 +83,15 @@ Current frontier:
 - Invoice creation derives deterministic per-invoice pay addresses via `deriveInvoiceIndex` (blake2b hash of `accountKey + '\0' + invoiceKey`); `accountKey` is required, `invoiceKey` optional.
 - `invoice_accounts` table caches `(accountKey, invoiceKey) → derivationIndex + address`; collision-safe `getOrCreate`.
 - `ReceiveOrchestrator` handles JIT receive-block publishing: Heisenberg triggers on `createInvoice`, `getInvoice`, `getAccount`, `handleConfirmedBlock`; background worker polls at 500ms; max 3 retries then `receive.failed` (opt-in event).
-- Runtime exposes `GET /api/invoices?accountKey=`, `/api/invoice-accounts/:key/balance`, `/aggregated-balance`, `/invoices`.
+- Runtime exposes `GET /v1/invoices?accountKey=`, `/v1/invoice-accounts/:key/balance`, `/aggregated-balance`, `/invoices`.
 - SDK `InvoiceAccountsResource` with `getBalance`, `getAggregatedBalance`, `listInvoices`; `CreateInvoiceOptions` requires `accountKey`.
 - Full test coverage: `deriveInvoiceIndex` determinism/range (6 tests), `ReceiveOrchestrator` enqueue/process/retry/confirm (12 tests), `createInvoice` accountKey semantics (3 tests), `getInvoicesByAccountKey` (2 tests).
-- All 209 tests passing across all packages.
+- Package tests are hermetic and use mocked transports/in-memory stores; they never require a Nano node or ledger sync.
 
 Next:
 - Wire webhook delivery attempts to persisted storage and recover retries after restart.
-- Persist and surface `account.received`, `block.published`, `block.confirmed`, `block.failed`, `rpc.*` events through the unified runtime event surface.
-- See `ROADMAP_DIVERGENCE.md` for the current RFC-vs-implementation audit.
+- Replace the remaining legacy invoice storage adapters.
+- Publish coordinated OWS and nano-core releases, then pin the minimum compatible versions in RaiFlow.
 
 ---
 

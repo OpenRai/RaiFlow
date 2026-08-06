@@ -1,4 +1,4 @@
-export { RaiFlowClient, type RaiFlowClientOptions } from './client.js';
+export { RaiFlowClient, RaiFlowApiError, type RaiFlowClientOptions } from './client.js';
 export { SseConnection } from './sse-connection.js';
 export {
   AccountsResource,
@@ -31,6 +31,7 @@ export {
   type CreateWebhookOptions,
 } from './resources/Webhooks.js';
 export { SystemResource, type RuntimeHealth, type RuntimeVersion } from './resources/System.js';
+export { EventsResource } from './resources/Events.js';
 /** Low-level work generation. If you need this directly, it indicates a missing SDK feature. */
 export {
   WorkResource,

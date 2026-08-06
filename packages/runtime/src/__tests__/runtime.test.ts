@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { xnoToRaw } from '../runtime.js';
+import type { Account, AccountStore, EventStore, Send, SendStore } from '@openrai/model';
+import { Runtime, xnoToRaw } from '../runtime.js';
 import {
   ONE_XNO,
   HALF_XNO,
@@ -187,6 +188,79 @@ describe('global event polling', () => {
 
     const secondPage = await runtime.listEvents({ limit: 2, after: firstPage.nextCursor ?? undefined });
     expect(Array.isArray(secondPage.data)).toBe(true);
+  });
+});
+
+describe('deleteAccount', () => {
+  function setup(balanceRaw = '0', pendingRaw = '0', hasSendHistory = false) {
+    const account: Account = {
+      id: 'account-1',
+      accountKey: 'merchant:treasury',
+      type: 'managed',
+      address: 'nano_1testaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcdefg',
+      label: null,
+      balanceRaw,
+      pendingRaw,
+      frontier: null,
+      representative: null,
+      derivationIndex: 2 ** 31,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    let current: Account | undefined = account;
+    const accountStore: AccountStore = {
+      create: async (value) => value,
+      get: async () => current,
+      getByAddress: async () => current,
+      list: async () => current ? [current] : [],
+      update: async (_id, patch) => ({ ...account, ...patch }),
+      delete: async () => { current = undefined; return true; },
+    };
+    const events: import('@openrai/model').RaiFlowEvent[] = [];
+    const eventStore: EventStore = {
+      append: async (event) => { events.push(event); },
+      list: async () => events,
+    };
+    const send: Send = {
+      id: 'send-1',
+      accountId: account.id,
+      destination: account.address,
+      amountRaw: '1',
+      status: 'confirmed',
+      blockHash: 'A'.repeat(64),
+      idempotencyKey: 'send-key',
+      createdAt: new Date().toISOString(),
+      publishedAt: new Date().toISOString(),
+      confirmedAt: new Date().toISOString(),
+    };
+    const sendStore: SendStore | undefined = hasSendHistory ? {
+      create: async (value) => value,
+      get: async () => send,
+      listByAccount: async () => [send],
+      listByStatus: async () => [],
+      getByIdempotencyKey: async () => send,
+      getByBlockHash: async () => send,
+      update: async () => send,
+    } : undefined;
+    return { runtime: new Runtime({ accountStore, sendStore, v2EventStore: eventStore }), events };
+  }
+
+  it('removes an empty account and persists account.removed', async () => {
+    const { runtime, events } = setup();
+    const removed = await runtime.deleteAccount('account-1', 'delete-1');
+    expect(removed?.id).toBe('account-1');
+    expect(await runtime.getAccount('account-1')).toBeUndefined();
+    expect(events.at(-1)?.type).toBe('account.removed');
+  });
+
+  it('refuses removal while funds remain', async () => {
+    const { runtime } = setup('1');
+    await expect(runtime.deleteAccount('account-1', 'delete-1')).rejects.toThrow('zero balance');
+  });
+
+  it('preserves send audit history by refusing account removal', async () => {
+    const { runtime } = setup('0', '0', true);
+    await expect(runtime.deleteAccount('account-1', 'delete-1')).rejects.toThrow('audit records');
   });
 });
 

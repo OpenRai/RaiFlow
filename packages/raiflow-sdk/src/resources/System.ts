@@ -12,7 +12,11 @@ export class SystemResource {
   constructor(private client: RaiFlowClient) {}
 
   public async health(): Promise<RuntimeHealth> {
-    return this.client.request<RuntimeHealth>('GET', '/health');
+    return this.client.requestRoot<RuntimeHealth>('/health/live');
+  }
+
+  public async readiness(): Promise<RuntimeHealth> {
+    return this.client.requestRoot<RuntimeHealth>('/health/ready');
   }
 
   public async version(): Promise<RuntimeVersion> {

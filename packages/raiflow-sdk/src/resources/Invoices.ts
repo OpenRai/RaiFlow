@@ -24,12 +24,10 @@ export class InvoicesResource {
 
   public async create(
     options: CreateInvoiceOptions,
-    idempotencyKey?: string,
+    idempotencyKey: string,
   ): Promise<Invoice> {
     const headers: Record<string, string> = {};
-    if (idempotencyKey) {
-      headers['Idempotency-Key'] = idempotencyKey;
-    }
+    headers['Idempotency-Key'] = idempotencyKey;
     return this.client.request<Invoice>('POST', '/invoices', options, headers);
   }
 
@@ -50,11 +48,9 @@ export class InvoicesResource {
     return this.client.request<{ data: Invoice[] }>('GET', `/invoices?${params.toString()}`);
   }
 
-  public async cancel(id: string, idempotencyKey?: string): Promise<Invoice> {
+  public async cancel(id: string, idempotencyKey: string): Promise<Invoice> {
     const headers: Record<string, string> = {};
-    if (idempotencyKey) {
-      headers['Idempotency-Key'] = idempotencyKey;
-    }
+    headers['Idempotency-Key'] = idempotencyKey;
     return this.client.request<Invoice>('POST', `/invoices/${id}/cancel`, undefined, headers);
   }
 

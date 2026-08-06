@@ -108,7 +108,7 @@ function createMockRpcPool(mockClient: ReturnType<typeof createMockRpcClient>): 
 }
 
 describe('ReceiveOrchestrator', () => {
-  const accountAddress = 'nano_1receivetest111111111111111111111111111111111111111111111111111';
+  const accountAddress = 'nano_1111111111111111111111111111111111111111111111111111hifc8npp';
   let receiveTaskStore: ReturnType<typeof createReceiveTaskStore>;
   let custodyEngine: CustodyEngine;
   let mockClient: ReturnType<typeof createMockRpcClient>;
@@ -214,12 +214,54 @@ describe('ReceiveOrchestrator', () => {
       expect(updated?.publishedAt).toBeTruthy();
     });
 
+    it('uses the account public key as the work root for an unopened account', async () => {
+      await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'open-source-hash',
+        amountRaw: '123',
+        status: 'pending',
+        publishedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+      mockClient.accountInfo.mockResolvedValue(undefined);
+
+      await orchestrator.processNext();
+
+      expect(custodyEngine.generateReceiveWork).toHaveBeenCalledWith('0'.repeat(64));
+    });
+
     it('is a no-op when no pending tasks', async () => {
       await orchestrator.processNext();
 
       expect(custodyEngine.signReceive).not.toHaveBeenCalled();
       expect(custodyEngine.generateReceiveWork).not.toHaveBeenCalled();
       expect(mockClient.process).not.toHaveBeenCalled();
+    });
+
+    it('retries an account-info transport failure without signing an open block', async () => {
+      const task = await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'account-info-failure',
+        amountRaw: '123',
+        status: 'pending',
+        publishedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+      mockClient.accountInfo.mockRejectedValue(new Error('rpc unavailable'));
+
+      await orchestrator.processNext();
+
+      expect(custodyEngine.signReceive).not.toHaveBeenCalled();
+      expect(mockClient.process).not.toHaveBeenCalled();
+      expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'pending', retryCount: 1 });
     });
 
     it("on failure, increments retryCount and keeps status 'pending' (retry < 3)", async () => {

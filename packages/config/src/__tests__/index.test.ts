@@ -18,6 +18,7 @@ afterEach(() => {
     rmSync(path, { recursive: true, force: true });
   }
   delete process.env['RAIFLOW_MODE'];
+  delete process.env['TEST_OWS_CREDENTIAL'];
 });
 
 describe('loadConfig nano transport arrays', () => {
@@ -92,5 +93,41 @@ describe('loadConfig daemon.mode', () => {
     tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
 
     expect(() => loadConfig(path)).toThrow('config.daemon.mode must be "custodial" or "non-custodial"');
+  });
+});
+
+describe('loadConfig custody', () => {
+  it('loads an OWS wallet reference and resolves its credential', () => {
+    process.env['TEST_OWS_CREDENTIAL'] = 'ows_key_test';
+    const path = writeConfig([
+      'custody:',
+      '  provider: ows',
+      '  wallet: runtime-wallet',
+      '  credential: env:TEST_OWS_CREDENTIAL',
+      '  vaultPath: /secure/vault',
+      '  representative: nano_1representative',
+      '',
+    ].join('\n'));
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    expect(loadConfig(path).custody).toEqual({
+      provider: 'ows',
+      wallet: 'runtime-wallet',
+      credential: 'ows_key_test',
+      vaultPath: '/secure/vault',
+      representative: 'nano_1representative',
+    });
+  });
+
+  it('rejects raw seed custody configuration', () => {
+    const path = writeConfig([
+      'custody:',
+      '  seed: unsafe-seed',
+      '  representative: nano_1representative',
+      '',
+    ].join('\n'));
+    tempPaths.push(path.replace(/\/raiflow\.yml$/, ''));
+
+    expect(() => loadConfig(path)).toThrow('seed is no longer accepted');
   });
 });

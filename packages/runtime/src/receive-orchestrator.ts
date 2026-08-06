@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ReceiveTaskStore } from '@openrai/model';
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
+import { NanoAddress } from '@openrai/nano-core';
 
 type ReceivableEntry = {
   hash: string;
@@ -62,24 +63,35 @@ export class ReceiveOrchestrator {
 
       try {
         const client = this.rpcPool.getClient();
-        const accountInfo = await client.accountInfo(task.accountAddress).catch(() => undefined);
+        // RpcClient returns undefined only for a genuinely unopened account.
+        // Transport failures must retry; treating them as unopened can build a
+        // conflicting open block for an account that already has a frontier.
+        const accountInfo = await client.accountInfo(task.accountAddress);
         const frontier = accountInfo?.frontier ?? '';
+        const resultingBalanceRaw = (
+          BigInt(accountInfo?.balance ?? '0') + BigInt(task.amountRaw)
+        ).toString();
 
         const signed = await this.custodyEngine.signReceive(
           task.accountAddress,
           task.pendingBlockHash,
-          task.amountRaw,
+          resultingBalanceRaw,
           frontier,
           task.derivationIndex,
         );
 
         const work = await this.custodyEngine.generateReceiveWork(
-          frontier === '' ? task.accountAddress : frontier,
+          frontier === '' ? NanoAddress.parse(task.accountAddress).publicKey : frontier,
         );
 
         const blockJson = JSON.parse(signed.contents) as Record<string, unknown>;
         blockJson['work'] = work;
-        await client.process(JSON.stringify(blockJson));
+        try {
+          await client.process(JSON.stringify(blockJson));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes('Old block')) throw error;
+        }
 
         await this.receiveTaskStore.update(task.id, {
           status: 'published',

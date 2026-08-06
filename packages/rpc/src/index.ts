@@ -11,6 +11,7 @@ export interface RpcNodeConfig {
 }
 
 export interface RpcClient {
+  healthCheck(): Promise<void>;
   accountInfo(account: string): Promise<AccountInfoResponse | undefined>;
   accountsReceivable(account: string): Promise<Receivable[]>;
   process(block: string): Promise<ProcessResponse>;
@@ -186,6 +187,14 @@ class PooledRpcClient implements RpcClient {
     });
   }
 
+  async healthCheck(): Promise<void> {
+    const result = await this.rpcCall<Record<string, unknown>>({ action: 'version' });
+    if (result.error) throw new Error(`version error: ${String(result.error)}`);
+    if (typeof result.node_vendor !== 'string' || result.node_vendor.length === 0) {
+      throw new Error('version error: response did not include node_vendor');
+    }
+  }
+
   async accountInfo(account: string): Promise<AccountInfoResponse | undefined> {
     const result = await this.rpcCall<Record<string, unknown>>({
       action: 'account_info',
@@ -225,7 +234,12 @@ class PooledRpcClient implements RpcClient {
   }
 
   async process(block: string): Promise<ProcessResponse> {
-    return this.client.rpcPool.postJson<ProcessResponse>({ action: 'process', block });
+    const result = await this.rpcCall<Record<string, unknown>>({ action: 'process', block });
+    if (result.error) throw new Error(`process error: ${String(result.error)}`);
+    if (typeof result.hash !== 'string' || result.hash.length === 0) {
+      throw new Error('process error: response did not include a block hash');
+    }
+    return { hash: result.hash };
   }
 
   async workGenerate(hash: string): Promise<WorkGenerateResponse> {

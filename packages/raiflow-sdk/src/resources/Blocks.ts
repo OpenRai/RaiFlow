@@ -15,7 +15,9 @@ export interface PublishBlockResult {
 export class BlocksResource {
   constructor(private client: RaiFlowClient) {}
 
-  async publish(block: string): Promise<PublishBlockResult> {
-    return this.client.request<PublishBlockResult>('POST', '/blocks', { block });
+  async publish(block: string, idempotencyKey: string): Promise<PublishBlockResult> {
+    return this.client.request<PublishBlockResult>('POST', '/blocks', { block }, {
+      'Idempotency-Key': idempotencyKey,
+    });
   }
 }

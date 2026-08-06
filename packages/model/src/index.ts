@@ -3,6 +3,9 @@
 
 import { blake2b } from '@noble/hashes/blake2b';
 
+export const INVOICE_DERIVATION_START = 0;
+export const MANAGED_DERIVATION_START = 2 ** 31;
+
 export function deriveInvoiceIndex(
   accountKey: string,
   invoiceKey: string | null,
@@ -12,6 +15,12 @@ export function deriveInvoiceIndex(
   const hash = blake2b(new TextEncoder().encode(input), { dkLen: 32 });
   const uint32 = ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
   return startIndex + (uint32 % (2 ** 27));
+}
+
+export function deriveManagedIndex(accountKey: string): number {
+  const hash = blake2b(new TextEncoder().encode(accountKey), { dkLen: 32 });
+  const uint32 = ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
+  return MANAGED_DERIVATION_START + (uint32 % (2 ** 31));
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +97,7 @@ export interface Payment {
 
 export interface Account {
   id: string;
+  accountKey: string | null;
   type: AccountType;
   address: string;
   label: string | null;
@@ -172,6 +182,8 @@ export type RaiFlowEventType =
   | 'rpc.failover';
 
 export interface RaiFlowEvent {
+  /** Monotonic persisted cursor. Absent only before an event is stored. */
+  sequence?: number;
   id: string;
   type: string;
   timestamp: string;
@@ -377,6 +389,7 @@ export interface CreateInvoiceRequest {
 }
 
 export interface CreateAccountRequest {
+  accountKey: string;
   label?: string;
   representative?: string;
   idempotencyKey?: string;
@@ -472,6 +485,7 @@ export interface AccountStore {
   getByAddress(address: string): Promise<Account | undefined>;
   list(filter?: { type?: AccountType }): Promise<Account[]>;
   update(id: string, patch: Partial<Account>): Promise<Account>;
+  delete(id: string): Promise<boolean>;
 }
 
 export interface SendStore {

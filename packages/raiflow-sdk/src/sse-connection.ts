@@ -10,7 +10,11 @@ export class SseConnection {
   private stopped = false;
   private connectPromise: Promise<string> | null = null;
 
-  constructor(private readonly baseUrl: string, private readonly apiKey: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly basePath: string,
+    private readonly apiKey: string,
+  ) {}
 
   async getStreamId(): Promise<string> {
     if (this.streamId) return this.streamId;
@@ -20,7 +24,7 @@ export class SseConnection {
   }
 
   private async doConnect(): Promise<string> {
-    const url = new URL(`${this.baseUrl}/api/accounts/stream`);
+    const url = new URL(`${this.baseUrl}${this.basePath}/accounts/stream`);
     this.abortController = new AbortController();
 
     const res = await fetch(url.toString(), {

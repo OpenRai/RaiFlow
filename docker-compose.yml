@@ -4,9 +4,11 @@ services:
     restart: unless-stopped
     environment:
       NANO_RPC_URL: "https://rpc.nano.org"
-      RAIFLOW_MODE: "custodial"           # required: "custodial" or "non-custodial"
+      RAIFLOW_MODE: "non-custodial"       # required: "custodial" or "non-custodial"
       RAIFLOW_API_KEY: ""                  # required: set a strong secret
-      # RAIFLOW_CUSTODY_SEED: ""           # required only for custodial mode
+      # RAIFLOW_OWS_WALLET: ""             # required only for custodial mode
+      # RAIFLOW_OWS_CREDENTIAL: ""         # OWS passphrase or scoped API token
+      # RAIFLOW_OWS_VAULT_PATH: "/ows-vault"
       # RAIFLOW_CUSTODY_REP: ""            # required only for custodial mode
     volumes:
       - raiflow-data:/data

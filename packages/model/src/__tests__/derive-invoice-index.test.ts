@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { deriveInvoiceIndex } from '@openrai/model';
+import {
+  deriveInvoiceIndex,
+  deriveManagedIndex,
+  MANAGED_DERIVATION_START,
+} from '@openrai/model';
 
 describe('deriveInvoiceIndex', () => {
   it('same inputs always produce same output (determinism)', () => {
@@ -62,5 +66,21 @@ describe('deriveInvoiceIndex', () => {
     const shifted = deriveInvoiceIndex(accountKey, invoiceKey, offsetStart);
 
     expect(shifted - base).toBe(offsetStart - baseStart);
+  });
+});
+
+describe('deriveManagedIndex', () => {
+  it('is deterministic and confined to the managed high-bit namespace', () => {
+    const first = deriveManagedIndex('merchant:treasury');
+    expect(deriveManagedIndex('merchant:treasury')).toBe(first);
+    expect(first).toBeGreaterThanOrEqual(MANAGED_DERIVATION_START);
+    expect(first).toBeLessThan(2 ** 32);
+  });
+
+  it('does not overlap invoice indices', () => {
+    const invoice = deriveInvoiceIndex('merchant', 'invoice', 0);
+    const managed = deriveManagedIndex('merchant');
+    expect(invoice).toBeLessThan(MANAGED_DERIVATION_START);
+    expect(managed).toBeGreaterThanOrEqual(MANAGED_DERIVATION_START);
   });
 });

@@ -13,6 +13,7 @@ function createMockAccountStore(): AccountStore {
     getByAddress: vi.fn(),
     list: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
   };
 }
 
@@ -32,6 +33,7 @@ function createMockRpcPool() {
 function makeAccount(overrides?: Partial<Parameters<AccountStore['update']>[1] & { id: string; address: string }>) {
   return {
     id: 'acc-1',
+    accountKey: null,
     type: 'watched' as const,
     address: TEST_ADDRESS,
     label: null,

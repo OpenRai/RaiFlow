@@ -11,7 +11,10 @@ export class SendsResource {
   constructor(private client: RaiFlowClient) {}
 
   async queue(accountId: string, options: QueueSendOptions): Promise<Send> {
-    return this.client.request<Send>('POST', `/accounts/${accountId}/sends`, options);
+    const { idempotencyKey, ...body } = options;
+    return this.client.request<Send>('POST', `/accounts/${accountId}/sends`, body, {
+      'Idempotency-Key': idempotencyKey,
+    });
   }
 
   async listByAccount(accountId: string): Promise<{ data: Send[] }> {

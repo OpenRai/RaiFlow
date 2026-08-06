@@ -120,14 +120,18 @@ RaiFlow will boot, run SQLite migrations, and start in the configured mode.
 | `NANO_RPC_URL` | **Yes** | Nano node RPC endpoint (e.g. `https://rpc.nano.org`) |
 | `RAIFLOW_MODE` | **Yes** | `"custodial"` or `"non-custodial"` — see [Modes](#modes) |
 | `RAIFLOW_API_KEY` | **Yes** | API key for Bearer auth. You set this yourself. |
-| `RAIFLOW_CUSTODY_SEED` | Custodial only | BIP39 seed for managed accounts. |
+| `RAIFLOW_OWS_WALLET` | Custodial only | OWS wallet name or ID. |
+| `RAIFLOW_OWS_CREDENTIAL` | Custodial only | OWS wallet passphrase or wallet-scoped API token. |
+| `RAIFLOW_OWS_VAULT_PATH` | Custodial only | Path to the OWS encrypted vault. |
 | `RAIFLOW_CUSTODY_REP` | Custodial only | Default representative for managed accounts. |
 
 ### Modes
 
 RaiFlow operates in one of two modes, set at startup via `RAIFLOW_MODE`:
 
-**Custodial mode** — RaiFlow manages keys, derives accounts, signs blocks, and generates PoW. Requires `RAIFLOW_CUSTODY_SEED` and `RAIFLOW_CUSTODY_REP`. This is the full-featured mode where your app delegates all Nano protocol mechanics to the runtime.
+**Custodial mode** — RaiFlow asks an OWS wallet to derive accounts and sign canonical state blocks, while RaiFlow manages orchestration and PoW. RaiFlow never receives raw seed material. Configure `custody.wallet`, `custody.credential`, `custody.vaultPath`, and `custody.representative` in `raiflow.yml`.
+
+Custodial startup fails closed unless the installed OWS binding exposes indexed wallet derivation and the installed `@openrai/nano-core` exposes canonical state-block encoding. Until those coordinated package releases are published, link the sibling `ows-core` and `nano-core` source packages when testing custodial mode from this workspace.
 
 **Non-custodial mode** — RaiFlow acts as a relay and monitor. All signing happens client-side. Watched accounts, block publishing, and work generation are available. Managed accounts, sends, and invoices are not — those require custody.
 
@@ -175,7 +179,9 @@ export NANO_RPC_URL=https://rpc.nano.org
 4. If using custodial mode, also set:
 
 ```bash
-export RAIFLOW_CUSTODY_SEED=your-bip39-seed
+export RAIFLOW_OWS_WALLET=runtime-wallet
+export RAIFLOW_OWS_CREDENTIAL=ows_key_... # or the wallet passphrase
+export RAIFLOW_OWS_VAULT_PATH=/secure/ows-vault
 export RAIFLOW_CUSTODY_REP=nano_1...
 ```
 
@@ -236,38 +242,45 @@ The runtime exposes the following HTTP surface:
 - `GET /dashboard` — SSR operator dashboard (with `?view=` and `?showInternal=` toggles)
 
 **System**
-- `GET /api/health`
+- `GET /health/live`
+- `GET /health/ready`
+- `GET /v1/version`
 
 **Accounts**
-- `POST /api/accounts` — create managed or watched account
-- `GET /api/accounts` — list accounts (optional `?type=managed|watched`)
-- `GET /api/accounts/:id`
-- `PATCH /api/accounts/:id`
-- `GET /api/accounts/:id/receivable` — pending receivable blocks from the node
-- `POST /api/accounts/:id/sends` — queue a send from this account
-- `GET /api/accounts/:id/sends` — list sends for this account
+- `POST /v1/accounts` — create managed or watched account
+- `GET /v1/accounts` — list accounts (optional `?type=managed|watched`)
+- `GET /v1/accounts/:id`
+- `PATCH /v1/accounts/:id`
+- `DELETE /v1/accounts/:id` — remove an empty, inactive account
+- `GET /v1/accounts/:id/receivable` — pending receivable blocks from the node
+- `POST /v1/accounts/:id/sends` — queue a send from this account
+- `GET /v1/accounts/:id/sends` — list sends for this account
 
 **Sends**
-- `GET /api/sends/:id` — global send lookup
+- `GET /v1/sends/:id` — global send lookup
 
 **Blocks** (escape hatch for pre-signed flows)
-- `POST /api/blocks` — publish a pre-signed block JSON string
+- `POST /v1/blocks` — publish a pre-signed block JSON string
 
 **Work** (escape hatch for non-custodial flows)
-- `POST /api/work` — generate PoW for a hash
+- `POST /v1/work` — generate PoW for a hash
 
 **Invoices**
-- `POST /api/invoices`
-- `GET /api/invoices` (optional `?status=`)
-- `GET /api/invoices/:id`
-- `POST /api/invoices/:id/cancel`
-- `GET /api/invoices/:id/payments`
-- `GET /api/invoices/:id/events` (optional `?after=`)
+- `POST /v1/invoices`
+- `GET /v1/invoices` (optional `?status=`)
+- `GET /v1/invoices/:id`
+- `POST /v1/invoices/:id/cancel`
+- `GET /v1/invoices/:id/payments`
+- `GET /v1/invoices/:id/events` (optional `?after=`)
 
 **Webhooks**
-- `POST /api/webhooks`
-- `GET /api/webhooks`
-- `DELETE /api/webhooks/:id`
+- `POST /v1/webhooks`
+- `GET /v1/webhooks`
+- `DELETE /v1/webhooks/:id`
+
+**Events**
+- `GET /v1/events` — ordered polling with a monotonic cursor
+- `GET /v1/events/stream` — server-sent event stream
 
 > All mutating operations require an `Idempotency-Key` header where documented. Sends **require** an idempotency key — rejection is correct behavior if missing.
 
@@ -289,7 +302,7 @@ These are deliberate constraints, not marketing copy:
 RaiFlow is designed so that Nano protocol mechanics are invisible to the developer:
 
 - **PoW is not your problem.** RaiFlow generates work internally. You never call `work_generate` in normal usage.
-- **Signing is not your problem.** In custodial mode, RaiFlow signs blocks using the managed seed. Your app sends high-level intents like "send 1 XNO to this address."
+- **Signing is not your problem.** In custodial mode, OWS signs blocks without exposing wallet key material to RaiFlow. Your app sends high-level intents like "send 1 XNO to this address."
 - **Frontiers are not your problem.** RaiFlow tracks account frontiers and constructs blocks correctly.
 - **Confirmations are not your problem.** RaiFlow watches for confirmations via WebSocket and updates send status automatically.
 

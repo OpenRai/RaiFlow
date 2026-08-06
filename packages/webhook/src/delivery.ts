@@ -38,11 +38,13 @@ export interface WebhookDelivery {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Compute backoff with jitter: `min(base * 2^attempt, max) * (0.5 + rand * 0.5)` */
+/** Compute backoff with ±25% jitter around the exponential delay. */
 function computeBackoff(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
   const delay = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
-  return delay * (0.5 + Math.random() * 0.5);
+  return delay * (0.75 + Math.random() * 0.5);
 }
+
+type DeliveryOutcome = 'delivered' | 'retry' | 'terminal';
 
 /** Attempt to POST a webhook payload to a single endpoint. */
 async function postToEndpoint(
@@ -50,7 +52,7 @@ async function postToEndpoint(
   event: unknown,
   body: string,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<DeliveryOutcome> {
   const eventData = getEventData(event);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -73,19 +75,22 @@ async function postToEndpoint(
       console.log(
         `[webhook] delivery failed for endpoint ${endpoint.id} (${endpoint.url}): HTTP ${response.status}`,
       );
-      return false;
+      if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
+        return 'terminal';
+      }
+      return 'retry';
     }
 
     console.log(
       `[webhook] delivered event ${eventData.id} (${eventData.type}) to endpoint ${endpoint.id} (${endpoint.url})`,
     );
-    return true;
+    return 'delivered';
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(
       `[webhook] delivery error for endpoint ${endpoint.id} (${endpoint.url}): ${message}`,
     );
-    return false;
+    return 'retry';
   } finally {
     clearTimeout(timer);
   }
@@ -115,8 +120,8 @@ function scheduleRetries(
 
   const timer = setTimeout(async () => {
     pendingTimers.delete(timer);
-    const ok = await postToEndpoint(endpoint, event, body, config.timeoutMs);
-    if (!ok) {
+    const outcome = await postToEndpoint(endpoint, event, body, config.timeoutMs);
+    if (outcome === 'retry') {
       scheduleRetries(endpoint, event, body, attempt + 1, config, pendingTimers);
     }
   }, delay);
@@ -152,7 +157,9 @@ export function createWebhookDelivery(config: DeliveryConfig = {}): WebhookDeliv
     async deliver(event, endpoints) {
       // Filter endpoints that subscribe to this event type
       const eventData = getEventData(event);
-      const matching = endpoints.filter((ep) => ep.eventTypes.includes(eventData.type));
+      const matching = endpoints.filter((ep) =>
+        ep.eventTypes.includes('*') || ep.eventTypes.includes(eventData.type),
+      );
 
       if (matching.length === 0) return;
 
@@ -161,8 +168,8 @@ export function createWebhookDelivery(config: DeliveryConfig = {}): WebhookDeliv
       // Fire first attempt for all matching endpoints in parallel; await them all
       await Promise.all(
         matching.map(async (endpoint) => {
-          const ok = await postToEndpoint(endpoint, event, body, resolved.timeoutMs);
-          if (!ok) {
+          const outcome = await postToEndpoint(endpoint, event, body, resolved.timeoutMs);
+          if (outcome === 'retry') {
             scheduleRetries(endpoint, event, body, 0, resolved, pendingTimers);
           }
         }),

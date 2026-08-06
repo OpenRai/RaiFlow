@@ -14,6 +14,7 @@ const WORK_REJECTION_MESSAGE = 'Block work is less than threshold';
 
 export class SendOrchestrator {
   private timer: ReturnType<typeof setInterval> | undefined;
+  private processing = false;
 
   constructor(
     private readonly sendStore: SendStore,
@@ -39,9 +40,15 @@ export class SendOrchestrator {
   }
 
   async tick(): Promise<void> {
-    const queued = await this.sendStore.listByStatus('queued');
-    for (const send of queued) {
-      await this.publishSend(send);
+    if (this.processing) return;
+    this.processing = true;
+    try {
+      const queued = await this.sendStore.listByStatus('queued');
+      for (const send of queued) {
+        await this.publishSend(send);
+      }
+    } finally {
+      this.processing = false;
     }
   }
 
@@ -82,24 +89,36 @@ export class SendOrchestrator {
       );
 
       // 4. Generate work
-      const work = await this.custodyEngine.generateWork(signed.hash);
+      const work = await this.custodyEngine.generateWork(frontier);
 
       // 5. Build final block JSON with work included
       const blockJson = JSON.parse(signed.contents);
       blockJson.work = work;
 
       // 6. Publish to network (with retry-once for work rejection)
+      const publish = async () => {
+        try {
+          return await client.process(JSON.stringify(blockJson));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // A crash after a successful process call can leave the send queued.
+          // Re-publishing the exact deterministic block returns "Old block";
+          // treating that as success closes the ambiguous-commit window.
+          if (message.includes('Old block')) return { hash: signed.hash };
+          throw error;
+        }
+      };
       let result;
       try {
-        result = await client.process(JSON.stringify(blockJson));
+        result = await publish();
       } catch (processErr) {
         const message = processErr instanceof Error ? processErr.message : String(processErr);
         if (!message.includes(WORK_REJECTION_MESSAGE)) throw processErr;
 
         // Work was rejected — regenerate and retry once
-        const newWork = await this.custodyEngine.generateWork(signed.hash);
+        const newWork = await this.custodyEngine.generateWork(frontier);
         blockJson.work = newWork;
-        result = await client.process(JSON.stringify(blockJson));
+        result = await publish();
       }
 
       // 7. Update send to published

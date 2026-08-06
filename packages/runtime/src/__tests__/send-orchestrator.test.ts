@@ -59,6 +59,7 @@ function createMockAccountStore(): AccountStore {
     getByAddress: vi.fn(),
     list: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
   };
 }
 
@@ -80,6 +81,7 @@ function makeSend(overrides?: Partial<Parameters<SendStore['update']>[1]>): Para
 
 interface TestAccount {
   id: string;
+  accountKey: string;
   type: 'managed';
   address: string;
   label: null;
@@ -95,6 +97,7 @@ interface TestAccount {
 function makeAccount(overrides?: Partial<TestAccount>): TestAccount {
   return {
     id: 'account-1',
+    accountKey: 'test-account',
     type: 'managed' as const,
     address: TEST_ACCOUNT_ADDRESS,
     label: null,
@@ -147,6 +150,19 @@ describe('SendOrchestrator', () => {
       rpcPool,
       async (event) => { emittedEvents.push(event); },
     );
+  });
+
+  it('does not overlap worker ticks', async () => {
+    let release: (() => void) | undefined;
+    (sendStore.listByStatus as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      new Promise((resolve) => { release = () => resolve([]); }),
+    );
+
+    const first = orchestrator.tick();
+    await orchestrator.tick();
+    expect(sendStore.listByStatus).toHaveBeenCalledTimes(1);
+    release?.();
+    await first;
   });
 
   it('publishes send on happy path', async () => {
@@ -207,6 +223,34 @@ describe('SendOrchestrator', () => {
     expect(custodyEngine.generateWork).toHaveBeenCalledTimes(2);
     expect(mockClient.process).toHaveBeenCalledTimes(2);
     expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({ status: 'published' }));
+  });
+
+  it('recovers an ambiguous prior publish when the node reports Old block', async () => {
+    const send = makeSend();
+    const account = makeAccount();
+    const signed = makeSignedBlock('already-published-hash');
+    (accountStore.get as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (sendStore.listByStatus as ReturnType<typeof vi.fn>).mockResolvedValue([send]);
+    (sendStore.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...send, status: 'published' });
+    (custodyEngine.signSend as ReturnType<typeof vi.fn>).mockResolvedValue(signed);
+    (custodyEngine.generateWork as ReturnType<typeof vi.fn>).mockResolvedValue('work000000000000000');
+    const mockClient = {
+      accountInfo: vi.fn().mockResolvedValue({
+        frontier: '0'.repeat(64),
+        balance: '5000000000000000000000000000000',
+        representative: account.representative,
+        blockCount: 1,
+      }),
+      process: vi.fn().mockRejectedValue(new Error('process error: Old block')),
+    };
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue(mockClient);
+
+    await orchestrator.tick();
+
+    expect(sendStore.update).toHaveBeenCalledWith('send-1', expect.objectContaining({
+      status: 'published',
+      blockHash: 'already-published-hash',
+    }));
   });
 
   it('marks send as failed when both process attempts fail with work error', async () => {

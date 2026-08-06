@@ -19,7 +19,10 @@ export interface NanoConfig {
 }
 
 export interface CustodyConfig {
-  seed: string;
+  provider: 'ows';
+  wallet: string;
+  credential?: string;
+  vaultPath?: string;
   representative: string;
 }
 
@@ -203,8 +206,22 @@ function parseCustody(obj: Record<string, unknown>): CustodyConfig | null {
     throw new Error('config.custody must be an object');
   }
   const custody = obj.custody;
+  if (custody['seed'] !== undefined) {
+    throw new Error(
+      'config.custody.seed is no longer accepted; configure an OWS wallet so RaiFlow never receives raw seed material',
+    );
+  }
+  const provider = optionalString(custody, 'provider') ?? 'ows';
+  if (provider !== 'ows') {
+    throw new Error('config.custody.provider must be "ows"');
+  }
+  const credential = optionalString(custody, 'credential');
+  const vaultPath = optionalString(custody, 'vaultPath');
   return {
-    seed: resolveEnv(requireString(custody, 'seed')),
+    provider: 'ows',
+    wallet: resolveEnv(requireString(custody, 'wallet')),
+    credential: credential ? resolveEnv(credential) : undefined,
+    vaultPath: vaultPath ? resolveEnv(vaultPath) : undefined,
     representative: resolveEnv(requireString(custody, 'representative')),
   };
 }
