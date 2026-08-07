@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@ungap/structured-clone': 1.3.1
-  '@openrai/nano-core': github:OpenRai/nano-core#d84046d
+  '@openrai/nano-core': github:OpenRai/nano-core#0ea3c06
 
 importers:
 
@@ -40,8 +40,8 @@ importers:
   examples/htmx-wallet:
     dependencies:
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
       '@openrai/raiflow-sdk':
         specifier: workspace:*
         version: link:../../packages/raiflow-sdk
@@ -52,8 +52,8 @@ importers:
   examples/next-checkout:
     dependencies:
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
       '@openrai/raiflow-sdk':
         specifier: workspace:*
         version: link:../../packages/raiflow-sdk
@@ -107,8 +107,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
       nano-rspow-node:
         specifier: ^0.6.0
         version: 0.6.0
@@ -177,8 +177,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
       nano-rspow-node:
         specifier: ^0.6.0
         version: 0.6.0
@@ -211,8 +211,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
       '@openrai/rpc':
         specifier: workspace:*
         version: link:../rpc
@@ -264,8 +264,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: github:OpenRai/nano-core#d84046d
-        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d
+        specifier: github:OpenRai/nano-core#0ea3c06
+        version: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -730,8 +730,8 @@ packages:
     version: 1.3.2
     hasBin: true
 
-  '@openrai/nano-core@https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d':
-    resolution: {tarball: https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d}
+  '@openrai/nano-core@https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06':
+    resolution: {tarball: https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06}
     version: 3.1.1
 
   '@rollup/rollup-android-arm-eabi@4.60.0':
@@ -2684,7 +2684,7 @@ snapshots:
       '@open-wallet-standard/core-linux-arm64-gnu': 1.3.2
       '@open-wallet-standard/core-linux-x64-gnu': 1.3.2
 
-  '@openrai/nano-core@https://codeload.github.com/OpenRai/nano-core/tar.gz/d84046d':
+  '@openrai/nano-core@https://codeload.github.com/OpenRai/nano-core/tar.gz/0ea3c06':
     dependencies:
       blakejs: 1.2.1
       nano-rspow-node: 0.9.0
