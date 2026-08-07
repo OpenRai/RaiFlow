@@ -2,3 +2,6 @@ packages:
   - apps/*
   - packages/*
   - examples/*
+
+allowBuilds:
+  '@open-wallet-standard/core': true

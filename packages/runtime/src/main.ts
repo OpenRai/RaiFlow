@@ -304,11 +304,15 @@ if (config.custody) {
     // production key operations stay inside OWS.
     const owsModuleName = '@open-wallet-standard/core';
     const nanoCoreModuleName = '@openrai/nano-core';
-    const [ows, nanoCore] = await Promise.all([
+    const [owsModule, nanoCore] = await Promise.all([
       import(owsModuleName),
       import(nanoCoreModuleName),
     ]);
-    const bindings = ows as unknown as Partial<OwsBindings>;
+    const bindings = (
+      'default' in owsModule && typeof owsModule.default === 'object' && owsModule.default !== null
+        ? owsModule.default
+        : owsModule
+    ) as Partial<OwsBindings>;
     if (
       typeof bindings.deriveWalletAddress !== 'function'
       || typeof bindings.signTransaction !== 'function'

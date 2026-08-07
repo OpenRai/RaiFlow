@@ -2,6 +2,15 @@
 FROM node:22-bookworm AS builder
 ARG RAIFLOW_VERSION
 ENV RAIFLOW_VERSION=${RAIFLOW_VERSION}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
 RUN corepack enable && corepack prepare pnpm@10 --activate
 WORKDIR /app
 

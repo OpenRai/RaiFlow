@@ -23,6 +23,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@open-wallet-standard/core": "github:OpenRai/ows-core#56184be&path:bindings/node",
     "@openrai/config": "workspace:*",
     "@openrai/custody": "workspace:*",
     "@openrai/events": "workspace:*",

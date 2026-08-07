@@ -31,6 +31,9 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
