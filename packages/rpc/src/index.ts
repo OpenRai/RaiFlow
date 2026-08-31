@@ -14,6 +14,8 @@ export interface RpcClient {
   healthCheck(): Promise<void>;
   accountInfo(account: string): Promise<AccountInfoResponse | undefined>;
   accountsReceivable(account: string): Promise<Receivable[]>;
+  /** Read confirmation state for a published block. */
+  blockInfo(hash: string): Promise<BlockInfoResponse | undefined>;
   process(block: string): Promise<ProcessResponse>;
   workGenerate(hash: string): Promise<WorkGenerateResponse>;
   getAuditReport(): EndpointAuditRecord[];
@@ -34,6 +36,14 @@ export interface Receivable {
 
 export interface ProcessResponse {
   hash: string;
+}
+
+export interface BlockInfoResponse {
+  confirmed: boolean;
+  subtype?: string;
+  blockAccount?: string;
+  amount?: string;
+  localTimestamp?: string;
 }
 
 export interface WorkGenerateResponse {
@@ -176,6 +186,16 @@ class PooledRpcClient implements RpcClient {
       }
 
       if (!response.ok) {
+        // Hosted providers sometimes return a Nano application error (for
+        // example, an unsupported action) with HTTP 500. Preserve that JSON
+        // so the operation-level adapter can apply a protocol fallback. A
+        // 429 remains a transport/rate-limit failure for endpoint backoff.
+        if (response.status !== 429) {
+          const payload = await response.json().catch(() => undefined);
+          if (payload && typeof payload === 'object' && 'error' in payload) {
+            return payload as T;
+          }
+        }
         throw new Error(`HTTP error ${response.status} ${response.statusText}`);
       }
 
@@ -217,8 +237,29 @@ class PooledRpcClient implements RpcClient {
       source: true,
       include_only_confirmed: false,
     });
+    // Some hosted Nano providers intentionally disable the newer
+    // accounts_receivable action while retaining the equivalent pending query.
+    // Keep that provider quirk behind RaiFlow's state-aware RPC boundary.
     // "Account not found" simply means zero receivable blocks.
     if (result.error === 'Account not found') return [];
+    if (result.error && /not allowed|unknown action/i.test(String(result.error))) {
+      const pending = await this.rpcCall<Record<string, unknown>>({
+        action: 'pending',
+        account,
+        source: true,
+        include_only_confirmed: false,
+        count: 20,
+      });
+      if (pending.error === 'Account not found') return [];
+      if (pending.error) throw new Error(`pending error: ${pending.error}`);
+      const pendingBlocks = pending.blocks as Record<string, { amount: string; source?: string; sender?: string }> | undefined;
+      if (!pendingBlocks || typeof pendingBlocks !== 'object') return [];
+      return Object.entries(pendingBlocks).map(([hash, block]) => ({
+        hash,
+        amount: block.amount,
+        sender: block.source ?? block.sender ?? '',
+      }));
+    }
     if (result.error) {
       throw new Error(`accounts_receivable error: ${result.error}`);
     }
@@ -240,6 +281,30 @@ class PooledRpcClient implements RpcClient {
       throw new Error('process error: response did not include a block hash');
     }
     return { hash: result.hash };
+  }
+
+  async blockInfo(hash: string): Promise<BlockInfoResponse | undefined> {
+    const result = await this.rpcCall<Record<string, unknown>>({
+      action: 'block_info',
+      hash,
+      json_block: true,
+    });
+    // A block can be accepted by a node before it is visible to every
+    // confirmation query. Treat that normal propagation window as unknown.
+    if (result.error && /block not found|not found/i.test(String(result.error))) {
+      return undefined;
+    }
+    if (result.error) {
+      throw new Error(`block_info error: ${String(result.error)}`);
+    }
+    const confirmed = result.confirmed === true || result.confirmed === 'true' || result.confirmed === '1';
+    return {
+      confirmed,
+      ...(typeof result.subtype === 'string' ? { subtype: result.subtype } : {}),
+      ...(typeof result.block_account === 'string' ? { blockAccount: result.block_account } : {}),
+      ...(typeof result.amount === 'string' ? { amount: result.amount } : {}),
+      ...(typeof result.local_timestamp === 'string' ? { localTimestamp: result.local_timestamp } : {}),
+    };
   }
 
   async workGenerate(hash: string): Promise<WorkGenerateResponse> {

@@ -133,6 +133,10 @@ export interface RuntimeConfig {
   webhookDelivery?: WebhookDelivery;
   /** Interval in ms for the expiry checker. Default 10000 (10s). */
   expiryIntervalMs?: number;
+  /** Poll interval for confirmation of caller-signed blocks. Default 2000 (2s). */
+  blockConfirmationIntervalMs?: number;
+  /** Maximum time to wait for caller-signed block confirmation. Default 120000 (2m). */
+  blockConfirmationTimeoutMs?: number;
   accountStore?: AccountStore;
   sendStore?: SendStore;
   invoiceAccountStore?: InvoiceAccountStore;
@@ -323,7 +327,11 @@ export class Runtime implements WatcherSink {
   private readonly managedDerivationStartIndex: number;
   private readonly webhookDelivery: WebhookDelivery;
   private readonly expiryIntervalMs: number;
+  private readonly blockConfirmationIntervalMs: number;
+  private readonly blockConfirmationTimeoutMs: number;
   private expiryTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly blockConfirmationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly confirmingBlocks = new Set<string>();
   private invoiceAccountStore?: InvoiceAccountStore;
   private receiveTaskStore?: ReceiveTaskStore;
   private receiveOrchestrator?: ReceiveOrchestrator;
@@ -345,6 +353,8 @@ export class Runtime implements WatcherSink {
       config.webhookEndpointStore ?? createWebhookEndpointStore();
     this.webhookDelivery = config.webhookDelivery ?? createWebhookDelivery();
     this.expiryIntervalMs = config.expiryIntervalMs ?? 10_000;
+    this.blockConfirmationIntervalMs = config.blockConfirmationIntervalMs ?? 2_000;
+    this.blockConfirmationTimeoutMs = config.blockConfirmationTimeoutMs ?? 120_000;
     this.accountStore = config.accountStore;
     this.sendStore = config.sendStore;
     this.invoiceAccountStore = config.invoiceAccountStore ?? createInMemoryInvoiceAccountStore();
@@ -419,6 +429,9 @@ export class Runtime implements WatcherSink {
       clearInterval(this.receiveWorkerInterval);
       this.receiveWorkerInterval = undefined;
     }
+    for (const timer of this.blockConfirmationTimers.values()) clearTimeout(timer);
+    this.blockConfirmationTimers.clear();
+    this.confirmingBlocks.clear();
     this.webhookDelivery.shutdown();
   }
 
@@ -808,7 +821,29 @@ export class Runtime implements WatcherSink {
   async getAccount(id: string): Promise<Account | undefined> {
     if (!this.accountStore) return undefined;
     const account = await this.accountStore.get(id);
-    if (account?.derivationIndex != null) {
+    if (!account) return undefined;
+
+    // A watched account can be changed by a caller-signed block that bypasses
+    // RaiFlow's custodial send/receive orchestrators. Reconcile on reads so an
+    // application never signs its next block against a stale cached frontier.
+    if (this.rpcPool) {
+      try {
+        const live = await this.rpcPool.getClient().accountInfo(account.address);
+        if (live && (live.frontier !== account.frontier
+          || live.balance !== account.balanceRaw
+          || live.representative !== account.representative)) {
+          return await this.accountStore.update(account.id, {
+            frontier: live.frontier,
+            balanceRaw: live.balance,
+            representative: live.representative,
+          });
+        }
+      } catch {
+        // Preserve the cached state for transient upstream failures; the
+        // watcher/reconciliation loop remains responsible for eventual repair.
+      }
+    }
+    if (account.derivationIndex != null) {
       this.receiveOrchestrator?.enqueueReceivables(account.address, account.derivationIndex);
     }
     return account;
@@ -1047,7 +1082,10 @@ export class Runtime implements WatcherSink {
 
     if (idempotencyKey) {
       const replay = await this.idempotencyStore.get(IDEMPOTENCY_SCOPE.blockPublish, idempotencyKey);
-      if (replay) return { hash: replay.resourceId };
+      if (replay) {
+        this.trackBlockConfirmation(replay.resourceId);
+        return { hash: replay.resourceId };
+      }
     }
 
     const result = await client.process(block);
@@ -1067,7 +1105,66 @@ export class Runtime implements WatcherSink {
       resourceId: result.hash,
       resourceType: 'block',
     });
+    this.trackBlockConfirmation(result.hash);
     return result;
+  }
+
+  /**
+   * Confirm a caller-signed block without requiring the caller to expose keys
+   * or maintain a public Nano RPC connection. The RPC pool owns endpoint
+   * selection and retries; RaiFlow owns the state transition and event.
+   */
+  private trackBlockConfirmation(blockHash: string): void {
+    if (this.confirmingBlocks.has(blockHash) || !this.rpcPool) return;
+    const client = this.rpcPool.getClient();
+    if (typeof client.blockInfo !== 'function') return;
+
+    this.confirmingBlocks.add(blockHash);
+    const deadline = Date.now() + this.blockConfirmationTimeoutMs;
+    const poll = async (): Promise<void> => {
+      if (!this.confirmingBlocks.has(blockHash)) return;
+      try {
+        const info = await client.blockInfo(blockHash);
+        if (info?.confirmed) {
+          this.confirmingBlocks.delete(blockHash);
+          this.blockConfirmationTimers.delete(blockHash);
+          await this.emitV2Event({
+            id: randomUUID(),
+            type: 'block.confirmed',
+            timestamp: new Date().toISOString(),
+            data: { blockHash },
+            resourceId: blockHash,
+            resourceType: 'block',
+          });
+          return;
+        }
+      } catch {
+        // A provider may briefly reject block_info while propagating a block.
+        // Keep polling until the bounded confirmation deadline.
+      }
+
+      if (Date.now() >= deadline) {
+        this.confirmingBlocks.delete(blockHash);
+        this.blockConfirmationTimers.delete(blockHash);
+        await this.emitV2Event({
+          id: randomUUID(),
+          type: 'block.failed',
+          timestamp: new Date().toISOString(),
+          data: { blockHash, reason: 'confirmation timeout' },
+          resourceId: blockHash,
+          resourceType: 'block',
+        });
+        return;
+      }
+
+      const timer = setTimeout(() => void poll(), this.blockConfirmationIntervalMs);
+      this.blockConfirmationTimers.set(blockHash, timer);
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as NodeJS.Timeout).unref();
+      }
+    };
+
+    void poll();
   }
 
   async recordRpcState(state: RpcPoolState): Promise<void> {

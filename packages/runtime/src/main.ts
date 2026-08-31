@@ -488,8 +488,27 @@ async function toWebRequest(req: IncomingMessage): Promise<Request> {
 
 async function sendWebResponse(webRes: Response, res: ServerResponse): Promise<void> {
   res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
-  const responseBody = await webRes.text();
-  res.end(responseBody);
+  const body = webRes.body;
+  if (!body) {
+    res.end();
+    return;
+  }
+
+  // Do not call Response.text() here: that buffers indefinitely for SSE
+  // endpoints and prevents RaiFlow event consumers from seeing confirmations.
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!res.write(Buffer.from(value))) {
+        await new Promise<void>((resolve) => res.once('drain', resolve));
+      }
+    }
+  } finally {
+    reader.releaseLock();
+    res.end();
+  }
 }
 
 const server = createServer(async (req, res) => {
