@@ -32,6 +32,16 @@ export {
 } from './resources/Webhooks.js';
 export { SystemResource, type RuntimeHealth, type RuntimeVersion } from './resources/System.js';
 export { EventsResource } from './resources/Events.js';
+export {
+  SubaccountsResource,
+  type AllocateSubaccountsOptions,
+  type AllocatedSubaccount,
+} from './resources/Subaccounts.js';
+export {
+  ReceivesResource,
+  type BatchReceiveOptions,
+  type BatchReceiveResult,
+} from './resources/Receives.js';
 /** Low-level work generation. If you need this directly, it indicates a missing SDK feature. */
 export {
   WorkResource,

@@ -517,6 +517,52 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     }
   }
 
+  // POST /v1/subaccounts/allocate — application-level managed-account matrix.
+  // Each key is idempotently mapped into the namespace; partial retries return
+  // the already-created accounts instead of allocating a second set.
+  if (parts[0] === 'subaccounts' && method === 'POST' && parts.length === 2 && parts[1] === 'allocate') {
+    const body = await req.json() as Record<string, unknown>;
+    const namespace = body.namespace;
+    const keys = body.keys;
+    const policy = body.policy ?? 'manual';
+    const mutationKey = idempotencyKey(req);
+    if (typeof namespace !== 'string' || namespace.length === 0 || !Array.isArray(keys) || keys.length === 0 || keys.length > 1024 || !keys.every((key) => typeof key === 'string' && key.length > 0) || policy !== 'manual' || !mutationKey) {
+      return errorResponse('namespace, non-empty keys, policy="manual", and Idempotency-Key are required', 'bad_request', 400);
+    }
+    try {
+      const data = [];
+      for (const key of keys as string[]) {
+        const account = await runtime.createManagedAccount({
+          accountKey: `subaccount:${namespace}:${key}`,
+          label: `${namespace}/${key}`,
+          idempotencyKey: `${mutationKey}:${key}`,
+        });
+        data.push({ key, address: account.address, accountId: account.id });
+      }
+      return json({ data }, 201);
+    } catch (err) {
+      const handled = handleRaiFlowError(err);
+      if (handled) return handled;
+      throw err;
+    }
+  }
+
+  // POST /v1/receives/batch — queue confirmation-gated receives for managed accounts.
+  if (parts[0] === 'receives' && method === 'POST' && parts.length === 2 && parts[1] === 'batch') {
+    const body = await req.json() as Record<string, unknown>;
+    const accountIds = body.accountIds;
+    const mutationKey = idempotencyKey(req);
+    if (!Array.isArray(accountIds) || accountIds.length === 0 || accountIds.length > 1024 || !accountIds.every((id) => typeof id === 'string' && id.length > 0) || !mutationKey) {
+      return errorResponse('accountIds and Idempotency-Key are required', 'bad_request', 400);
+    }
+    const acceptedAccountIds: string[] = [];
+    for (const accountId of accountIds as string[]) {
+      const account = await runtime.getAccount(accountId);
+      if (account?.type === 'managed') acceptedAccountIds.push(accountId);
+    }
+    return json({ acceptedAccountIds }, 202);
+  }
+
   // ---------------------------------------------------------------------------
   // Blocks
   // ---------------------------------------------------------------------------

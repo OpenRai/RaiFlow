@@ -116,6 +116,47 @@ describe('GET / (wayfinder)', () => {
   });
 });
 
+describe('POST /v1/subaccounts/allocate', () => {
+  it('allocates a deterministic managed-account matrix and replays it idempotently', async () => {
+    const { runtime } = createTestRuntime();
+    const accounts = new Map<string, any>();
+    (runtime as any).accountStore = {
+      async create(account: any) { accounts.set(account.id, account); },
+      async list() { return [...accounts.values()]; },
+      async get(id: string) { return accounts.get(id); },
+    };
+    const handler = createHandler(runtime, createTestConfig());
+    const options = {
+      body: { namespace: 'game:test', policy: 'manual', keys: ['tile:0:0', 'tile:1:0'] },
+      headers: { 'Idempotency-Key': 'allocate-game-test' },
+    };
+    const first = await handler(req('POST', '/api/subaccounts/allocate', options));
+    expect(first.status).toBe(201);
+    const firstBody = await parseJson(first) as { data: Array<{ key: string; address: string; accountId: string }> };
+    expect(firstBody.data).toHaveLength(2);
+    const replay = await handler(req('POST', '/api/subaccounts/allocate', options));
+    expect(replay.status).toBe(201);
+    expect(await parseJson(replay)).toEqual(firstBody);
+  });
+});
+
+describe('POST /v1/receives/batch', () => {
+  it('queues only known managed accounts for RaiFlow-owned receiving', async () => {
+    const { runtime } = createTestRuntime();
+    const accounts = new Map<string, any>();
+    (runtime as any).accountStore = {
+      async create(account: any) { accounts.set(account.id, account); },
+      async list() { return [...accounts.values()]; },
+      async get(id: string) { return accounts.get(id); },
+    };
+    const managed = await runtime.createManagedAccount({ accountKey: 'receive-test', idempotencyKey: 'receive-create' });
+    const handler = createHandler(runtime, createTestConfig());
+    const response = await handler(req('POST', '/api/receives/batch', { body: { accountIds: [managed.id, 'missing'] } }));
+    expect(response.status).toBe(202);
+    expect(await parseJson(response)).toEqual({ acceptedAccountIds: [managed.id] });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Dashboard (GET /dashboard)
 // ---------------------------------------------------------------------------
