@@ -17,4 +17,22 @@ describe('@openrai/watcher nano-core defaults', () => {
     const client = new NanoWebSocketClient({});
     expect(client.getAuditReport()[0]?.url).toBe('wss://rpc.nano.to/');
   });
+
+  it('falls back to pending when a provider disables accounts_receivable', async () => {
+    const client = new NanoRpcClient({ url: 'https://nanoslo.example/proxy' }) as any;
+    const postJson = vi.fn()
+      .mockRejectedValueOnce(new Error('RPC request failed: HTTP error 500 Internal Server Error'))
+      .mockResolvedValueOnce({
+        blocks: { ABC123: { amount: '1', source: 'nano_1sender' } },
+      });
+    client.client.rpcPool.postJson = postJson;
+
+    await expect(client.accountsReceivable(['nano_1account'], 20)).resolves.toEqual({
+      nano_1account: ['ABC123'],
+    });
+    expect(postJson).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      action: 'pending',
+      account: 'nano_1account',
+    }));
+  });
 });

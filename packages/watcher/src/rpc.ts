@@ -66,6 +66,11 @@ interface RpcAccountsReceivableResponse {
   error?: string;
 }
 
+interface RpcPendingResponse {
+  blocks?: Record<string, { amount: string; source?: string; sender?: string }>;
+  error?: string;
+}
+
 export type AccountsReceivable = Record<string, string[]>;
 
 interface RpcBlockInfoResponse {
@@ -179,12 +184,34 @@ export class NanoRpcClient {
   }
 
   async accountsReceivable(accounts: string[], count: number): Promise<AccountsReceivable> {
-    const raw = await this.post<RpcAccountsReceivableResponse>({
-      action: 'accounts_receivable',
-      accounts,
-      count: String(count),
-      threshold: '1',
-    });
+    let raw: RpcAccountsReceivableResponse;
+    try {
+      raw = await this.post<RpcAccountsReceivableResponse>({
+        action: 'accounts_receivable',
+        accounts,
+        count: String(count),
+        threshold: '1',
+      });
+    } catch (error) {
+      // Some hosted nodes return HTTP 500 for the disabled
+      // accounts_receivable action. Retry the equivalent pending query while
+      // keeping provider-specific behavior behind RaiFlow's watcher boundary.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/HTTP error 500|accounts_receivable.*not allowed/i.test(message)) throw error;
+      const pending = await Promise.all(accounts.map(async (account) => {
+        const result = await this.post<RpcPendingResponse>({
+          action: 'pending',
+          account,
+          count: String(count),
+          threshold: '1',
+          source: true,
+        });
+        if (result.error === 'Account not found') return [account, []] as const;
+        if (result.error) throw new NanoRpcError(`pending error: ${result.error}`, 'RPC_ERROR');
+        return [account, Object.keys(result.blocks ?? {})] as const;
+      }));
+      return Object.fromEntries(pending);
+    }
 
     if (raw.error) throw new NanoRpcError(`accounts_receivable error: ${raw.error}`, 'RPC_ERROR');
 
