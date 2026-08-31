@@ -517,26 +517,34 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     }
   }
 
-  // POST /v1/subaccounts/allocate — application-level managed-account matrix.
-  // Each key is idempotently mapped into the namespace; partial retries return
-  // the already-created accounts instead of allocating a second set.
+  // POST /v1/subaccounts/allocate — application-level account matrix.
+  // Custodial runtimes derive managed accounts; non-custodial runtimes require
+  // caller-supplied addresses and register them as watched accounts. Each key
+  // is idempotently mapped into the namespace; partial retries return the
+  // already-created accounts instead of allocating a second set.
   if (parts[0] === 'subaccounts' && method === 'POST' && parts.length === 2 && parts[1] === 'allocate') {
     const body = await req.json() as Record<string, unknown>;
     const namespace = body.namespace;
     const keys = body.keys;
+    const addresses = body.addresses;
+    const addressMap = typeof addresses === 'object' && addresses !== null && !Array.isArray(addresses)
+      ? addresses as Record<string, unknown>
+      : undefined;
     const policy = body.policy ?? 'manual';
     const mutationKey = idempotencyKey(req);
     if (typeof namespace !== 'string' || namespace.length === 0 || !Array.isArray(keys) || keys.length === 0 || keys.length > 1024 || !keys.every((key) => typeof key === 'string' && key.length > 0) || policy !== 'manual' || !mutationKey) {
       return errorResponse('namespace, non-empty keys, policy="manual", and Idempotency-Key are required', 'bad_request', 400);
     }
+    if (runtime.mode === 'non-custodial' && (!addressMap || !keys.every((key) => typeof addressMap[key] === 'string' && (addressMap[key] as string).length > 0))) {
+      return errorResponse('addresses keyed by every subaccount key are required in non-custodial mode', 'bad_request', 400);
+    }
     try {
       const data = [];
       for (const key of keys as string[]) {
-        const account = await runtime.createManagedAccount({
-          accountKey: `subaccount:${namespace}:${key}`,
-          label: `${namespace}/${key}`,
-          idempotencyKey: `${mutationKey}:${key}`,
-        });
+        const externalAddress = addressMap?.[key];
+        const account = runtime.mode === 'non-custodial'
+          ? await runtime.createWatchedAccount({ address: externalAddress as string, label: `${namespace}/${key}`, idempotencyKey: `${mutationKey}:${key}` })
+          : await runtime.createManagedAccount({ accountKey: `subaccount:${namespace}:${key}`, label: `${namespace}/${key}`, idempotencyKey: `${mutationKey}:${key}` });
         data.push({ key, address: account.address, accountId: account.id });
       }
       return json({ data }, 201);
@@ -558,7 +566,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     const acceptedAccountIds: string[] = [];
     for (const accountId of accountIds as string[]) {
       const account = await runtime.getAccount(accountId);
-      if (account?.type === 'managed') acceptedAccountIds.push(accountId);
+      if (account?.type === 'managed' && runtime.mode !== 'non-custodial') acceptedAccountIds.push(accountId);
     }
     return json({ acceptedAccountIds }, 202);
   }

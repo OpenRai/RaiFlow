@@ -138,6 +138,25 @@ describe('POST /v1/subaccounts/allocate', () => {
     expect(replay.status).toBe(201);
     expect(await parseJson(replay)).toEqual(firstBody);
   });
+
+  it('registers caller-supplied watched accounts in non-custodial mode', async () => {
+    const { runtime } = createTestRuntime();
+    (runtime as any).mode = 'non-custodial';
+    const accounts = new Map<string, any>();
+    (runtime as any).accountStore = {
+      async create(account: any) { accounts.set(account.id, account); },
+      async get(id: string) { return accounts.get(id); },
+      async getByAddress(address: string) { return [...accounts.values()].find((account) => account.address === address); },
+    };
+    const handler = createHandler(runtime, createTestConfig());
+    const watchedAddress = 'nano_1111111111111111111111111111111111111111111111111111hifc8npp';
+    const response = await handler(req('POST', '/api/subaccounts/allocate', {
+      body: { namespace: 'game:non-custodial', policy: 'manual', keys: ['tile:0:0'], addresses: { 'tile:0:0': watchedAddress } },
+      headers: { 'Idempotency-Key': 'allocate-watched-test' },
+    }));
+    expect(response.status).toBe(201);
+    expect((await parseJson(response) as { data: Array<{ address: string }> }).data[0]?.address).toBe(watchedAddress);
+  });
 });
 
 describe('POST /v1/receives/batch', () => {

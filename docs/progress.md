@@ -68,6 +68,7 @@ packages/
 - **SDK** adds `accounts.watch()` returning an `AsyncIterable<AccountEvent>`, backed by a shared `SseConnection` with auto-reconnect.
 - Container image (`ghcr.io/openrai/raiflow`), Docker Compose example, and deployment quickstart are implemented. The runtime enforces Bearer auth when an API key is configured.
 - Pre-signed block publishing and work-generation APIs are exposed through both the runtime and SDK.
+- Application subaccount allocation now supports caller-supplied watched addresses in non-custodial mode, while preserving deterministic managed-account allocation in custodial mode.
 
 Remaining wallet follow-ups:
 - Persist generic operation leases so queued sends and receives recover safely across process crashes.
