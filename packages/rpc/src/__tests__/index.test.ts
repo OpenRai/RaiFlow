@@ -3,7 +3,7 @@ import { createRpcPool, createWsClient } from '../index.js';
 
 vi.mock('nano-rspow-node', () => ({
   generateWork: vi.fn().mockResolvedValue('test-work'),
-  WorkType: { Send: 'Send', Receive: 'Receive', Epoch1: 'Epoch1', Dev: 'Dev' },
+  WorkType: { Send: 'Send', Receive: 'Receive' },
 }));
 
 describe('@openrai/rpc nano-core defaults', () => {

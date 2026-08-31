@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@openrai/model": "workspace:*",
-    "@openrai/nano-core": "^3.0.4",
-    "nano-rspow-node": "^0.6.0"
+    "@openrai/nano-core": "^3.5.0",
+    "nano-rspow-node": "^0.17.1"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
