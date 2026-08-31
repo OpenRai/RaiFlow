@@ -217,7 +217,9 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
     } catch {
       rpcReady = false;
     }
-    return json({ status: rpcReady ? 'ready' : 'not_ready', checks: { rpc: rpcReady } }, rpcReady ? 200 : 503);
+    const accountsReady = accountStateSync?.isInitialSyncComplete() ?? true;
+    const ready = rpcReady && accountsReady;
+    return json({ status: ready ? 'ready' : 'not_ready', checks: { rpc: rpcReady, accounts: accountsReady } }, ready ? 200 : 503);
   }
 
   // v3 exposes one canonical API prefix. Legacy /api routes intentionally 404.

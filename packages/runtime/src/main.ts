@@ -420,35 +420,31 @@ watcher = new Watcher({
   pollIntervalMs,
 });
 
-// Seed state sync with existing accounts
+// Seed state sync with existing accounts after the listener is live. The sync
+// helper bounds account_info requests for large Proof-of-Play restores.
 const existingAccounts = await accountStore.list();
-let syncSuccess = 0;
-let syncFailed = 0;
-for (const acc of existingAccounts) {
-  try {
-    await accountStateSync.addAccount(acc.address);
-    syncSuccess++;
-  } catch (err) {
-    syncFailed++;
-    logger.warn(
-      `failed to sync account ${acc.address}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
-}
-if (syncFailed > 0) {
-  logger.warn(`account state sync completed with ${syncFailed} failures out of ${existingAccounts.length} accounts`);
-}
-
 runtime.watcher = watcher;
 watcher.start();
-logger.info('watcher started', `accounts=${existingAccounts.length} synced=${syncSuccess} failed=${syncFailed}`);
+logger.info('watcher started', `accounts=${existingAccounts.length} pending_initial_sync=true`);
 
 accountStateSync.start();
 logger.info('account state sync started');
 
 runtime.start();
 logger.info('runtime started');
+
+const startupConcurrencyRaw = Number.parseInt(process.env['RAIFLOW_STARTUP_ACCOUNT_CONCURRENCY'] ?? '4', 10);
+const startupConcurrency = Number.isFinite(startupConcurrencyRaw) && startupConcurrencyRaw > 0
+  ? startupConcurrencyRaw
+  : 4;
+void accountStateSync.syncExistingAccounts(
+  existingAccounts.map((account) => account.address),
+  startupConcurrency,
+).then(({ synced, failed }) => {
+  logger.info('account state sync completed', `accounts=${existingAccounts.length} synced=${synced} failed=${failed} concurrency=${startupConcurrency}`);
+}).catch((error) => {
+  logger.error('account state sync restore failed:', error instanceof Error ? error.message : String(error));
+});
 
 // ---------------------------------------------------------------------------
 // Handler

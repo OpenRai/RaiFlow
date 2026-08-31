@@ -26,6 +26,7 @@ export class AccountStateSync implements WatcherSink {
 
   /** Timestamp (Date.now()) until which reconciliation is suppressed due to rate-limiting. */
   private rateLimitedUntil = 0;
+  private initialSyncComplete = true;
 
   constructor(
     private readonly rpcPool: RpcPool,
@@ -89,6 +90,49 @@ export class AccountStateSync implements WatcherSink {
   removeAccount(address: string): void {
     this.watchedAccounts.delete(address);
     this.watcher.removeAccount(address);
+  }
+
+  /** Whether all accounts from the current startup restore have been synced. */
+  isInitialSyncComplete(): boolean {
+    return this.initialSyncComplete;
+  }
+
+  /** Restore persisted accounts with bounded account_info concurrency. */
+  async syncExistingAccounts(
+    addresses: string[],
+    concurrency = 4,
+  ): Promise<{ synced: number; failed: number }> {
+    if (addresses.length === 0) {
+      this.initialSyncComplete = true;
+      return { synced: 0, failed: 0 };
+    }
+    this.initialSyncComplete = false;
+    let next = 0;
+    let synced = 0;
+    let failed = 0;
+    const workerCount = Math.min(addresses.length, Math.max(1, Math.floor(concurrency)));
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const index = next++;
+        const address = addresses[index];
+        if (address === undefined) return;
+        try {
+          await this.addAccount(address);
+          synced++;
+        } catch (err) {
+          failed++;
+          console.warn(
+            `[account-state-sync] failed to restore ${address}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    this.initialSyncComplete = true;
+    return { synced, failed };
   }
 
   // -----------------------------------------------------------------------

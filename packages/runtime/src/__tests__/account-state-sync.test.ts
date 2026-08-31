@@ -233,4 +233,37 @@ describe('AccountStateSync', () => {
     expect(events).toHaveLength(2);
     expect(events.some((e) => e.accountAddress === 'nano_1b' && e.data.snapshot!.balanceRaw === '1000')).toBe(true);
   });
+
+  it('restores existing accounts with bounded concurrency and exposes readiness', async () => {
+    const addresses = ['nano_1a', 'nano_1b', 'nano_1c', 'nano_1d', 'nano_1e'];
+    const accounts = new Map(addresses.map((address, index) => [address, makeAccount({ id: `acc-${index}`, address })]));
+    (accountStore.getByAddress as ReturnType<typeof vi.fn>).mockImplementation((address: string) => Promise.resolve(accounts.get(address)));
+    (accountStore.get as ReturnType<typeof vi.fn>).mockImplementation((id: string) =>
+      Promise.resolve([...accounts.values()].find((account) => account.id === id)),
+    );
+    (accountStore.update as ReturnType<typeof vi.fn>).mockImplementation(async (_id: string, patch: any) => ({
+      ...makeAccount(),
+      ...patch,
+    }));
+
+    let active = 0;
+    let maxActive = 0;
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue({
+      accountInfo: vi.fn().mockImplementation(async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return { frontier: 'hash', balance: '1', representative: 'nano_1rep', blockCount: 1 };
+      }),
+    });
+
+    const restore = sync.syncExistingAccounts(addresses, 2);
+    expect(sync.isInitialSyncComplete()).toBe(false);
+    await vi.advanceTimersByTimeAsync(30);
+    await expect(restore).resolves.toEqual({ synced: 5, failed: 0 });
+
+    expect(maxActive).toBeLessThanOrEqual(2);
+    expect(sync.isInitialSyncComplete()).toBe(true);
+  });
 });
