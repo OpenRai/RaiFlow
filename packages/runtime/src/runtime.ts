@@ -416,6 +416,7 @@ export class Runtime implements WatcherSink {
         (this.receiveWorkerInterval as NodeJS.Timeout).unref();
       }
     }
+    void this.recoverBlockConfirmations();
   }
 
   /** Stop the expiry scheduler, send orchestrator, and shut down webhook delivery. */
@@ -1165,6 +1166,33 @@ export class Runtime implements WatcherSink {
     };
 
     void poll();
+  }
+
+  /** Re-arm confirmation polling for accepted blocks after a process restart. */
+  private async recoverBlockConfirmations(): Promise<void> {
+    const store = this.v2EventStore;
+    if (!store || !this.rpcPool) return;
+
+    try {
+      const [published, confirmed, failed] = await Promise.all([
+        store.list({ type: 'block.published', limit: 10_000 }),
+        store.list({ type: 'block.confirmed', limit: 10_000 }),
+        store.list({ type: 'block.failed', limit: 10_000 }),
+      ]);
+      const terminal = new Set(
+        [...confirmed, ...failed]
+          .map((event) => event.resourceId)
+          .filter((resourceId): resourceId is string => typeof resourceId === 'string'),
+      );
+      for (const event of published) {
+        if (event.resourceId && !terminal.has(event.resourceId)) {
+          this.trackBlockConfirmation(event.resourceId);
+        }
+      }
+    } catch {
+      // Startup recovery is best effort; a later publish or an operator
+      // restart can retry it without changing the publication contract.
+    }
   }
 
   async recordRpcState(state: RpcPoolState): Promise<void> {

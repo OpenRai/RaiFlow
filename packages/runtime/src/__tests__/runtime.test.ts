@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Account, AccountStore, EventStore, Send, SendStore } from '@openrai/model';
 import { Runtime, xnoToRaw } from '../runtime.js';
 import {
@@ -188,6 +188,75 @@ describe('global event polling', () => {
 
     const secondPage = await runtime.listEvents({ limit: 2, after: firstPage.nextCursor ?? undefined });
     expect(Array.isArray(secondPage.data)).toBe(true);
+  });
+});
+
+describe('caller-signed block confirmation recovery', () => {
+  it('re-arms unfinished published blocks after runtime startup', async () => {
+    const events: import('@openrai/model').RaiFlowEvent[] = [{
+      sequence: 1,
+      id: 'published-1',
+      type: 'block.published',
+      timestamp: new Date().toISOString(),
+      data: { blockHash: 'A'.repeat(64) },
+      resourceId: 'A'.repeat(64),
+      resourceType: 'block',
+    }];
+    const eventStore: EventStore = {
+      append: async (event) => { events.push({ ...event, sequence: events.length + 1 }); },
+      list: async (options) => events.filter((event) => !options?.type || event.type === options.type),
+    };
+    const blockInfo = vi.fn()
+      .mockResolvedValueOnce({ confirmed: false })
+      .mockResolvedValueOnce({ confirmed: true });
+    const runtime = new Runtime({
+      v2EventStore: eventStore,
+      rpcPool: { getClient: () => ({ blockInfo } as any) } as any,
+      blockConfirmationIntervalMs: 1,
+      blockConfirmationTimeoutMs: 100,
+    });
+
+    runtime.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(blockInfo).toHaveBeenCalledWith('A'.repeat(64));
+    expect(events.filter((event) => event.type === 'block.confirmed')).toHaveLength(1);
+    runtime.stop();
+  });
+
+  it('does not re-arm blocks that already have a terminal event', async () => {
+    const hash = 'B'.repeat(64);
+    const events: import('@openrai/model').RaiFlowEvent[] = [
+      {
+        sequence: 1,
+        id: 'published-2',
+        type: 'block.published',
+        timestamp: new Date().toISOString(),
+        data: { blockHash: hash },
+        resourceId: hash,
+        resourceType: 'block',
+      },
+      {
+        sequence: 2,
+        id: 'confirmed-2',
+        type: 'block.confirmed',
+        timestamp: new Date().toISOString(),
+        data: { blockHash: hash },
+        resourceId: hash,
+        resourceType: 'block',
+      },
+    ];
+    const blockInfo = vi.fn();
+    const runtime = new Runtime({
+      v2EventStore: { append: async () => {}, list: async (options) => events.filter((event) => !options?.type || event.type === options.type) },
+      rpcPool: { getClient: () => ({ blockInfo } as any) } as any,
+    });
+
+    runtime.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(blockInfo).not.toHaveBeenCalled();
+    runtime.stop();
   });
 });
 
