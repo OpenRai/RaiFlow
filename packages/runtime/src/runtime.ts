@@ -336,6 +336,7 @@ export class Runtime implements WatcherSink {
   private receiveTaskStore?: ReceiveTaskStore;
   private receiveOrchestrator?: ReceiveOrchestrator;
   private receiveWorkerInterval?: ReturnType<typeof setInterval>;
+  private receiveRecoveryInterval?: ReturnType<typeof setInterval>;
   private readonly listeners = new Map<string, Set<EventListener>>();
   private readonly sendOrchestrator?: SendOrchestrator;
   private readonly processingConfirmedBlocks = new Set<string>();
@@ -418,6 +419,14 @@ export class Runtime implements WatcherSink {
     }
     void this.recoverBlockConfirmations();
     void this.recoverReceiveConfirmations();
+    if (this.receiveRecoveryInterval === undefined) {
+      this.receiveRecoveryInterval = setInterval(() => {
+        void this.recoverReceiveConfirmations();
+      }, 30_000);
+      if (typeof this.receiveRecoveryInterval === 'object' && this.receiveRecoveryInterval !== null && 'unref' in this.receiveRecoveryInterval) {
+        (this.receiveRecoveryInterval as NodeJS.Timeout).unref();
+      }
+    }
   }
 
   /** Stop the expiry scheduler, send orchestrator, and shut down webhook delivery. */
@@ -430,6 +439,10 @@ export class Runtime implements WatcherSink {
     if (this.receiveWorkerInterval !== undefined) {
       clearInterval(this.receiveWorkerInterval);
       this.receiveWorkerInterval = undefined;
+    }
+    if (this.receiveRecoveryInterval !== undefined) {
+      clearInterval(this.receiveRecoveryInterval);
+      this.receiveRecoveryInterval = undefined;
     }
     for (const timer of this.blockConfirmationTimers.values()) clearTimeout(timer);
     this.blockConfirmationTimers.clear();
