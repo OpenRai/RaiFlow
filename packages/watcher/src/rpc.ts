@@ -219,7 +219,8 @@ export class NanoRpcClient {
       // request quota. Keep fallback requests sequential so a large watched
       // account set cannot exhaust every provider at once.
       const pending: Array<readonly [string, string[]]> = [];
-      for (const account of accounts) {
+      for (const [index, account] of accounts.entries()) {
+        if (index > 0) await new Promise<void>((resolve) => setTimeout(resolve, 250));
         const result = await this.post<RpcPendingResponse>({
           action: 'pending',
           account,
