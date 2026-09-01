@@ -1,6 +1,9 @@
 // @openrai/custody — Seed, derivation, signing, PoW, and frontier operations
 
 import type { Account, Send } from '@openrai/model';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import { NanoAddress, type StateBlock } from '@openrai/nano-core';
 import {
   createBlock,
@@ -9,7 +12,53 @@ import {
   deriveSecretKey,
   signBlock as signBlockRaw,
 } from 'nanocurrency';
-import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
+import { WorkType } from 'nano-rspow-node';
+
+/**
+ * nano-rspow-node's native binding can monopolise the Node event loop while
+ * searching for a nonce on slower hosts. Keep RaiFlow's HTTP/SSE surface
+ * responsive by running each proof search in a short-lived child process.
+ */
+function generateWorkInChild(hash: string, workType: WorkType): Promise<string> {
+  const cwd = dirname(fileURLToPath(import.meta.url));
+  const script = [
+    "import { generateWork, WorkType } from 'nano-rspow-node';",
+    `const value = await generateWork(${JSON.stringify(hash)}, WorkType[${JSON.stringify(workType)}]);`,
+    'process.stdout.write(value);',
+  ].join('\n');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Proof-of-work generation timed out'));
+    }, 180_000);
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `Proof-of-work process exited with code ${code}`));
+        return;
+      }
+      const work = stdout.trim();
+      if (!work) {
+        reject(new Error('Proof-of-work process returned no work'));
+        return;
+      }
+      resolve(work);
+    });
+  });
+}
 
 export type DerivationPath = { index: number };
 
@@ -182,10 +231,10 @@ export function createProviderCustodyEngine(config: ProviderCustodyConfig): Cust
       );
     },
     async generateWork(hash) {
-      return rspowGenerate(hash, WorkType.Send);
+      return generateWorkInChild(hash, WorkType.Send);
     },
     async generateReceiveWork(hash) {
-      return rspowGenerate(hash, WorkType.Receive);
+      return generateWorkInChild(hash, WorkType.Receive);
     },
   };
 }
@@ -344,11 +393,11 @@ export function createCustodyEngine(
     },
 
     async generateWork(hash: string): Promise<string> {
-      return rspowGenerate(hash, WorkType.Send);
+      return generateWorkInChild(hash, WorkType.Send);
     },
 
     async generateReceiveWork(hash: string): Promise<string> {
-      return rspowGenerate(hash, WorkType.Receive);
+      return generateWorkInChild(hash, WorkType.Receive);
     },
   };
 }
