@@ -37,7 +37,7 @@ function generateWorkInChild(hash: string, workType: WorkType): Promise<string> 
     const timeout = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error('Proof-of-work generation timed out'));
-    }, 180_000);
+    }, 900_000);
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
     child.once('error', (error) => {
