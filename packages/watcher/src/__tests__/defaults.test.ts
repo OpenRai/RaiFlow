@@ -45,4 +45,20 @@ describe('@openrai/watcher nano-core defaults', () => {
       account: 'nano_1account',
     }));
   });
+
+  it('fails over when a provider returns a JSON rate-limit error', async () => {
+    const client = new NanoRpcClient({
+      urls: ['https://limited.example/proxy', 'https://healthy.example/proxy'],
+    }) as any;
+    client.clients[0].rpcPool.postJson = vi.fn().mockResolvedValue({ error: 429 });
+    client.clients[1].rpcPool.postJson = vi.fn().mockResolvedValue({
+      blocks: { nano_1account: ['ABC123'] },
+    });
+
+    await expect(client.accountsReceivable(['nano_1account'], 20)).resolves.toEqual({
+      nano_1account: ['ABC123'],
+    });
+    expect(client.clients[0].rpcPool.postJson).toHaveBeenCalledTimes(1);
+    expect(client.clients[1].rpcPool.postJson).toHaveBeenCalledTimes(1);
+  });
 });

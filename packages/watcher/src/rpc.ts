@@ -114,37 +114,51 @@ export interface BlockInfo {
 
 export class NanoRpcClient {
   private readonly client: NanoClient;
+  private readonly clients: NanoClient[];
   private readonly timeoutMs: number;
 
   constructor(config: NanoRpcConfig) {
     this.timeoutMs = config.timeoutMs ?? 15_000;
     const urls = config.urls?.length ? config.urls : config.url ? [config.url] : undefined;
-    this.client = NanoClient.initialize({
-      ...(urls ? { rpc: urls } : {}),
-    });
+    this.clients = (urls ?? [undefined]).map((url) => NanoClient.initialize(url ? { rpc: [url] } : {}));
+    this.client = this.clients[0]!;
   }
 
   private async post<T>(body: Record<string, unknown>): Promise<T> {
-    try {
-      return await this.client.rpcPool.postJson<T>(body);
-    } catch (err) {
-      const isAbort = err instanceof Error && err.name === 'AbortError';
-      const message = isAbort
-        ? `RPC request timed out after ${this.timeoutMs}ms`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-
-      throw new NanoRpcError(
-        isAbort ? message : `RPC request failed: ${message}`,
-        isAbort ? 'TIMEOUT' : 'RPC_ERROR',
-        err,
-      );
+    let lastError: unknown;
+    for (const client of this.clients) {
+      try {
+        const result = await client.rpcPool.postJson<T>(body);
+        const rpcError = (result as Record<string, unknown>)['error'];
+        // Several hosted providers report quota exhaustion as HTTP 200 with
+        // an application-level error. Treat that as endpoint failure so the
+        // next configured RaiFlow endpoint gets a chance.
+        if (rpcError === 429 || /rate.?limit|quota/i.test(String(rpcError ?? ''))) {
+          lastError = new Error(`HTTP error 429 rate limited: ${String(rpcError)}`);
+          continue;
+        }
+        return result;
+      } catch (err) {
+        lastError = err;
+      }
     }
+
+    const isAbort = lastError instanceof Error && lastError.name === 'AbortError';
+    const message = isAbort
+      ? `RPC request timed out after ${this.timeoutMs}ms`
+      : lastError instanceof Error
+        ? lastError.message
+        : String(lastError);
+
+    throw new NanoRpcError(
+      isAbort ? message : `RPC request failed: ${message}`,
+      isAbort ? 'TIMEOUT' : 'RPC_ERROR',
+      lastError,
+    );
   }
 
   getAuditReport(): EndpointAuditRecord[] {
-    return this.client.rpcPool.getAuditReport();
+    return this.clients.flatMap((client) => client.rpcPool.getAuditReport());
   }
 
   async accountInfo(account: string): Promise<AccountInfo | undefined> {
