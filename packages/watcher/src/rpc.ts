@@ -220,7 +220,7 @@ export class NanoRpcClient {
       // account set cannot exhaust every provider at once.
       const pending: Array<readonly [string, string[]]> = [];
       for (const [index, account] of accounts.entries()) {
-        if (index > 0) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        if (index > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
         const result = await this.post<RpcPendingResponse>({
           action: 'pending',
           account,
