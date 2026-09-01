@@ -128,6 +128,19 @@ describe('AccountStateSync', () => {
     expect(events[0]!.data.snapshot!.balanceRaw).toBe('0');
   });
 
+  it('clears stale state when a watched account is still unopened', async () => {
+    const account = makeAccount({ balanceRaw: '20000000000000000000000000', frontier: 'stale-send-hash' });
+    (accountStore.getByAddress as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (accountStore.get as ReturnType<typeof vi.fn>).mockResolvedValue(account);
+    (rpcPool.getClient as ReturnType<typeof vi.fn>).mockReturnValue({
+      accountInfo: vi.fn().mockResolvedValue(null),
+    });
+
+    await sync.addAccount(TEST_ADDRESS);
+
+    expect(accountStore.update).toHaveBeenCalledWith('acc-1', { balanceRaw: '0', frontier: null });
+  });
+
   it('handleConfirmedBlock updates balance and frontier', async () => {
     const account = makeAccount({ balanceRaw: '1000', frontier: 'hash1' });
     (accountStore.getByAddress as ReturnType<typeof vi.fn>).mockResolvedValue(account);

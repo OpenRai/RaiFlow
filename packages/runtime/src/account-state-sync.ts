@@ -219,10 +219,20 @@ export class AccountStateSync implements WatcherSink {
       );
       return;
     }
-    if (!info) return; // unopened account
-
     const account = await this.accountStore.get(accountId);
     if (!account) return;
+
+    // An unopened account has no confirmed frontier. Never retain a cached
+    // frontier/balance from a previously misclassified pending send: doing so
+    // would make a client sign a receive block against a block it does not
+    // own. Pending funds are reconciled separately by the watcher.
+    if (!info) {
+      const updates: Partial<Parameters<AccountStore['update']>[1]> = {};
+      if (account.balanceRaw !== '0') updates.balanceRaw = '0';
+      if (account.frontier !== null) updates.frontier = null;
+      if (Object.keys(updates).length > 0) await this.accountStore.update(accountId, updates);
+      return;
+    }
 
     const updates: Partial<Parameters<AccountStore['update']>[1]> = {};
     const eventData: AccountEvent['data'] = {};
@@ -276,6 +286,11 @@ export class AccountStateSync implements WatcherSink {
     if (info) {
       if (info.balance !== account.balanceRaw) updates.balanceRaw = info.balance;
       if (info.frontier !== account.frontier) updates.frontier = info.frontier;
+    } else {
+      // Account-not-found means the account is unopened; clear any stale
+      // cached frontier so clients can construct the open receive block.
+      if (account.balanceRaw !== '0') updates.balanceRaw = '0';
+      if (account.frontier !== null) updates.frontier = null;
     }
 
     const updated = Object.keys(updates).length > 0
