@@ -417,6 +417,7 @@ export class Runtime implements WatcherSink {
       }
     }
     void this.recoverBlockConfirmations();
+    void this.recoverReceiveConfirmations();
   }
 
   /** Stop the expiry scheduler, send orchestrator, and shut down webhook delivery. */
@@ -1206,6 +1207,44 @@ export class Runtime implements WatcherSink {
     } catch {
       // Startup recovery is best effort; a later publish or an operator
       // restart can retry it without changing the publication contract.
+    }
+  }
+
+  /**
+   * Recover invoice payments whose incoming send was received by RaiFlow but
+   * whose watcher event was missed (for example during an RPC outage). The
+   * receive task keeps the original pending-send hash, so a confirmed block
+   * lookup is enough to replay the normal idempotent invoice transition.
+   */
+  private async recoverReceiveConfirmations(): Promise<void> {
+    if (!this.receiveTaskStore || !this.rpcPool) return;
+
+    try {
+      const tasks = [
+        ...(await this.receiveTaskStore.listByStatus('published')),
+        ...(await this.receiveTaskStore.listByStatus('confirmed')),
+      ];
+      const client = this.rpcPool.getClient();
+      for (const task of tasks) {
+        try {
+          const info = await client.blockInfo(task.pendingBlockHash);
+          if (!info?.confirmed || (info.subtype !== undefined && info.subtype !== 'send')) continue;
+          await this.handleConfirmedBlock({
+            blockHash: task.pendingBlockHash,
+            senderAccount: info.blockAccount ?? '',
+            recipientAccount: task.accountAddress,
+            amountRaw: info.amount ?? task.amountRaw,
+            confirmedAt: info.localTimestamp
+              ? new Date(Number(info.localTimestamp) * 1000).toISOString()
+              : new Date().toISOString(),
+          });
+        } catch {
+          // A provider may not know the block yet; the next restart or watcher
+          // delivery will retry without changing the payment contract.
+        }
+      }
+    } catch {
+      // Startup recovery is best effort and must not prevent RaiFlow startup.
     }
   }
 
