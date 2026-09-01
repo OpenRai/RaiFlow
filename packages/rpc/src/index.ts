@@ -200,6 +200,13 @@ class PooledRpcClient implements RpcClient {
       }
 
       const json = (await response.json()) as T;
+      // Providers commonly report rate limiting as an HTTP-200 Nano RPC
+      // payload (`{"error":429}`) rather than an HTTP 429 response. Treat
+      // that as endpoint failure so the pool can fail over instead of leaking
+      // an application error to every caller.
+      if (json && (json as Record<string, unknown>).error === 429) {
+        throw new Error('HTTP error 429 rate limited');
+      }
       // Return the raw JSON — including any `error` field.
       // The caller decides how to handle application-level errors.
       // Transport errors (above) are the only ones that poison the pool.

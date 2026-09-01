@@ -171,6 +171,27 @@ describe('@openrai/rpc process', () => {
   });
 });
 
+describe('@openrai/rpc endpoint failover', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('fails over when a provider returns a JSON rate-limit error', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 429 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        frontier: 'ABC', balance: '7', representative: 'nano_1rep', block_count: '1',
+      }), { status: 200 }));
+    const pool = createRpcPool([{ rpc: ['https://limited.example.com', 'https://healthy.example.com'], ws: [] }]);
+
+    await expect(pool.getClient().accountInfo('nano_1account')).resolves.toEqual({
+      frontier: 'ABC', balance: '7', representative: 'nano_1rep', block_count: '1',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('healthy.example.com');
+  });
+});
+
 describe('@openrai/rpc healthCheck', () => {
   it('requires a successful version response with a node vendor', async () => {
     const client = createRpcPool([]).getClient() as any;
