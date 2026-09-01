@@ -249,7 +249,7 @@ class PooledRpcClient implements RpcClient {
     // Keep that provider quirk behind RaiFlow's state-aware RPC boundary.
     // "Account not found" simply means zero receivable blocks.
     if (result.error === 'Account not found') return [];
-    if (result.error && /not allowed|unknown action/i.test(String(result.error))) {
+    if (result.error && /not allowed|not supported|unsupported|unknown action/i.test(String(result.error))) {
       const pending = await this.rpcCall<Record<string, unknown>>({
         action: 'pending',
         account,

@@ -214,7 +214,7 @@ export class NanoRpcClient {
       // accounts_receivable action. Retry the equivalent pending query while
       // keeping provider-specific behavior behind RaiFlow's watcher boundary.
       const message = error instanceof Error ? error.message : String(error);
-      if (!/HTTP error 500|accounts_receivable.*not allowed/i.test(message)) throw error;
+      if (!/HTTP error 500|accounts_receivable.*(?:not allowed|not supported|unsupported)/i.test(message)) throw error;
       // Hosted Nano proxies often impose burst limits in addition to their
       // request quota. Keep fallback requests sequential so a large watched
       // account set cannot exhaust every provider at once.
