@@ -11,6 +11,14 @@ import {
 } from './helpers.js';
 
 describe('createInvoice', () => {
+  it('registers each invoice pay address with the watcher', async () => {
+    const watcher = { addAccount: vi.fn(), removeAccount: vi.fn() };
+    const { runtime } = createTestRuntime({ watcher });
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-watch', expectedAmountRaw: ONE_XNO });
+
+    expect(watcher.addAccount).toHaveBeenCalledWith(invoice.payAddress);
+  });
+
   it('derives payAddress and defaults status/amount fields', async () => {
     const { runtime } = createTestRuntime();
     const invoice = await runtime.createInvoice({ accountKey: 'acct-1', expectedAmountRaw: ONE_XNO });

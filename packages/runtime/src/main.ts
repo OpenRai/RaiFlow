@@ -423,9 +423,11 @@ watcher = new Watcher({
 // Seed state sync with existing accounts after the listener is live. The sync
 // helper bounds account_info requests for large Proof-of-Play restores.
 const existingAccounts = await accountStore.list();
+const existingOpenInvoices = await invoiceStore.list({ status: 'open' });
 runtime.watcher = watcher;
 watcher.start();
-logger.info('watcher started', `accounts=${existingAccounts.length} pending_initial_sync=true`);
+for (const invoice of existingOpenInvoices) watcher.addAccount(invoice.recipientAccount);
+logger.info('watcher started', `accounts=${existingAccounts.length} invoice_accounts=${existingOpenInvoices.length} pending_initial_sync=true`);
 
 accountStateSync.start();
 logger.info('account state sync started');

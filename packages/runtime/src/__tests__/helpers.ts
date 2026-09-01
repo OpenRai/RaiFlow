@@ -32,7 +32,7 @@ export function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): 
   };
 }
 
-export function createTestRuntime() {
+export function createTestRuntime(options: { watcher?: { addAccount(account: string): void; removeAccount(account: string): void } } = {}) {
   const deliveredEvents: { event: RaiFlowEvent; endpoints: unknown[] }[] = [];
   const fakeDelivery: WebhookDelivery = {
     deliver: async (event: unknown, endpoints: unknown[]) => {
@@ -65,7 +65,7 @@ export function createTestRuntime() {
         .slice(0, limit);
     },
   };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery, custodyEngine, v2EventStore });
+  const runtime = new Runtime({ webhookDelivery: fakeDelivery, custodyEngine, v2EventStore, watcher: options.watcher });
   return { runtime, deliveredEvents };
 }
 

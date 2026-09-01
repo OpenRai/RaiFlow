@@ -506,6 +506,9 @@ export class Runtime implements WatcherSink {
     );
 
     const payAddress = invoiceAccount.address;
+    console.info(
+      `[raiflow] invoice account resolved: ADDRESS=${payAddress} ALIAS=${params.accountKey}`,
+    );
 
     const invoice: LegacyInvoice = {
       id: randomUUID(),
@@ -546,6 +549,10 @@ export class Runtime implements WatcherSink {
       resourceType: 'invoice',
     });
 
+    // Invoice accounts are not managed accounts and therefore are not in the
+    // account-state store. They must still be watched so confirmed incoming
+    // sends reach invoice matching and the receive orchestrator.
+    this.watcher?.addAccount(payAddress);
     this.receiveOrchestrator?.enqueueReceivables(payAddress, derivationIndex);
 
     return legacyToV2Invoice(stored, idempotencyKey);
@@ -595,8 +602,11 @@ export class Runtime implements WatcherSink {
 
     const info = await client.accountInfo(account.address).catch(() => undefined);
     const receivable = await client.accountsReceivable(account.address).catch(() => []);
+    // Unopened-account RPC responses can contain placeholder entries without
+    // an amount. Ignore those rather than turning a status read into a 500.
     const pendingRaw = receivable
-      .reduce((sum, block) => sum + BigInt(block.amount), 0n)
+      .filter((block) => typeof (block as { amount?: unknown })?.amount === 'string')
+      .reduce((sum, block) => sum + BigInt((block as { amount: string }).amount), 0n)
       .toString();
 
     return {
@@ -681,6 +691,10 @@ export class Runtime implements WatcherSink {
   private async persistAccount(account: Account): Promise<Account> {
     await this.accountStore!.create(account);
     this.watcher?.addAccount(account.address);
+    console.info(
+      `[raiflow] ${account.type} account created: ADDRESS=${account.address}`
+        + (account.accountKey ? ` ALIAS=${account.accountKey}` : ''),
+    );
     await this.emitV2Event({
       id: randomUUID(),
       type: 'account.created',

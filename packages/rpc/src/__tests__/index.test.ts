@@ -137,6 +137,21 @@ describe('@openrai/rpc accountsReceivable', () => {
       sender: 'nano_2sender',
     });
   });
+
+  it('normalizes the account-scoped accounts_receivable response', async () => {
+    const account = 'nano_1testaccountxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+    mockPostJson(() => ({
+      blocks: {
+        [account]: {
+          block_hash_nested: { amount: '7', source: 'nano_1sender' },
+        },
+      },
+    }));
+
+    await expect(client.accountsReceivable(account)).resolves.toEqual([{
+      hash: 'block_hash_nested', amount: '7', sender: 'nano_1sender',
+    }]);
+  });
 });
 
 describe('@openrai/rpc process', () => {

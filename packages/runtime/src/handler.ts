@@ -676,6 +676,9 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
+        // Prevent reverse proxies from buffering keepalive frames until the
+        // client-side idle timeout closes this long-lived stream.
+        'X-Accel-Buffering': 'no',
       },
     });
   }

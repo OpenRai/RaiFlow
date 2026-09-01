@@ -264,14 +264,25 @@ class PooledRpcClient implements RpcClient {
       throw new Error(`accounts_receivable error: ${result.error}`);
     }
 
-    const blocks = result.blocks as Record<string, { amount: string; sender: string }> | undefined;
-    if (!blocks) return [];
+    const rawBlocks = result.blocks as Record<string, unknown> | undefined;
+    if (!rawBlocks) return [];
+    // The Nano RPC `accounts_receivable` response is account-scoped:
+    // { blocks: { [account]: { [hash]: { amount, source } } } }. Some
+    // providers return the inner hash map directly, so accept both forms at
+    // this boundary and never leak the account address as a block hash.
+    const nested = rawBlocks[account];
+    const blocks = (nested && typeof nested === 'object' ? nested : rawBlocks) as Record<string, unknown>;
 
-    return Object.entries(blocks).map(([hash, block]) => ({
-      hash,
-      amount: block.amount,
-      sender: block.sender,
-    }));
+    return Object.entries(blocks).flatMap(([hash, value]) => {
+      if (!value || typeof value !== 'object') return [];
+      const block = value as { amount?: unknown; sender?: unknown; source?: unknown };
+      if (typeof block.amount !== 'string') return [];
+      return [{
+        hash,
+        amount: block.amount,
+        sender: typeof block.sender === 'string' ? block.sender : typeof block.source === 'string' ? block.source : '',
+      }];
+    });
   }
 
   async process(block: string): Promise<ProcessResponse> {
