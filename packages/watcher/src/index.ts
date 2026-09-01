@@ -12,7 +12,7 @@
  *
  * Types:
  *   WatcherConfig
- *   NanoRpcConfig, NanoRpcError
+ *   NanoRpcConfig, NanoRpcError (including multi-endpoint failover)
  *   AccountInfo, HistoryBlock, BlockInfo, AccountsReceivable
  *   NanoWebSocketConfig
  *   PollerConfig

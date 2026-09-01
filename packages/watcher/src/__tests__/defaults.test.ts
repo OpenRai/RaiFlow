@@ -13,6 +13,16 @@ describe('@openrai/watcher nano-core defaults', () => {
     expect(client.getAuditReport()[0]?.url).toBe('https://rpc.nano.to/');
   });
 
+  it('retains all configured RPC URLs for failover', () => {
+    const client = new NanoRpcClient({
+      urls: ['https://first.example/proxy', 'https://second.example/proxy'],
+    });
+    expect(client.getAuditReport().map((entry) => entry.url)).toEqual([
+      'https://first.example/proxy',
+      'https://second.example/proxy',
+    ]);
+  });
+
   it('constructs WebSocket client without an explicit URL', () => {
     const client = new NanoWebSocketClient({});
     expect(client.getAuditReport()[0]?.url).toBe('wss://rpc.nano.to/');

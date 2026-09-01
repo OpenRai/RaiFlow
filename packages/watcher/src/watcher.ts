@@ -35,6 +35,8 @@ export interface WatcherConfig {
    * In WebSocket mode it is currently unused but reserved for future initial-sync support.
    */
   rpcUrl?: string;
+  /** HTTP RPC URLs used as a failover pool for polling and reconciliation. */
+  rpcUrls?: string[];
   /** Accounts to watch for incoming confirmed sends. */
   accounts: string[];
   /** The sink that receives confirmed block events. */
@@ -64,6 +66,7 @@ export class Watcher {
   constructor(config: WatcherConfig) {
     this.config = config;
     this.rpc = new NanoRpcClient({
+      urls: config.rpcUrls,
       url: config.rpcUrl,
       timeoutMs: config.rpcTimeoutMs,
     });

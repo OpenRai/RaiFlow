@@ -414,7 +414,7 @@ const accountStateSync = new AccountStateSync(
 
 watcher = new Watcher({
   wsUrl: config.nano.ws[0],
-  rpcUrl: config.nano.rpc[0],
+  rpcUrls: config.nano.rpc,
   accounts: [],
   sink: accountStateSync,
   pollIntervalMs,

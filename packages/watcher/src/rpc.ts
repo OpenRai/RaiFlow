@@ -2,6 +2,8 @@ import { NanoClient } from '@openrai/nano-core';
 import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 
 export interface NanoRpcConfig {
+  /** RPC URLs to use as a failover pool. */
+  urls?: string[];
   url?: string;
   /** Request timeout in milliseconds. Default: 15000 */
   timeoutMs?: number;
@@ -116,8 +118,9 @@ export class NanoRpcClient {
 
   constructor(config: NanoRpcConfig) {
     this.timeoutMs = config.timeoutMs ?? 15_000;
+    const urls = config.urls?.length ? config.urls : config.url ? [config.url] : undefined;
     this.client = NanoClient.initialize({
-      ...(config.url ? { rpc: [config.url] } : {}),
+      ...(urls ? { rpc: urls } : {}),
     });
   }
 
