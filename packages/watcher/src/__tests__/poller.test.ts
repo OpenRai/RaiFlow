@@ -53,6 +53,9 @@ describe('NanoPoller', () => {
       });
 
       poller.start(mockSink);
+      // Let the start() immediate sweep finish before explicitly invoking the
+      // private method; the poller deliberately rejects overlapping sweeps.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       // @ts-ignore - access private method for testing
       await poller.poll();
 

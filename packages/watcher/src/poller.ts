@@ -50,6 +50,8 @@ export class NanoPoller {
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** Prevent a slow provider sweep from overlapping the next interval tick. */
+  private polling = false;
 
   /** Timestamp (Date.now()) until which polling is suppressed due to rate-limiting. */
   private rateLimitedUntil = 0;
@@ -105,6 +107,18 @@ export class NanoPoller {
   // -------------------------------------------------------------------------
 
   private async poll(): Promise<void> {
+    if (!this.running || this.watchedAccounts.size === 0) return;
+    if (this.polling) return;
+    this.polling = true;
+
+    try {
+      await this.pollOnce();
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     if (!this.running || this.watchedAccounts.size === 0) return;
 
     if (Date.now() < this.rateLimitedUntil) {
