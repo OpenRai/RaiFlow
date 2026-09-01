@@ -215,7 +215,11 @@ export class NanoRpcClient {
       // keeping provider-specific behavior behind RaiFlow's watcher boundary.
       const message = error instanceof Error ? error.message : String(error);
       if (!/HTTP error 500|accounts_receivable.*not allowed/i.test(message)) throw error;
-      const pending = await Promise.all(accounts.map(async (account) => {
+      // Hosted Nano proxies often impose burst limits in addition to their
+      // request quota. Keep fallback requests sequential so a large watched
+      // account set cannot exhaust every provider at once.
+      const pending: Array<readonly [string, string[]]> = [];
+      for (const account of accounts) {
         const result = await this.post<RpcPendingResponse>({
           action: 'pending',
           account,
@@ -223,10 +227,13 @@ export class NanoRpcClient {
           threshold: '1',
           source: true,
         });
-        if (result.error === 'Account not found') return [account, []] as const;
-        if (result.error) throw new NanoRpcError(`pending error: ${result.error}`, 'RPC_ERROR');
-        return [account, Object.keys(result.blocks ?? {})] as const;
-      }));
+        if (result.error === 'Account not found') {
+          pending.push([account, []]);
+        } else {
+          if (result.error) throw new NanoRpcError(`pending error: ${result.error}`, 'RPC_ERROR');
+          pending.push([account, Object.keys(result.blocks ?? {})]);
+        }
+      }
       return Object.fromEntries(pending);
     }
 
