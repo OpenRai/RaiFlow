@@ -142,6 +142,7 @@ export class SendOrchestrator {
         resourceId: published.id,
         resourceType: 'send',
       });
+      void this.confirmPublishedSend(published.id, result.hash);
     } catch (err) {
       // On failure, mark as failed and emit event
       const failed = await this.sendStore.update(send.id, {
@@ -156,6 +157,37 @@ export class SendOrchestrator {
         resourceId: failed.id,
         resourceType: 'send',
       });
+    }
+  }
+
+  /** Reconcile send confirmation even when no WebSocket watcher is configured. */
+  private async confirmPublishedSend(sendId: string, blockHash: string): Promise<void> {
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      try {
+        const info = await this.rpcPool.getClient().blockInfo(blockHash);
+        if (info?.confirmed) {
+          const current = await this.sendStore.get(sendId);
+          if (current?.status !== 'confirmed') {
+            const confirmed = await this.sendStore.update(sendId, {
+              status: 'confirmed',
+              confirmedAt: new Date().toISOString(),
+            });
+            await this.emitEvent({
+              id: randomUUID(),
+              type: 'send.confirmed',
+              timestamp: new Date().toISOString(),
+              data: { send: confirmed },
+              resourceId: confirmed.id,
+              resourceType: 'send',
+            });
+          }
+          return;
+        }
+      } catch {
+        // Keep polling through brief provider propagation/rate-limit failures.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
   }
 }
