@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "RaiFlow",
+  "project_id": "9f9ab455-6d20-4d7c-acdf-f65543fc95e1"
+}
