@@ -86,8 +86,9 @@ export class ReceiveOrchestrator {
 
         const blockJson = JSON.parse(signed.contents) as Record<string, unknown>;
         blockJson['work'] = work;
+        let receiveBlockHash: string | undefined;
         try {
-          await client.process(JSON.stringify(blockJson));
+          receiveBlockHash = (await client.process(JSON.stringify(blockJson))).hash;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (!message.includes('Old block')) throw error;
@@ -95,7 +96,16 @@ export class ReceiveOrchestrator {
 
         await this.receiveTaskStore.update(task.id, {
           status: 'published',
+          receiveBlockHash: receiveBlockHash ?? null,
           publishedAt: new Date().toISOString(),
+        });
+        await this.emitEvent({
+          id: randomUUID(),
+          type: 'receive.published',
+          timestamp: new Date().toISOString(),
+          data: { receive: { ...task, status: 'published', receiveBlockHash: receiveBlockHash ?? null } },
+          resourceId: task.id,
+          resourceType: 'account',
         });
       } catch (err) {
         const retryCount = (task.retryCount ?? 0) + 1;
@@ -137,6 +147,25 @@ export class ReceiveOrchestrator {
     await this.receiveTaskStore.update(task.id, {
       status: 'confirmed',
       confirmedAt: new Date().toISOString(),
+    });
+  }
+
+  /** Mark RaiFlow's own receive/open block confirmed, then emit a durable event. */
+  async handleConfirmedReceiveBlock(blockHash: string): Promise<void> {
+    const published = await this.receiveTaskStore.listByStatus('published');
+    const task = published.find((candidate) => candidate.receiveBlockHash === blockHash);
+    if (!task) return;
+    const updated = await this.receiveTaskStore.update(task.id, {
+      status: 'confirmed',
+      confirmedAt: new Date().toISOString(),
+    });
+    await this.emitEvent({
+      id: randomUUID(),
+      type: 'receive.confirmed',
+      timestamp: new Date().toISOString(),
+      data: { receive: updated, pendingBlockHash: updated.pendingBlockHash, receiveBlockHash: blockHash },
+      resourceId: task.id,
+      resourceType: 'account',
     });
   }
 

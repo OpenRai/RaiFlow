@@ -35,6 +35,20 @@ export class InvoicesResource {
     return this.client.request<Invoice>('GET', `/invoices/${id}`);
   }
 
+  /** Resolve an invoice by the stable application account/invoice identity. */
+  public async getByKey(accountKey: string, invoiceKey: string | null): Promise<Invoice | undefined> {
+    const params = new URLSearchParams({ accountKey });
+    if (invoiceKey !== null) params.set('invoiceKey', invoiceKey);
+    try {
+      return await this.client.request<Invoice>('GET', `/invoices/by-key?${params.toString()}`);
+    } catch (error) {
+      // RaiFlow returns a normal 404 for an unknown compound key. Keep the
+      // resource ergonomic while preserving other API failures for callers.
+      if (error instanceof Error && /404|not found/i.test(error.message)) return undefined;
+      throw error;
+    }
+  }
+
   public async list(options?: ListInvoicesOptions): Promise<{ data: Invoice[] }> {
     const params = new URLSearchParams();
     if (options?.status) params.set('status', options.status);

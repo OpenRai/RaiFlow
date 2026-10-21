@@ -67,6 +67,6 @@ VOLUME /data
 ENV NODE_ENV=production
 ENV RAIFLOW_CONFIG_PATH=/app/raiflow.yml
 EXPOSE 3100
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "fetch('http://localhost:3100/health/live').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=8s --start-period=10s --retries=3 \
+  CMD node packages/runtime/docker/healthcheck.mjs
 CMD ["node", "packages/runtime/dist/main.js"]

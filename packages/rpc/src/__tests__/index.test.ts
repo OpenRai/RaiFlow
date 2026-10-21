@@ -171,6 +171,28 @@ describe('@openrai/rpc process', () => {
   });
 });
 
+describe('@openrai/rpc blockInfo', () => {
+  it('decodes a state-send destination for direct invoice matching', async () => {
+    const client = createRpcPool([]).getClient() as any;
+    client.rpcCall = vi.fn().mockResolvedValue({
+      confirmed: 'true',
+      subtype: 'send',
+      block_account: 'nano_1sender',
+      amount: '1',
+      local_timestamp: '42',
+      contents: { link_as_account: 'nano_1recipient' },
+    });
+    await expect(client.blockInfo('A'.repeat(64))).resolves.toEqual({
+      confirmed: true,
+      subtype: 'send',
+      blockAccount: 'nano_1sender',
+      amount: '1',
+      recipientAccount: 'nano_1recipient',
+      localTimestamp: '42',
+    });
+  });
+});
+
 describe('@openrai/rpc endpoint failover', () => {
   afterEach(() => {
     vi.restoreAllMocks();

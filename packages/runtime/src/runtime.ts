@@ -584,6 +584,22 @@ export class Runtime implements WatcherSink {
     return legacyToV2Invoice(invoice);
   }
 
+  /** Resolve one invoice without scanning the account's invoice list. */
+  async getInvoiceByAccountKeyAndInvoiceKey(
+    accountKey: string,
+    invoiceKey: string | null,
+  ): Promise<Invoice | undefined> {
+    const invoice = await this.invoiceStore.getByAccountKeyAndInvoiceKey(accountKey, invoiceKey);
+    if (!invoice) return undefined;
+    if (invoice.derivationIndex != null) {
+      this.receiveOrchestrator?.enqueueReceivables(
+        (invoice as LegacyInvoice & { payAddress?: string }).payAddress ?? invoice.recipientAccount,
+        invoice.derivationIndex,
+      );
+    }
+    return legacyToV2Invoice(invoice);
+  }
+
   async listInvoices(filter?: { status?: InvoiceStatus }): Promise<Invoice[]> {
     const invoices = await this.invoiceStore.list(filter);
     return invoices.map((invoice) => legacyToV2Invoice(invoice));
@@ -619,8 +635,9 @@ export class Runtime implements WatcherSink {
     // Unopened-account RPC responses can contain placeholder entries without
     // an amount. Ignore those rather than turning a status read into a 500.
     const pendingRaw = receivable
-      .filter((block) => typeof (block as { amount?: unknown })?.amount === 'string')
-      .reduce((sum, block) => sum + BigInt((block as { amount: string }).amount), 0n)
+      .map((block) => (block as { amount?: unknown })?.amount)
+      .filter((amount): amount is string => typeof amount === 'string' && /^\d+$/.test(amount))
+      .reduce((sum, amount) => sum + BigInt(amount), 0n)
       .toString();
 
     return {
@@ -705,6 +722,7 @@ export class Runtime implements WatcherSink {
   private async persistAccount(account: Account): Promise<Account> {
     await this.accountStore!.create(account);
     this.watcher?.addAccount(account.address);
+
     console.info(
       `[raiflow] ${account.type} account created: ADDRESS=${account.address}`
         + (account.accountKey ? ` ALIAS=${account.accountKey}` : ''),
@@ -748,13 +766,19 @@ export class Runtime implements WatcherSink {
       );
       if (replay) {
         const existing = await this.accountStore.get(replay.resourceId);
-        if (existing) return existing;
+        if (existing) {
+          this.watcher?.addAccount(existing.address);
+          return existing;
+        }
       }
     }
 
     const managedAccounts = await this.accountStore.list({ type: 'managed' });
     const existingByKey = managedAccounts.find((account) => account.accountKey === params.accountKey);
-    if (existingByKey) return existingByKey;
+    if (existingByKey) {
+      this.watcher?.addAccount(existingByKey.address);
+      return existingByKey;
+    }
     const nextIndex = deriveManagedIndex(params.accountKey);
     if (managedAccounts.some((account) => account.derivationIndex === nextIndex)) {
       throw RaiFlowError.conflict(`Managed account derivation collision at index ${nextIndex}`);
@@ -1157,11 +1181,31 @@ export class Runtime implements WatcherSink {
         if (info?.confirmed) {
           this.confirmingBlocks.delete(blockHash);
           this.blockConfirmationTimers.delete(blockHash);
+          // Caller-signed publishes do not pass through the watcher. Once the
+          // confirmation probe has the decoded send details, feed the same
+          // idempotent ingestion path used by watched-account confirmations so
+          // invoices complete immediately; the watcher remains recovery-only.
+          if (info.subtype === 'send' && info.blockAccount && info.recipientAccount && info.amount) {
+            await this.handleConfirmedBlock({
+              blockHash,
+              senderAccount: info.blockAccount,
+              recipientAccount: info.recipientAccount,
+              amountRaw: info.amount,
+              confirmedAt: info.localTimestamp
+                ? new Date(Number(info.localTimestamp) * 1000).toISOString()
+                : new Date().toISOString(),
+            });
+          }
           await this.emitV2Event({
             id: randomUUID(),
             type: 'block.confirmed',
             timestamp: new Date().toISOString(),
-            data: { blockHash },
+            data: {
+              blockHash,
+              ...(info.blockAccount ? { senderAccount: info.blockAccount } : {}),
+              ...(info.recipientAccount ? { recipientAccount: info.recipientAccount } : {}),
+              ...(info.amount ? { amountRaw: info.amount } : {}),
+            },
             resourceId: blockHash,
             resourceType: 'block',
           });
@@ -1240,6 +1284,15 @@ export class Runtime implements WatcherSink {
       const client = this.rpcPool.getClient();
       for (const task of tasks) {
         try {
+          // A receive task has its own state block. Confirming the original
+          // pending send only proves that funds became receivable; the task is
+          // complete when RaiFlow's receive/open block is confirmed.
+          if (task.status === 'published' && task.receiveBlockHash) {
+            const receiveInfo = await client.blockInfo(task.receiveBlockHash);
+            if (receiveInfo?.confirmed) {
+              await this.receiveOrchestrator?.handleConfirmedReceiveBlock(task.receiveBlockHash);
+            }
+          }
           const info = await client.blockInfo(task.pendingBlockHash);
           if (!info?.confirmed || (info.subtype !== undefined && info.subtype !== 'send')) continue;
           await this.handleConfirmedBlock({
@@ -1436,7 +1489,7 @@ export class Runtime implements WatcherSink {
       }
     }
 
-    await this.receiveOrchestrator?.handleConfirmedReceive(block.blockHash);
+    await this.receiveOrchestrator?.handleConfirmedReceiveBlock(block.blockHash);
 
     const confirmedAccount = await this.accountStore?.getByAddress(block.recipientAccount);
     const confirmedDerivationIndex = confirmedAccount?.derivationIndex

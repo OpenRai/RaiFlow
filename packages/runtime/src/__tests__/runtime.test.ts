@@ -113,6 +113,17 @@ describe('getInvoicesByAccountKey', () => {
   });
 });
 
+describe('getInvoiceByAccountKeyAndInvoiceKey', () => {
+  it('resolves one invoice by its compound application identity', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-123', expectedAmountRaw: ONE_XNO });
+    await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-456', expectedAmountRaw: ONE_XNO });
+
+    expect((await runtime.getInvoiceByAccountKeyAndInvoiceKey('acct-recovery', 'game-123'))?.id).toBe(invoice.id);
+    expect(await runtime.getInvoiceByAccountKeyAndInvoiceKey('acct-recovery', 'missing')).toBeUndefined();
+  });
+});
+
 describe('cancelInvoice', () => {
   it('cancels an open invoice', async () => {
     const { runtime } = createTestRuntime();
@@ -200,6 +211,26 @@ describe('global event polling', () => {
 });
 
 describe('caller-signed block confirmation recovery', () => {
+  it('feeds a confirmed caller-signed send into invoice matching immediately', async () => {
+    const { runtime, deliveredEvents } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    const blockHash = 'C'.repeat(64);
+    const blockInfo = vi.fn().mockResolvedValue({
+      confirmed: true,
+      subtype: 'send',
+      blockAccount: TEST_ACCOUNT_2,
+      recipientAccount: invoice.payAddress,
+      amount: ONE_XNO,
+      localTimestamp: String(Math.floor(Date.now() / 1000)),
+    });
+    (runtime as any).rpcPool = { getClient: () => ({ blockInfo }) };
+    (runtime as any).trackBlockConfirmation(blockHash);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect((await runtime.getInvoice(invoice.id))?.status).toBe('completed');
+    expect(deliveredEvents.some((entry) => entry.event.type === 'invoice.completed')).toBe(true);
+  });
+
   it('re-arms unfinished published blocks after runtime startup', async () => {
     const events: import('@openrai/model').RaiFlowEvent[] = [{
       sequence: 1,

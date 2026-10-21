@@ -7,8 +7,6 @@ import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
 import { WorkResource } from './resources/Work.js';
 import { EventsResource } from './resources/Events.js';
-import { SubaccountsResource } from './resources/Subaccounts.js';
-import { ReceivesResource } from './resources/Receives.js';
 import { SseConnection } from './sse-connection.js';
 
 export interface RaiFlowClientOptions {
@@ -44,8 +42,6 @@ export class RaiFlowClient {
   public webhooks: WebhooksResource;
   public work: WorkResource;
   public events: EventsResource;
-  public subaccounts: SubaccountsResource;
-  public receives: ReceivesResource;
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -67,8 +63,6 @@ export class RaiFlowClient {
     this.webhooks = new WebhooksResource(this);
     this.work = new WorkResource(this);
     this.events = new EventsResource(this);
-    this.subaccounts = new SubaccountsResource(this);
-    this.receives = new ReceivesResource(this);
   }
 
   public static initialize(options: RaiFlowClientOptions): RaiFlowClient {

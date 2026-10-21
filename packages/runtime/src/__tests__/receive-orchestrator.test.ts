@@ -212,6 +212,8 @@ describe('ReceiveOrchestrator', () => {
       const updated = await receiveTaskStore.store.get(task.id);
       expect(updated?.status).toBe('published');
       expect(updated?.publishedAt).toBeTruthy();
+      expect(updated?.receiveBlockHash).toBe('published-hash');
+      expect(emitEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'receive.published' }));
     });
 
     it('uses the account public key as the work root for an unopened account', async () => {
@@ -411,6 +413,32 @@ describe('ReceiveOrchestrator', () => {
       const updated = await receiveTaskStore.store.get(task.id);
       expect(updated?.status).toBe('pending');
       expect(updated?.confirmedAt).toBeNull();
+    });
+  });
+
+  describe('handleConfirmedReceiveBlock', () => {
+    it("updates a published task by RaiFlow's receive block hash and emits receive.confirmed", async () => {
+      const task = await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'pending-send-hash',
+        amountRaw: '123',
+        status: 'published',
+        receiveBlockHash: 'receive-block-hash',
+        publishedAt: new Date().toISOString(),
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+
+      await orchestrator.handleConfirmedReceiveBlock('receive-block-hash');
+
+      expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'confirmed', receiveBlockHash: 'receive-block-hash' });
+      expect(emitEvent).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'receive.confirmed',
+        data: expect.objectContaining({ pendingBlockHash: 'pending-send-hash', receiveBlockHash: 'receive-block-hash' }),
+      }));
     });
   });
 });

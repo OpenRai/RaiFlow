@@ -421,7 +421,7 @@ watcher = new Watcher({
 });
 
 // Seed state sync with existing accounts after the listener is live. The sync
-// helper bounds account_info requests for large Proof-of-Play restores.
+// helper bounds account_info requests when restoring many accounts.
 const existingAccounts = await accountStore.list();
 const existingOpenInvoices = await invoiceStore.list({ status: 'open' });
 runtime.watcher = watcher;

@@ -108,6 +108,11 @@ export function createLegacySqliteInvoiceStore(store: InvoiceStore): LegacyInvoi
       return invoice ? toLegacyInvoice(invoice) : undefined;
     },
 
+    async getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<LegacyInvoice | undefined> {
+      const invoice = await store.getByAccountKeyAndInvoiceKey(accountKey, invoiceKey);
+      return invoice ? toLegacyInvoice(invoice) : undefined;
+    },
+
     async list(filter?: { status?: LegacyInvoice['status'] }): Promise<LegacyInvoice[]> {
       const invoices = await store.list(filter);
       return invoices.map(toLegacyInvoice);

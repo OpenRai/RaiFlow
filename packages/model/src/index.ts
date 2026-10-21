@@ -132,6 +132,8 @@ export interface ReceiveTask {
   pendingBlockHash: string;
   amountRaw: string;
   status: ReceiveTaskStatus;
+  /** Hash of RaiFlow's own receive/open block, once published. */
+  receiveBlockHash?: string | null;
   createdAt: string;
   publishedAt: string | null;
   confirmedAt: string | null;
@@ -177,6 +179,9 @@ export type RaiFlowEventType =
   | 'block.published'
   | 'block.confirmed'
   | 'block.failed'
+  | 'receive.published'
+  | 'receive.confirmed'
+  | 'receive.failed'
   | 'rpc.connected'
   | 'rpc.disconnected'
   | 'rpc.failover';
@@ -455,6 +460,8 @@ export interface IdempotencyRecord {
 export interface InvoiceStore {
   create(invoice: Invoice, idempotencyKey?: string): Promise<Invoice>;
   get(id: string): Promise<Invoice | undefined>;
+  /** Resolve one invoice by its durable application identity. */
+  getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<Invoice | undefined>;
   list(filter?: { status?: InvoiceStatus }): Promise<Invoice[]>;
   update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
   getByPayAddress(address: string, status?: InvoiceStatus): Promise<Invoice[]>;
@@ -620,6 +627,8 @@ export interface LegacyEventEnvelope<TType extends string, TData> {
 export interface LegacyInvoiceStore {
   create(invoice: LegacyInvoice, idempotencyKey?: string): Promise<LegacyInvoice>;
   get(id: string): Promise<LegacyInvoice | undefined>;
+  /** Resolve one invoice by its durable application identity. */
+  getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<LegacyInvoice | undefined>;
   list(filter?: { status?: InvoiceStatus }): Promise<LegacyInvoice[]>;
   update(id: string, patch: Partial<LegacyInvoice>): Promise<LegacyInvoice>;
   getByRecipientAccount(account: string, status?: InvoiceStatus): Promise<LegacyInvoice[]>;

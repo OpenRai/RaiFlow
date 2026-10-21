@@ -144,28 +144,36 @@ export class AccountStateSync implements WatcherSink {
     if (entry) {
       const account = await this.accountStore.get(entry.id);
       if (account) {
-        const newBalanceRaw = (BigInt(account.balanceRaw) + BigInt(block.amountRaw)).toString();
-        const updated = await this.accountStore.update(account.id, {
-          balanceRaw: newBalanceRaw,
-          frontier: block.blockHash,
-        });
+        // A malformed watcher payload must not turn an unopened-account
+        // notification into a process-wide BigInt exception.
+        if (!/^\d+$/.test(account.balanceRaw) || !/^\d+$/.test(block.amountRaw)) {
+          console.warn(
+            `[account-state-sync] ignoring malformed balance update for ${block.recipientAccount}`,
+          );
+        } else {
+          const newBalanceRaw = (BigInt(account.balanceRaw) + BigInt(block.amountRaw)).toString();
+          const updated = await this.accountStore.update(account.id, {
+            balanceRaw: newBalanceRaw,
+            frontier: block.blockHash,
+          });
 
-        this.emit({
-          id: randomUUID(),
-          type: 'account.payment_received',
-          accountId: account.id,
-          accountAddress: account.address,
-          timestamp: new Date().toISOString(),
-          data: {
-            blockHash: block.blockHash,
-            senderAccount: block.senderAccount,
-            amountRaw: block.amountRaw,
-            previousBalanceRaw: account.balanceRaw,
-            newBalanceRaw,
-            previousFrontier: account.frontier,
-            newFrontier: block.blockHash,
-          },
-        });
+          this.emit({
+            id: randomUUID(),
+            type: 'account.payment_received',
+            accountId: account.id,
+            accountAddress: account.address,
+            timestamp: new Date().toISOString(),
+            data: {
+              blockHash: block.blockHash,
+              senderAccount: block.senderAccount,
+              amountRaw: block.amountRaw,
+              previousBalanceRaw: account.balanceRaw,
+              newBalanceRaw,
+              previousFrontier: account.frontier,
+              newFrontier: block.blockHash,
+            },
+          });
+        }
       }
     }
 

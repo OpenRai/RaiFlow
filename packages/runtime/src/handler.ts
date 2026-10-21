@@ -250,12 +250,26 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
 
       const streamId = randomUUID();
       const accountsParam = url.searchParams.get('accounts') ?? undefined;
+      let closed = false;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      let sseController: SSEController | undefined;
 
       const stream = new ReadableStream({
         start: (controller) => {
-          let closed = false;
+          heartbeat = setInterval(() => {
+            if (closed) return;
+            try {
+              controller.enqueue(new TextEncoder().encode(':keepalive\n\n'));
+            } catch {
+              closed = true;
+              if (heartbeat !== undefined) clearInterval(heartbeat);
+            }
+          }, 15_000);
+          if (typeof heartbeat === 'object' && heartbeat !== null && 'unref' in heartbeat) {
+            (heartbeat as NodeJS.Timeout).unref();
+          }
 
-          const sseController: SSEController = {
+          const connection: SSEController = {
             id: streamId,
             enqueue(event: string) {
               if (closed) return;
@@ -263,6 +277,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
             },
             close() {
               closed = true;
+              if (heartbeat !== undefined) clearInterval(heartbeat);
               controller.close();
             },
             get closed() {
@@ -271,25 +286,36 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
           };
 
           // Always register the connection so watch/unwatch REST calls can find it
-          subscriptionManager.register(sseController);
+          sseController = connection;
+          subscriptionManager.register(connection);
 
           if (accountsParam && accountStateSync) {
             const addresses = accountsParam.split(',').map((a) => a.trim()).filter(Boolean);
             for (const addr of addresses) {
               // Subscribe first — client receives events from reconciliation immediately
-              subscriptionManager.subscribe(addr, sseController);
+              subscriptionManager.subscribe(addr, connection);
               // Add to watcher in background — 30s reconciliation handles retry
               accountStateSync.addAccount(addr).catch(() => {});
             }
           }
 
-          // Send initial comment to establish connection
-          controller.enqueue(new TextEncoder().encode(':ok\n\n'));
+          // Send an initial frame to establish the connection immediately and
+          // tell EventSource-compatible clients how quickly to retry.
+          controller.enqueue(new TextEncoder().encode('retry: 5000\n:ok\n\n'));
 
           req.signal.addEventListener('abort', () => {
             closed = true;
-            subscriptionManager.removeConnection(sseController);
+            clearInterval(heartbeat);
+            subscriptionManager.removeConnection(connection);
           });
+        },
+        cancel: () => {
+          // The request abort handler normally performs cleanup; cancel also
+          // covers adapters that cancel a ReadableStream without aborting the
+          // original Request signal.
+          closed = true;
+          if (heartbeat !== undefined) clearInterval(heartbeat);
+          if (sseController) subscriptionManager.removeConnection(sseController);
         },
       });
 
@@ -297,8 +323,9 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         status: 200,
         headers: {
           'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'no-cache, no-transform',
           'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
           'X-Raiflow-Stream-Id': streamId,
         },
       });
@@ -519,60 +546,6 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     }
   }
 
-  // POST /v1/subaccounts/allocate — application-level account matrix.
-  // Custodial runtimes derive managed accounts; non-custodial runtimes require
-  // caller-supplied addresses and register them as watched accounts. Each key
-  // is idempotently mapped into the namespace; partial retries return the
-  // already-created accounts instead of allocating a second set.
-  if (parts[0] === 'subaccounts' && method === 'POST' && parts.length === 2 && parts[1] === 'allocate') {
-    const body = await req.json() as Record<string, unknown>;
-    const namespace = body.namespace;
-    const keys = body.keys;
-    const addresses = body.addresses;
-    const addressMap = typeof addresses === 'object' && addresses !== null && !Array.isArray(addresses)
-      ? addresses as Record<string, unknown>
-      : undefined;
-    const policy = body.policy ?? 'manual';
-    const mutationKey = idempotencyKey(req);
-    if (typeof namespace !== 'string' || namespace.length === 0 || !Array.isArray(keys) || keys.length === 0 || keys.length > 1024 || !keys.every((key) => typeof key === 'string' && key.length > 0) || policy !== 'manual' || !mutationKey) {
-      return errorResponse('namespace, non-empty keys, policy="manual", and Idempotency-Key are required', 'bad_request', 400);
-    }
-    if (runtime.mode === 'non-custodial' && (!addressMap || !keys.every((key) => typeof addressMap[key] === 'string' && (addressMap[key] as string).length > 0))) {
-      return errorResponse('addresses keyed by every subaccount key are required in non-custodial mode', 'bad_request', 400);
-    }
-    try {
-      const data = [];
-      for (const key of keys as string[]) {
-        const externalAddress = addressMap?.[key];
-        const account = runtime.mode === 'non-custodial'
-          ? await runtime.createWatchedAccount({ address: externalAddress as string, label: `${namespace}/${key}`, idempotencyKey: `${mutationKey}:${key}` })
-          : await runtime.createManagedAccount({ accountKey: `subaccount:${namespace}:${key}`, label: `${namespace}/${key}`, idempotencyKey: `${mutationKey}:${key}` });
-        data.push({ key, address: account.address, accountId: account.id });
-      }
-      return json({ data }, 201);
-    } catch (err) {
-      const handled = handleRaiFlowError(err);
-      if (handled) return handled;
-      throw err;
-    }
-  }
-
-  // POST /v1/receives/batch — queue confirmation-gated receives for managed accounts.
-  if (parts[0] === 'receives' && method === 'POST' && parts.length === 2 && parts[1] === 'batch') {
-    const body = await req.json() as Record<string, unknown>;
-    const accountIds = body.accountIds;
-    const mutationKey = idempotencyKey(req);
-    if (!Array.isArray(accountIds) || accountIds.length === 0 || accountIds.length > 1024 || !accountIds.every((id) => typeof id === 'string' && id.length > 0) || !mutationKey) {
-      return errorResponse('accountIds and Idempotency-Key are required', 'bad_request', 400);
-    }
-    const acceptedAccountIds: string[] = [];
-    for (const accountId of accountIds as string[]) {
-      const account = await runtime.getAccount(accountId);
-      if (account?.type === 'managed' && runtime.mode !== 'non-custodial') acceptedAccountIds.push(accountId);
-    }
-    return json({ acceptedAccountIds }, 202);
-  }
-
   // ---------------------------------------------------------------------------
   // Blocks
   // ---------------------------------------------------------------------------
@@ -674,7 +647,7 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
     return new Response(stream, {
       headers: {
         'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         // Prevent reverse proxies from buffering keepalive frames until the
         // client-side idle timeout closes this long-lived stream.
@@ -810,6 +783,18 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         : undefined;
       const invoices = await runtime.listInvoices(filter);
       return json({ data: invoices });
+    }
+
+    // GET /api/invoices/by-key?accountKey=...&invoiceKey=...
+    // This is deliberately a singular lookup: application recovery must not
+    // list and filter a potentially large invoice history.
+    if (method === 'GET' && parts.length === 2 && parts[1] === 'by-key') {
+      const accountKey = url.searchParams.get('accountKey');
+      const invoiceKey = url.searchParams.get('invoiceKey');
+      if (!accountKey) return errorResponse('accountKey is required', 'bad_request', 400);
+      const invoice = await runtime.getInvoiceByAccountKeyAndInvoiceKey(accountKey, invoiceKey);
+      if (!invoice) return errorResponse('Invoice not found for accountKey/invoiceKey', 'not_found', 404);
+      return json(invoice);
     }
 
     if (parts.length >= 2) {

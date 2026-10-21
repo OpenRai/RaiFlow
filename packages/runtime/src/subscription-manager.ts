@@ -43,7 +43,7 @@ export class SubscriptionManager {
     if (!set) return;
 
     const payload = JSON.stringify(event);
-    const frame = `data: ${payload}\n\n`;
+    const frame = `id: ${event.id}\ndata: ${payload}\n\n`;
 
     for (const controller of set) {
       if (controller.closed) continue;

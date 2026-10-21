@@ -1,0 +1,490 @@
+#!/usr/bin/env node
+// @openrai/runtime — Standalone server entry point
+//
+// Boots from raiflow.yml config, initializes SQLite via the storage package,
+// and exposes the HTTP handler on the configured daemon host:port.
+//
+// Configuration via YAML file (default: ./raiflow.yml) or RAIFLOW_CONFIG_PATH env var.
+import { createServer } from 'node:http';
+import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { loadConfig } from '@openrai/config';
+import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, createSqliteInvoiceAccountStore, createSqliteReceiveTaskStore } from '@openrai/storage';
+import { createEventBus, createPersistentEventStore } from '@openrai/events';
+import { INVOICE_DERIVATION_START, MANAGED_DERIVATION_START } from '@openrai/model';
+import { createRpcPool } from '@openrai/rpc';
+import { createOwsCustodyProvider, createProviderCustodyEngine, } from '@openrai/custody';
+import { Watcher } from '@openrai/watcher';
+import { createHandler } from './handler.js';
+import { Runtime } from './runtime.js';
+import { AccountStateSync } from './account-state-sync.js';
+import { SubscriptionManager } from './subscription-manager.js';
+import { createRuntimeMetrics } from './monitoring.js';
+import { resolveApiKey } from './auth.js';
+import { findWorkspaceRoot } from './workspace.js';
+import { createLegacySqliteEventStore, createLegacySqliteInvoiceStore, createLegacySqlitePaymentStore, } from './sqlite-legacy-adapters.js';
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const WORKSPACE_ROOT = findWorkspaceRoot(import.meta.url);
+const CONFIG_PATH = resolve(WORKSPACE_ROOT, process.env['RAIFLOW_CONFIG_PATH'] ?? 'raiflow.yml');
+const VERSION_PATH = resolve(WORKSPACE_ROOT, 'packages', 'runtime', 'dist', 'VERSION');
+let APP_VERSION = 'dev';
+try {
+    const v = readFileSync(VERSION_PATH, 'utf-8').trim();
+    if (v)
+        APP_VERSION = v;
+}
+catch { /* fallback to 'dev' */ }
+let config;
+try {
+    config = loadConfig(CONFIG_PATH);
+    globalThis.__RAIFLOW_CONFIG__ = config;
+}
+catch (err) {
+    console.error(`[raiflow] failed to load config from ${CONFIG_PATH}:`, err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+// ---------------------------------------------------------------------------
+// Mode validation
+// ---------------------------------------------------------------------------
+if (!config.daemon.mode) {
+    console.error([
+        '[raiflow] RAIFLOW_MODE is required. Set it to "custodial" or "non-custodial".',
+        '  custodial:      RaiFlow asks OWS to derive accounts and sign blocks, then generates PoW.',
+        '                  Requires custody.wallet and custody.representative.',
+        '  non-custodial:  RaiFlow acts as a relay and monitor. All signing happens client-side.',
+        '                  Some features (invoices, managed accounts, sends) are unavailable.',
+    ].join('\n'));
+    process.exit(1);
+}
+const mode = config.daemon.mode;
+try {
+    const apiKey = resolveApiKey(config);
+    config = {
+        ...config,
+        daemon: {
+            ...config.daemon,
+            apiKey: apiKey.apiKey,
+        },
+    };
+    globalThis.__RAIFLOW_CONFIG__ = config;
+}
+catch (err) {
+    console.error('[raiflow] failed startup API key validation:', err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+if (mode === 'custodial') {
+    if (!config.custody?.wallet || !config.custody?.representative) {
+        console.error('[raiflow] custodial mode requires custody.wallet and custody.representative in raiflow.yml.');
+        process.exit(1);
+    }
+}
+const LOG_PRIORITY = {
+    debug: 0,
+    info: 1,
+    warn: 2,
+    error: 3,
+};
+const currentLevel = config.logging.level;
+function shouldLog(level) {
+    return LOG_PRIORITY[level] >= LOG_PRIORITY[currentLevel];
+}
+function log(level, prefix, message, ...args) {
+    if (!shouldLog(level))
+        return;
+    const timestamp = new Date().toISOString();
+    const formatted = args.length > 0 ? `${message} ${args.map(String).join(' ')}` : message;
+    const output = `[${timestamp}] [${level.toUpperCase()}] [${prefix}] ${formatted}`;
+    if (level === 'error')
+        console.error(output);
+    else if (level === 'warn')
+        console.warn(output);
+    else
+        console.log(output);
+}
+const logger = {
+    debug: (msg, ...args) => log('debug', 'raiflow', msg, ...args),
+    info: (msg, ...args) => log('info', 'raiflow', msg, ...args),
+    warn: (msg, ...args) => log('warn', 'raiflow', msg, ...args),
+    error: (msg, ...args) => log('error', 'raiflow', msg, ...args),
+};
+logger.info(`starting in ${mode === 'custodial' ? 'CUSTODIAL' : 'NON-CUSTODIAL'} mode`);
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+let db;
+let dbPath = '';
+try {
+    dbPath = resolve(WORKSPACE_ROOT, config.storage.path);
+    db = createDatabase(dbPath);
+    logger.info('sqlite open', dbPath);
+}
+catch (err) {
+    logger.error('failed to open database:', err instanceof Error ? err.message : err);
+    process.exit(1);
+}
+// Run migrations
+const migrationRunner = createMigrationRunner(db);
+await migrationRunner.up();
+const appliedMigrations = migrationRunner.getApplied();
+logger.info('migrations applied', appliedMigrations.join(', '));
+const metrics = createRuntimeMetrics({ dbPath, migrations: appliedMigrations });
+globalThis.__RAIFLOW_METRICS__ = metrics;
+// ---------------------------------------------------------------------------
+// Stores (wire through events system)
+// ---------------------------------------------------------------------------
+const eventBus = createEventBus();
+const sqliteInvoiceStore = createSqliteInvoiceStore(db);
+const sqlitePaymentStore = createSqlitePaymentStore(db);
+const eventStore = createPersistentEventStore(createSqliteEventStore(db), eventBus);
+const invoiceStore = createLegacySqliteInvoiceStore(sqliteInvoiceStore);
+const paymentStore = createLegacySqlitePaymentStore(sqlitePaymentStore, sqliteInvoiceStore);
+const accountStore = createSqliteAccountStore(db);
+const sendStore = createSqliteSendStore(db);
+const invoiceAccountStore = createSqliteInvoiceAccountStore(db);
+const receiveTaskStore = createSqliteReceiveTaskStore(db);
+const webhookStore = createSqliteWebhookStore(db);
+const idempotencyStore = createSqliteIdempotencyReplayStore(db);
+const legacyEventStore = createLegacySqliteEventStore(eventStore);
+// ---------------------------------------------------------------------------
+// RPC pool
+// ---------------------------------------------------------------------------
+let rpcPool = createRpcPool([]);
+if (config.nano.rpc.length > 0 || config.nano.ws.length > 0) {
+    rpcPool = createRpcPool([{
+            rpc: config.nano.rpc,
+            ws: config.nano.ws,
+        }]);
+    logger.info('rpc pool initialized', `rpc=${config.nano.rpc.length} ws=${config.nano.ws.length}`);
+}
+// ---------------------------------------------------------------------------
+// Startup Probe
+// ---------------------------------------------------------------------------
+const rpcUrls = config.nano.rpc;
+if (rpcUrls.length === 0) {
+    logger.warn('no nano RPC endpoints configured — runtime will operate in degraded mode');
+}
+else {
+    while (true) {
+        const results = await Promise.allSettled(rpcUrls.map(async (url) => {
+            const headers = { 'Content-Type': 'application/json' };
+            // Handle basic auth in URL
+            let cleanUrl = url;
+            try {
+                const parsed = new URL(url);
+                if (parsed.username || parsed.password) {
+                    const credentials = btoa(`${parsed.username}:${parsed.password}`);
+                    headers['Authorization'] = `Basic ${credentials}`;
+                    parsed.username = '';
+                    parsed.password = '';
+                    cleanUrl = parsed.toString();
+                }
+            }
+            catch {
+                // Ignore URL parsing errors, fetch will catch them
+            }
+            const res = await fetch(cleanUrl, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ action: 'version' }),
+                signal: AbortSignal.timeout(10_000),
+            });
+            // A 429 means the endpoint is reachable but rate-limited (quota exhausted).
+            // Treat this as a degraded-but-reachable state so the runtime can still
+            // start — the circuit breakers in the polling loops will handle backoff.
+            if (res.status === 429) {
+                const body = await res.json().catch(() => ({}));
+                const detail = typeof body['message'] === 'string' ? body['message'] : 'quota exhausted';
+                return { url, vendor: `rate-limited (${detail})` };
+            }
+            if (!res.ok)
+                throw new Error(`HTTP ${res.status}`);
+            const body = await res.json();
+            if (!body.node_vendor)
+                throw new Error('unexpected response shape');
+            return { url, vendor: body.node_vendor };
+        }));
+        const succeeded = results.filter((r) => r.status === 'fulfilled');
+        const failed = results.filter((r) => r.status === 'rejected');
+        if (succeeded.length > 0) {
+            for (const s of succeeded) {
+                logger.info(`RPC endpoint OK: ${s.value.url} (${s.value.vendor})`);
+            }
+            if (failed.length > 0) {
+                for (let i = 0; i < rpcUrls.length; i++) {
+                    const result = results[i];
+                    if (result?.status === 'rejected') {
+                        const reason = result.reason;
+                        logger.warn(`RPC endpoint unreachable (degraded): ${rpcUrls[i]} — ${reason}`);
+                    }
+                }
+                logger.warn(`${failed.length}/${rpcUrls.length} RPC endpoints unreachable — operating in degraded mode`);
+            }
+            break;
+        }
+        for (let i = 0; i < rpcUrls.length; i++) {
+            const result = results[i];
+            const reason = result?.status === 'rejected'
+                ? result.reason
+                : 'unknown';
+            logger.error(`RPC endpoint unreachable: ${rpcUrls[i]} — ${reason}`);
+        }
+        logger.warn('all configured Nano RPC endpoints are currently unreachable; starting in not-ready mode so health and diagnostics remain available');
+        break;
+    }
+}
+// ---------------------------------------------------------------------------
+// Custody engine
+// ---------------------------------------------------------------------------
+const DERIVATION_START_INDEX = {
+    invoice: INVOICE_DERIVATION_START,
+    managed: MANAGED_DERIVATION_START,
+};
+if (DERIVATION_START_INDEX.invoice === DERIVATION_START_INDEX.managed) {
+    logger.error('invoice and managed derivation namespaces overlap');
+    process.exit(1);
+}
+let custodyEngine;
+if (config.custody) {
+    try {
+        // These packages are loaded only in custodial mode. Keeping the boundary
+        // structural makes the runtime testable with an in-memory provider while
+        // production key operations stay inside OWS.
+        const owsModuleName = '@open-wallet-standard/core';
+        const nanoCoreModuleName = '@openrai/nano-core';
+        const [owsModule, nanoCore] = await Promise.all([
+            import(owsModuleName),
+            import(nanoCoreModuleName),
+        ]);
+        const bindings = ('default' in owsModule && typeof owsModule.default === 'object' && owsModule.default !== null
+            ? owsModule.default
+            : owsModule);
+        if (typeof bindings.deriveWalletAddress !== 'function'
+            || typeof bindings.signTransaction !== 'function') {
+            throw new Error('installed OWS binding does not provide indexed wallet derivation and signing');
+        }
+        if (typeof nanoCore.stateBlockSigningPayload !== 'function'
+            || typeof nanoCore.hashStateBlock !== 'function') {
+            throw new Error('installed @openrai/nano-core does not provide canonical state-block encoding');
+        }
+        const provider = createOwsCustodyProvider({
+            bindings: bindings,
+            wallet: config.custody.wallet,
+            credential: config.custody.credential,
+            vaultPath: config.custody.vaultPath,
+        });
+        const readiness = await provider.readiness();
+        if (!readiness.ready) {
+            throw new Error(readiness.error ?? 'OWS custody provider unavailable');
+        }
+        custodyEngine = createProviderCustodyEngine({
+            provider,
+            representative: config.custody.representative,
+            codec: {
+                stateBlockSigningPayload: nanoCore.stateBlockSigningPayload,
+                hashStateBlock: nanoCore.hashStateBlock,
+            },
+        });
+        logger.info('OWS custody engine initialized', `wallet=${config.custody.wallet}`);
+    }
+    catch (err) {
+        logger.error('failed to initialize OWS custody:', err instanceof Error ? err.message : err);
+        process.exit(1);
+    }
+}
+// ---------------------------------------------------------------------------
+// Runtime
+// ---------------------------------------------------------------------------
+const runtime = new Runtime({
+    invoiceStore: invoiceStore,
+    paymentStore: paymentStore,
+    eventStore: legacyEventStore,
+    v2EventStore: eventStore,
+    webhookEndpointStore: webhookStore,
+    accountStore,
+    sendStore,
+    invoiceAccountStore,
+    receiveTaskStore,
+    custodyEngine,
+    rpcPool,
+    expiryIntervalMs: 10_000,
+    mode,
+    idempotencyStore,
+    derivationStartIndex: DERIVATION_START_INDEX,
+});
+rpcPool.onStateChange((state) => {
+    void runtime.recordRpcState(state).catch((error) => {
+        logger.error('failed to persist RPC state event:', error instanceof Error ? error.message : String(error));
+    });
+});
+// ---------------------------------------------------------------------------
+// Subscription manager & account state sync
+// ---------------------------------------------------------------------------
+const subscriptionManager = new SubscriptionManager();
+// Mutable reference to break the Watcher <-> AccountStateSync cycle
+let watcher;
+const reconcileIntervalMs = process.env['RAIFLOW_RECONCILE_INTERVAL_MS']
+    ? parseInt(process.env['RAIFLOW_RECONCILE_INTERVAL_MS'], 10)
+    : 900_000; // default to 15 minutes to stay under standard RPC quotas
+const pollIntervalMs = process.env['RAIFLOW_POLL_INTERVAL_MS']
+    ? parseInt(process.env['RAIFLOW_POLL_INTERVAL_MS'], 10)
+    : 30_000; // default to 30 seconds to stay under standard RPC quotas
+const accountStateSync = new AccountStateSync(rpcPool, accountStore, {
+    addAccount: (a) => watcher?.addAccount(a),
+    removeAccount: (a) => watcher?.removeAccount(a),
+}, (event) => subscriptionManager.publish(event), (block) => runtime.handleConfirmedBlock(block), { reconcileIntervalMs, initialSyncDelayMs: 750 });
+// ---------------------------------------------------------------------------
+// Watcher
+// ---------------------------------------------------------------------------
+watcher = new Watcher({
+    wsUrl: config.nano.ws[0],
+    rpcUrls: config.nano.rpc,
+    accounts: [],
+    sink: accountStateSync,
+    pollIntervalMs,
+});
+// Seed state sync with existing accounts after the listener is live. The sync
+// helper bounds account_info requests when restoring many accounts.
+const existingAccounts = await accountStore.list();
+const existingOpenInvoices = await invoiceStore.list({ status: 'open' });
+runtime.watcher = watcher;
+watcher.start();
+for (const invoice of existingOpenInvoices)
+    watcher.addAccount(invoice.recipientAccount);
+logger.info('watcher started', `accounts=${existingAccounts.length} invoice_accounts=${existingOpenInvoices.length} pending_initial_sync=true`);
+accountStateSync.start();
+logger.info('account state sync started');
+runtime.start();
+logger.info('runtime started');
+const startupConcurrencyRaw = Number.parseInt(process.env['RAIFLOW_STARTUP_ACCOUNT_CONCURRENCY'] ?? '4', 10);
+const startupConcurrency = Number.isFinite(startupConcurrencyRaw) && startupConcurrencyRaw > 0
+    ? startupConcurrencyRaw
+    : 4;
+void accountStateSync.syncExistingAccounts(existingAccounts.map((account) => account.address), startupConcurrency).then(({ synced, failed }) => {
+    logger.info('account state sync completed', `accounts=${existingAccounts.length} synced=${synced} failed=${failed} concurrency=${startupConcurrency}`);
+}).catch((error) => {
+    logger.error('account state sync restore failed:', error instanceof Error ? error.message : String(error));
+});
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+const handle = createHandler(runtime, config, APP_VERSION, accountStateSync, subscriptionManager);
+// ---------------------------------------------------------------------------
+// HTTP server
+// ---------------------------------------------------------------------------
+async function toWebRequest(req) {
+    const url = `http://${req.headers.host ?? 'localhost'}${req.url ?? '/'}`;
+    const method = req.method ?? 'GET';
+    let body;
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'DELETE') {
+        const chunks = [];
+        for await (const chunk of req) {
+            chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+        }
+        body = Buffer.concat(chunks).toString('utf-8');
+    }
+    return new Request(url, {
+        method,
+        headers: Object.entries(req.headers).reduce((acc, [key, value]) => {
+            if (typeof value === 'string')
+                acc[key] = value;
+            return acc;
+        }, {}),
+        body: body ?? null,
+    });
+}
+async function sendWebResponse(webRes, res) {
+    res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
+    const body = webRes.body;
+    if (!body) {
+        res.end();
+        return;
+    }
+    // Do not call Response.text() here: that buffers indefinitely for SSE
+    // endpoints and prevents RaiFlow event consumers from seeing confirmations.
+    const reader = body.getReader();
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done)
+                break;
+            if (!res.write(Buffer.from(value))) {
+                await new Promise((resolve) => res.once('drain', resolve));
+            }
+        }
+    }
+    finally {
+        reader.releaseLock();
+        res.end();
+    }
+}
+const server = createServer(async (req, res) => {
+    const startedAt = Date.now();
+    const requestUrl = `http://${req.headers.host ?? 'localhost'}${req.url ?? '/'}`;
+    try {
+        const webReq = await toWebRequest(req);
+        const webRes = await handle(webReq);
+        const path = new URL(requestUrl).pathname;
+        const isDashboard = path.startsWith('/dashboard') ||
+            webReq.headers.get('x-raiflow-dashboard') === 'true' ||
+            webReq.headers.get('referer')?.includes('/dashboard');
+        const debugHeaders = {};
+        for (const h of ['host', 'user-agent', 'x-forwarded-for', 'x-real-ip',
+            'x-forwarded-proto', 'x-forwarded-host', 'x-request-id',
+            'accept', 'referer', 'origin']) {
+            const val = req.headers[h];
+            if (typeof val === 'string')
+                debugHeaders[h] = val;
+        }
+        metrics.recordRequest({
+            method: webReq.method,
+            path,
+            status: webRes.status,
+            durationMs: Date.now() - startedAt,
+            isDashboard,
+            remoteAddr: req.socket?.remoteAddress ?? undefined,
+            headers: debugHeaders,
+        });
+        await sendWebResponse(webRes, res);
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : 'Internal server error';
+        const path = new URL(requestUrl).pathname;
+        metrics.recordRequest({
+            method: req.method ?? 'GET',
+            path,
+            status: 500,
+            durationMs: Date.now() - startedAt,
+            isDashboard: path.startsWith('/dashboard'),
+            remoteAddr: req.socket?.remoteAddress ?? undefined,
+            headers: {},
+        });
+        logger.error('unhandled request error:', message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message, code: 'internal_error' } }));
+    }
+});
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+const { host, port } = config.daemon;
+const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+server.listen(port, host, () => {
+    logger.info(`listening on http://${displayHost}:${port}`);
+    logger.info(`  - Dashboard: http://${displayHost}:${port}/dashboard`);
+    logger.info(`  - API:       http://${displayHost}:${port}/api`);
+});
+// Graceful shutdown
+function shutdown() {
+    logger.info('shutting down...');
+    runtime.stop();
+    db.close();
+    server.close(() => {
+        logger.info('goodbye');
+        process.exit(0);
+    });
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+//# sourceMappingURL=main.js.map

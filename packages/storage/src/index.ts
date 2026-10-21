@@ -331,6 +331,24 @@ export function createMigrationRunner(db: Database): MigrationRunner {
         `);
       },
     },
+    {
+      id: 7,
+      name: '007_invoice_compound_lookup_index',
+      up: (db) => {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_invoices_account_invoice
+            ON invoices(account_key, invoice_key);
+        `);
+      },
+    },
+    {
+      id: 8,
+      name: '008_receive_block_hash',
+      up: (db) => {
+        db.exec(`ALTER TABLE receive_tasks ADD COLUMN receive_block_hash TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_receive_tasks_receive_block_hash ON receive_tasks(receive_block_hash)`);
+      },
+    },
   ];
 
   return {
@@ -438,6 +456,13 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
 
     async get(id: string): Promise<Invoice | undefined> {
       const row = db.prepare('SELECT * FROM invoices WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      return row ? rowToInvoice(row) : undefined;
+    },
+
+    async getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<Invoice | undefined> {
+      const row = db.prepare(
+        'SELECT * FROM invoices WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL)) ORDER BY created_at ASC LIMIT 1',
+      ).get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown> | undefined;
       return row ? rowToInvoice(row) : undefined;
     },
 
@@ -557,6 +582,7 @@ function rowToReceiveTask(row: Record<string, unknown>): ReceiveTask {
     pendingBlockHash: row.pending_block_hash as string,
     amountRaw: row.amount_raw as string,
     status: row.status as ReceiveTaskStatus,
+    receiveBlockHash: row.receive_block_hash as string | null,
     createdAt: row.created_at as string,
     publishedAt: row.published_at as string | null,
     confirmedAt: row.confirmed_at as string | null,
@@ -575,10 +601,10 @@ export function createSqliteReceiveTaskStore(db: Database): ReceiveTaskStore {
       db.prepare(`
         INSERT INTO receive_tasks (
           id, account_address, derivation_index, pending_block_hash, amount_raw,
-          status, created_at, published_at, confirmed_at, failed_at, fail_reason, retry_count
+          status, receive_block_hash, created_at, published_at, confirmed_at, failed_at, fail_reason, retry_count
         ) VALUES (
           @id, @account_address, @derivation_index, @pending_block_hash, @amount_raw,
-          @status, @created_at, @published_at, @confirmed_at, @failed_at, @fail_reason, @retry_count
+          @status, @receive_block_hash, @created_at, @published_at, @confirmed_at, @failed_at, @fail_reason, @retry_count
         )
       `).run({
         id,
@@ -587,6 +613,7 @@ export function createSqliteReceiveTaskStore(db: Database): ReceiveTaskStore {
         pending_block_hash: full.pendingBlockHash,
         amount_raw: full.amountRaw,
         status: full.status,
+        receive_block_hash: full.receiveBlockHash ?? null,
         created_at: createdAt,
         published_at: full.publishedAt ?? null,
         confirmed_at: full.confirmedAt ?? null,
@@ -624,7 +651,8 @@ export function createSqliteReceiveTaskStore(db: Database): ReceiveTaskStore {
         UPDATE receive_tasks SET
           account_address = @account_address, derivation_index = @derivation_index,
           pending_block_hash = @pending_block_hash, amount_raw = @amount_raw,
-          status = @status, published_at = @published_at, confirmed_at = @confirmed_at,
+          status = @status, receive_block_hash = @receive_block_hash,
+          published_at = @published_at, confirmed_at = @confirmed_at,
           failed_at = @failed_at, fail_reason = @fail_reason, retry_count = @retry_count
         WHERE id = @id
       `).run({
@@ -634,6 +662,7 @@ export function createSqliteReceiveTaskStore(db: Database): ReceiveTaskStore {
         pending_block_hash: updated.pendingBlockHash,
         amount_raw: updated.amountRaw,
         status: updated.status,
+        receive_block_hash: updated.receiveBlockHash ?? null,
         published_at: updated.publishedAt ?? null,
         confirmed_at: updated.confirmedAt ?? null,
         failed_at: updated.failedAt ?? null,

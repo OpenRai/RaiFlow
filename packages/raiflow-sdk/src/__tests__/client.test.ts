@@ -134,6 +134,17 @@ describe('InvoicesResource', () => {
     vi.stubGlobal('fetch', mockFetch);
   });
 
+  it('getByKey uses the singular compound lookup endpoint', async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse(TEST_INVOICE));
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
+    const invoice = await client.invoices.getByKey('acct/recovery', 'game 123');
+
+    expect(invoice).toEqual(TEST_INVOICE);
+    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
+    expect(call[0]).toBe('http://localhost:3000/v1/invoices/by-key?accountKey=acct%2Frecovery&invoiceKey=game+123');
+    expect(call[1]?.method).toBe('GET');
+  });
+
   it('create sends POST to /v1/invoices', async () => {
     mockFetch.mockResolvedValueOnce(mockResponse(TEST_INVOICE, { status: 201 }));
 

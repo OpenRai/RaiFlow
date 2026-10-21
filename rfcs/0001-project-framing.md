@@ -8,6 +8,30 @@ This RFC establishes the foundational framing for RaiFlow v2: what it is, what i
 
 RaiFlow is a self-hostable Nano payment runtime. It runs on your infrastructure, connects to one or more Nano nodes, and exposes a clean, idempotent, event-driven API for two directions of value movement: getting paid and operating a wallet.
 
+## Commerce Scope Decision — 2026-10-20
+
+The primary integrations are external-wallet checkout, reusable customer deposit
+accounts, and custodial withdrawals. Applications issue payment intents and
+consume durable business events. RaiFlow owns receiving, signing, work,
+frontiers, confirmation recovery, and settlement housekeeping.
+
+Nanosweeper's tile-account matrices and client-wallet transaction controls are
+outside this scope. The following APIs are obsolete and removed:
+
+- `POST /v1/subaccounts/allocate` and SDK `subaccounts.allocate()`.
+- `POST /v1/receives/batch` and SDK `receives.batch()`.
+- Deferred watcher activation and allocation-stage diagnostics for tile matrices.
+
+Applications create managed or watched accounts through the account resource;
+one-time payment expectations use invoices. Receiving is internal housekeeping.
+Generic watched accounts, business event subscriptions, and the established
+pre-signed-block flow retain their own uses. New integration needs must justify
+their place in the commerce programming model.
+
+There are no known commercial consumers. Backwards compatibility does not
+constrain API or internal refactoring; obsolete paths receive no aliases.
+The repair work is tracked in Beads under epic `RaiFlow-7w6`.
+
 ---
 
 ## Motivation

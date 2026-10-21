@@ -55,6 +55,12 @@ export function createInvoiceStore(): LegacyInvoiceStore {
       return invoices.get(id) as LegacyInvoice | undefined;
     },
 
+    async getByAccountKeyAndInvoiceKey(accountKey, invoiceKey) {
+      return Array.from(invoices.values()).find((invoice) =>
+        invoice.accountKey === accountKey && (invoice.invoiceKey ?? null) === invoiceKey,
+      );
+    },
+
     async list(filter) {
       const all = Array.from(invoices.values());
       if (filter?.status === undefined) {

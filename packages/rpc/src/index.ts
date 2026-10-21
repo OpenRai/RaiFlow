@@ -21,6 +21,27 @@ export interface RpcClient {
   getAuditReport(): EndpointAuditRecord[];
 }
 
+export type RpcEndpointHealthStatus = 'healthy' | 'unhealthy';
+
+/** Bounded, operator-facing probe result for one configured Nano RPC URL. */
+export interface RpcEndpointHealth {
+  url: string;
+  status: RpcEndpointHealthStatus;
+  checkedAt: string;
+  latencyMs: number | null;
+  /** The least-expensive RPC action that established reachability. */
+  probeAction?: 'version' | 'block_count';
+  error?: string;
+}
+
+export interface RpcHealthReport {
+  status: 'healthy' | 'degraded' | 'down' | 'unconfigured';
+  checkedAt: string | null;
+  endpoints: RpcEndpointHealth[];
+  healthyCount: number;
+  failedCount: number;
+}
+
 export interface AccountInfoResponse {
   frontier: string;
   balance: string;
@@ -43,6 +64,8 @@ export interface BlockInfoResponse {
   subtype?: string;
   blockAccount?: string;
   amount?: string;
+  /** Decoded destination for a state send, when the node returns JSON block contents. */
+  recipientAccount?: string;
   localTimestamp?: string;
 }
 
@@ -57,6 +80,8 @@ export interface RpcPool {
   getActiveNode(): RpcClient | undefined;
   onStateChange(listener: (state: RpcPoolState) => void): () => void;
   getAuditReport(): EndpointAuditRecord[];
+  /** Probe every configured URL with a short-lived cache to avoid amplification. */
+  getHealthReport?(options?: { force?: boolean }): Promise<RpcHealthReport>;
 }
 
 export interface RpcPoolState {
@@ -75,6 +100,10 @@ function configuredRpcUrls(nodes: RpcNodeConfig[]): string[] {
 
 function configuredWsUrls(nodes: RpcNodeConfig[]): string[] {
   return nodes.flatMap((node) => node.ws);
+}
+
+function isUnsupportedActionError(error: unknown): boolean {
+  return /not allowed|not supported|unsupported|unknown action/i.test(String(error));
 }
 
 
@@ -215,7 +244,19 @@ class PooledRpcClient implements RpcClient {
   }
 
   async healthCheck(): Promise<void> {
-    const result = await this.rpcCall<Record<string, unknown>>({ action: 'version' });
+    let result = await this.rpcCall<Record<string, unknown>>({ action: 'version' });
+    // Some community proxies intentionally deny `version` while allowing the
+    // ordinary ledger actions RaiFlow needs. A block-count probe still proves
+    // that the upstream is reachable without treating that capability choice
+    // as a total outage.
+    if (result.error && isUnsupportedActionError(result.error)) {
+      result = await this.rpcCall<Record<string, unknown>>({ action: 'block_count' });
+      if (result.error) throw new Error(`block_count error: ${String(result.error)}`);
+      if (typeof result.count !== 'string' && typeof result.count !== 'number') {
+        throw new Error('block_count error: response did not include count');
+      }
+      return;
+    }
     if (result.error) throw new Error(`version error: ${String(result.error)}`);
     if (typeof result.node_vendor !== 'string' || result.node_vendor.length === 0) {
       throw new Error('version error: response did not include node_vendor');
@@ -316,11 +357,15 @@ class PooledRpcClient implements RpcClient {
       throw new Error(`block_info error: ${String(result.error)}`);
     }
     const confirmed = result.confirmed === true || result.confirmed === 'true' || result.confirmed === '1';
+    const contents = result.contents && typeof result.contents === 'object'
+      ? result.contents as Record<string, unknown>
+      : undefined;
     return {
       confirmed,
       ...(typeof result.subtype === 'string' ? { subtype: result.subtype } : {}),
       ...(typeof result.block_account === 'string' ? { blockAccount: result.block_account } : {}),
       ...(typeof result.amount === 'string' ? { amount: result.amount } : {}),
+      ...(typeof contents?.link_as_account === 'string' ? { recipientAccount: contents.link_as_account } : {}),
       ...(typeof result.local_timestamp === 'string' ? { localTimestamp: result.local_timestamp } : {}),
     };
   }
@@ -339,6 +384,9 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   let currentState: RpcPoolState = { status: 'disconnected' };
   let detachEndpointListener = () => {};
   let client = NanoClient.initialize(buildClientOptions(nodes));
+  const healthCacheTtlMs = 30_000;
+  let healthCache: RpcHealthReport | null = null;
+  let healthProbe: Promise<RpcHealthReport> | null = null;
 
   // One semaphore slot per configured RPC endpoint (minimum 1).
   // This serialises concurrent callers against the pool so a single-endpoint
@@ -359,6 +407,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     detachEndpointListener();
     client = NanoClient.initialize(buildClientOptions(nodes));
     semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
+    healthCache = null;
     detachEndpointListener = client.onEndpointChange((event) => {
       if (event.kind !== 'rpc') return;
 
@@ -377,6 +426,83 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
 
   function buildClient(): RpcClient {
     return new PooledRpcClient(client, semaphore);
+  }
+
+  async function probeEndpoint(url: string): Promise<RpcEndpointHealth> {
+    const startedAt = Date.now();
+    const checkedAt = new Date().toISOString();
+    const probe = NanoClient.initialize({ rpc: [url], warn: () => {} });
+    try {
+      try {
+        await probe.rpcPool.postJson<Record<string, unknown>>({ action: 'version' });
+        return {
+          url,
+          status: 'healthy',
+          checkedAt,
+          latencyMs: Date.now() - startedAt,
+          probeAction: 'version',
+        };
+      } catch (error) {
+        if (!isUnsupportedActionError(error)) throw error;
+        await probe.rpcPool.postJson<Record<string, unknown>>({ action: 'block_count' });
+        return {
+          url,
+          status: 'healthy',
+          checkedAt,
+          latencyMs: Date.now() - startedAt,
+          probeAction: 'block_count',
+        };
+      }
+    } catch (error) {
+      return {
+        url,
+        status: 'unhealthy',
+        checkedAt,
+        latencyMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async function getHealthReport(options?: { force?: boolean }): Promise<RpcHealthReport> {
+    const urls = configuredRpcUrls(nodes);
+    const now = Date.now();
+    if (!options?.force && healthCache && healthCache.checkedAt && now - Date.parse(healthCache.checkedAt) < healthCacheTtlMs) {
+      return healthCache;
+    }
+    if (healthProbe) return healthProbe;
+
+    healthProbe = (async () => {
+      if (urls.length === 0) {
+        return {
+          status: 'unconfigured',
+          checkedAt: new Date().toISOString(),
+          endpoints: [],
+          healthyCount: 0,
+          failedCount: 0,
+        } satisfies RpcHealthReport;
+      }
+
+      // Probe in parallel once per cache window. This is bounded by the
+      // configured endpoint count and prevents dashboard refreshes from
+      // multiplying traffic to a provider.
+      const endpoints = await Promise.all(urls.map((url) => probeEndpoint(url)));
+      const healthyCount = endpoints.filter((endpoint) => endpoint.status === 'healthy').length;
+      return {
+        status: healthyCount === 0 ? 'down' : healthyCount === endpoints.length ? 'healthy' : 'degraded',
+        checkedAt: new Date().toISOString(),
+        endpoints,
+        healthyCount,
+        failedCount: endpoints.length - healthyCount,
+      } satisfies RpcHealthReport;
+    })().then((report) => {
+      healthCache = report;
+      return report;
+    }).finally(() => {
+      healthProbe = null;
+    });
+
+    return healthProbe;
   }
 
   return {
@@ -415,6 +541,8 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     getAuditReport(): EndpointAuditRecord[] {
       return client.rpcPool.getAuditReport();
     },
+
+    getHealthReport,
   };
 }
 

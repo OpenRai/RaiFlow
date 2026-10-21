@@ -9,6 +9,7 @@ export class SseConnection {
   private reconnectAttempts = 0;
   private stopped = false;
   private connectPromise: Promise<string> | null = null;
+  private readonly watchedAddresses = new Set<string>();
 
   constructor(
     private readonly baseUrl: string,
@@ -25,10 +26,17 @@ export class SseConnection {
 
   private async doConnect(): Promise<string> {
     const url = new URL(`${this.baseUrl}${this.basePath}/accounts/stream`);
+    if (this.watchedAddresses.size > 0) {
+      url.searchParams.set('accounts', [...this.watchedAddresses].join(','));
+    }
     this.abortController = new AbortController();
 
     const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${this.apiKey}`,
+        'Cache-Control': 'no-cache',
+      },
       signal: this.abortController.signal,
     });
 
@@ -42,6 +50,7 @@ export class SseConnection {
       this.connectPromise = null;
       throw new Error('SSE response missing X-Raiflow-Stream-Id header');
     }
+    this.reconnectAttempts = 0;
 
     const body = res.body;
     if (body) {
@@ -73,6 +82,8 @@ export class SseConnection {
     } finally {
       this.reader.releaseLock();
       this.reader = null;
+      this.streamId = null;
+      this.connectPromise = null;
       if (!this.stopped) {
         this.scheduleReconnect();
       }
@@ -108,6 +119,7 @@ export class SseConnection {
   }
 
   watch(address: string): AsyncIterable<AccountEvent> {
+    this.watchedAddresses.add(address);
     let set = this.listeners.get(address);
     if (!set) {
       set = new Set();
@@ -159,6 +171,7 @@ export class SseConnection {
   }
 
   unwatch(address: string): void {
+    this.watchedAddresses.delete(address);
     this.listeners.delete(address);
   }
 
