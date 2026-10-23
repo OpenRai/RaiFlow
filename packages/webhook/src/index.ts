@@ -4,8 +4,10 @@
 export { signPayload, verifySignature } from './signing.js';
 
 export {
+  attemptWebhookDelivery,
   createWebhookDelivery,
   type DeliveryConfig,
+  type WebhookAttemptResult,
   type WebhookDelivery,
 } from './delivery.js';
 

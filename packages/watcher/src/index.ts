@@ -5,7 +5,7 @@
  * Public API surface:
  *
  * Classes:
- *   Watcher            — Main orchestrator (WebSocket or polling mode)
+ *   Watcher            — WebSocket, receivable polling, and history recovery
  *   NanoRpcClient      — Typed Nano RPC client (Node built-in fetch)
  *   NanoWebSocketClient — Real-time confirmation subscription (Node 21+ WebSocket)
  *   NanoPoller         — RPC polling fallback for nodes without WebSocket
@@ -42,6 +42,10 @@ export type { NanoWebSocketConfig } from './websocket.js';
 // Poller
 export { NanoPoller } from './poller.js';
 export type { PollerConfig } from './poller.js';
+
+// Bounded account-history recovery for missed confirmations.
+export { AccountHistoryRecovery, createInMemoryRecoveryCursorStore } from './recovery.js';
+export type { RecoveryCursorStore } from './recovery.js';
 
 // Model types re-exported for consumer convenience
 export type { ConfirmedBlock, WatcherSink } from '@openrai/model';

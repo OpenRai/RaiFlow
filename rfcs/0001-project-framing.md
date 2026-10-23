@@ -32,6 +32,19 @@ There are no known commercial consumers. Backwards compatibility does not
 constrain API or internal refactoring; obsolete paths receive no aliases.
 The repair work is tracked in Beads under epic `RaiFlow-7w6`.
 
+## Implemented commerce contract — 2026-10-22
+
+The runtime and SDK expose the commerce API under `/v1`. Confirmed inbound
+transfers are represented as deposits and, when matched, invoice payments.
+Applications can list account deposits and request a refund by linking an
+explicit destination and amount to a confirmed deposit. The application owns
+customer identity and destination verification; RaiFlow never assumes that a
+Nano sender address is a refund destination. Receiving minimums are configurable
+and applied before persistence. A 1 GiB global database limit and a 100,000
+deposit per-destination limit bound inbound persistence by default. RaiFlow
+retains existing evidence and pauses new ingestion at either limit; it does not
+expire old deposit or event history.
+
 ---
 
 ## Motivation
@@ -75,7 +88,7 @@ RaiFlow operates two co-equal domains simultaneously in the same instance:
 
 Create payment expectations, derive addresses, detect and match incoming confirmed payments, manage lifecycle (complete/expire/cancel), optionally sweep collected funds to treasury.
 
-If invoice address selection depends on any external identifier or application string, the mapping must be deterministic and stable across restarts. Random address selection without persisted mapping is not acceptable.
+An explicit `invoiceKey` is an application reference and reuses its persisted invoice destination for that account. When it is omitted, each invoice gets a distinct destination; absence is not a reusable key. Invoice derivation indices are allocated monotonically from the configured invoice namespace and persisted with their destination. Reusable customer deposits are a separate managed-account use case.
 
 **Wallet Domain** — "Operate a wallet"
 
@@ -104,11 +117,17 @@ A single application might use managed accounts for treasury, watched accounts f
 The initial public API surface:
 
 - `Invoice` — a payment expectation
-- `Payment` — a confirmed matching Nano transfer
+- `Deposit` — a confirmed inbound Nano send, stored independently of invoice matching and optionally linked to an invoice
+- `Payment` — a confirmed transfer matched to an invoice
 - `Account` — a managed or watched Nano account
 - `Send` — an outbound send operation
 - `Event` — a typed, persisted application event
 - `WebhookEndpoint` — a registered delivery target
+
+Deposit history records the Nano source block, destination, amount, sender when
+available, and confirmation time. An optional invoice link records RaiFlow's
+matching decision; sender identity does not establish application customer
+identity, and deposit history does not make RaiFlow a customer ledger.
 
 ---
 

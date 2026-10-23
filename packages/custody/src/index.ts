@@ -4,7 +4,13 @@ import type { Account, Send } from '@openrai/model';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { NanoAddress, type StateBlock } from '@openrai/nano-core';
+import {
+  NanoAddress,
+  stateBlockSigningPayload,
+  type PowEngine,
+  type StateBlock,
+  type WorkProvider,
+} from '@openrai/nano-core';
 import {
   createBlock,
   deriveAddress,
@@ -12,18 +18,18 @@ import {
   deriveSecretKey,
   signBlock as signBlockRaw,
 } from 'nanocurrency';
-import { WorkType } from 'nano-rspow-node';
+import { generateWorkWithThreshold, validateWorkWithThreshold } from 'nano-rspow-node';
 
 /**
  * nano-rspow-node's native binding can monopolise the Node event loop while
  * searching for a nonce on slower hosts. Keep RaiFlow's HTTP/SSE surface
  * responsive by running each proof search in a short-lived child process.
  */
-function generateWorkInChild(hash: string, workType: WorkType): Promise<string> {
+function generateWorkInChild(root: string, threshold: string): Promise<string> {
   const cwd = dirname(fileURLToPath(import.meta.url));
   const script = [
-    "import { generateWork, WorkType } from 'nano-rspow-node';",
-    `const value = await generateWork(${JSON.stringify(hash)}, WorkType[${JSON.stringify(workType)}]);`,
+    "import { generateWorkWithThreshold } from 'nano-rspow-node';",
+    `const value = await generateWorkWithThreshold(${JSON.stringify(root)}, ${JSON.stringify(threshold)});`,
     'process.stdout.write(value);',
   ].join('\n');
 
@@ -58,6 +64,15 @@ function generateWorkInChild(hash: string, workType: WorkType): Promise<string> 
       resolve(work);
     });
   });
+}
+
+/** Isolates native PoW search in a child process while keeping validation local. */
+export function createIsolatedPowEngine(): PowEngine {
+  return {
+    name: 'nano-rspow-node-child',
+    generate: generateWorkInChild,
+    validate: validateWorkWithThreshold,
+  };
 }
 
 export type DerivationPath = { index: number };
@@ -127,7 +142,16 @@ export function createOwsCustodyProvider(options: OwsCustodyProviderOptions): Cu
 
     async readiness() {
       try {
-        derive(0);
+        const address = derive(0);
+        const probeBlock: StateBlock = {
+          type: 'state',
+          account: address,
+          previous: '0'.repeat(64),
+          representative: address,
+          balance: '0',
+          link: '0'.repeat(64),
+        };
+        this.signStateBlock(stateBlockSigningPayload(probeBlock), 0);
         return { ready: true };
       } catch (error) {
         return {
@@ -146,6 +170,7 @@ export interface NanoCoreBlockCodec {
 
 export interface ProviderCustodyConfig {
   provider: CustodyProvider;
+  workProvider: Pick<WorkProvider, 'generate'>;
   representative: string;
   codec: NanoCoreBlockCodec;
 }
@@ -231,16 +256,17 @@ export function createProviderCustodyEngine(config: ProviderCustodyConfig): Cust
       );
     },
     async generateWork(hash) {
-      return generateWorkInChild(hash, WorkType.Send);
+      return config.workProvider.generate(hash, 'send');
     },
     async generateReceiveWork(hash) {
-      return generateWorkInChild(hash, WorkType.Receive);
+      return config.workProvider.generate(hash, 'receive');
     },
   };
 }
 
 export interface CustodyConfig {
   seed: string;
+  workProvider: Pick<WorkProvider, 'generate'>;
   representative: string;
   derivationStartIndex: {
     invoice: number;
@@ -393,11 +419,11 @@ export function createCustodyEngine(
     },
 
     async generateWork(hash: string): Promise<string> {
-      return generateWorkInChild(hash, WorkType.Send);
+      return config.workProvider.generate(hash, 'send');
     },
 
     async generateReceiveWork(hash: string): Promise<string> {
-      return generateWorkInChild(hash, WorkType.Receive);
+      return config.workProvider.generate(hash, 'receive');
     },
   };
 }

@@ -114,12 +114,21 @@ describe('AccountStateSync', () => {
         await sync.addAccount(TEST_ADDRESS);
         expect(accountStore.update).toHaveBeenCalledWith('acc-1', { balanceRaw: '0', frontier: null });
     });
-    it('handleConfirmedBlock updates balance and frontier', async () => {
+    it('handleConfirmedBlock forwards the send without changing recipient chain state', async () => {
         const account = makeAccount({ balanceRaw: '1000', frontier: 'hash1' });
         accountStore.getByAddress.mockResolvedValue(account);
         accountStore.get.mockResolvedValue(account);
-        accountStore.update.mockResolvedValue({ ...account, balanceRaw: '2000', frontier: 'hash2' });
+        rpcPool.getClient.mockReturnValue({
+            accountInfo: vi.fn().mockResolvedValue({
+                frontier: 'hash1',
+                balance: '1000',
+                representative: 'nano_1rep',
+                blockCount: 5,
+            }),
+        });
         await sync.addAccount(TEST_ADDRESS);
+        accountStore.update.mockClear();
+        events.length = 0;
         const block = {
             blockHash: 'hash2',
             senderAccount: 'nano_sender',
@@ -128,11 +137,8 @@ describe('AccountStateSync', () => {
             confirmedAt: new Date().toISOString(),
         };
         await sync.handleConfirmedBlock(block);
-        expect(accountStore.update).toHaveBeenCalledWith('acc-1', {
-            balanceRaw: '2000',
-            frontier: 'hash2',
-        });
-        expect(events.some((e) => e.type === 'account.payment_received')).toBe(true);
+        expect(accountStore.update).not.toHaveBeenCalled();
+        expect(events.some((e) => e.type === 'account.payment_received')).toBe(false);
         expect(forwardedBlocks).toContainEqual(block);
     });
     it('periodic reconciliation emits balance_updated on drift', async () => {

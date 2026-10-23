@@ -1,118 +1,23 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RaiFlow HTMX Demo</title>
-    <!-- HTMX -->
-    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-    <!-- QR Code generation library -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RaiFlow customer deposits</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 </head>
-<body class="dark-theme">
-    <div class="background-effects">
-        <div class="glow-orb orb-1"></div>
-        <div class="glow-orb orb-2"></div>
-    </div>
-
-    <main class="app-container glass-panel">
-        <header class="app-header">
-            <div class="header-titles">
-                <h1>RaiFlow <span>Runtime Console</span></h1>
-                <p>Operator dashboard for connectivity, clients, and domain events</p>
-            </div>
-            <div 
-                id="status-indicator" 
-                hx-get="/api/status" 
-                hx-trigger="load, every 5s" 
-                hx-swap="innerHTML"
-            >
-                <div class="status connecting">Connecting...</div>
-            </div>
-        </header>
-
-        <section class="wallet-overview" hx-get="/api/summary" hx-trigger="load, every 5s" hx-swap="innerHTML">
-            <div class="balance-card">
-                <h3>Loading summary</h3>
-                <div class="balance-amount"><span class="skeleton-text">Loading...</span></div>
-            </div>
-        </section>
-
-        <section class="transactions-panel">
-            <h3>Connectivity</h3>
-            <div class="table-container">
-                <table class="tx-table">
-                    <thead>
-                        <tr>
-                            <th>Subsystem</th>
-                            <th>State</th>
-                            <th>Detail</th>
-                            <th>Observed</th>
-                        </tr>
-                    </thead>
-                    <tbody id="connectivity-body" hx-get="/api/connectivity" hx-trigger="load, every 5s" hx-swap="innerHTML">
-                        <tr>
-                            <td colspan="4" class="empty-state">Loading connectivity…</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <section class="transactions-panel">
-            <h3>Recent Domain Events</h3>
-            <div class="table-container">
-                <table class="tx-table">
-                    <thead>
-                        <tr>
-                            <th>Event</th>
-                            <th>Resource</th>
-                            <th>Clock Time</th>
-                            <th>Relative</th>
-                        </tr>
-                    </thead>
-                    <tbody 
-                        id="tx-table-body" 
-                        hx-get="/api/events" 
-                        hx-trigger="load, every 3s" 
-                        hx-swap="innerHTML"
-                    >
-                        <tr>
-                            <td colspan="4" class="empty-state">Loading events...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <section class="transactions-panel">
-            <h3>Attached Clients / Sinks</h3>
-            <div class="table-container">
-                <table class="tx-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Endpoint</th>
-                            <th>Subscriptions</th>
-                            <th>Registered</th>
-                        </tr>
-                    </thead>
-                    <tbody 
-                        id="clients-body" 
-                        hx-get="/api/clients" 
-                        hx-trigger="load, every 5s" 
-                        hx-swap="innerHTML"
-                    >
-                        <tr>
-                            <td colspan="4" class="empty-state">Loading clients...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    </main>
+<body>
+  <main class="app-container glass-panel">
+    <h1>Customer deposits and withdrawals</h1>
+    <p>RaiFlow derives and operates the account. This browser only sees its Nano address and business reference.</p>
+    <form hx-post="/customers" hx-target="#account-state" hx-swap="outerHTML">
+      <label>Stable customer reference
+        <input name="accountKey" required maxlength="120" autocomplete="off" placeholder="customer-123">
+      </label>
+      <button type="submit">Open customer account</button>
+    </form>
+    <section id="account-state" aria-live="polite"><p>Enter a customer reference to create or retrieve its reusable deposit account.</p></section>
+  </main>
 </body>
 </html>

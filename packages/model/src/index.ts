@@ -6,17 +6,6 @@ import { blake2b } from '@noble/hashes/blake2b';
 export const INVOICE_DERIVATION_START = 0;
 export const MANAGED_DERIVATION_START = 2 ** 31;
 
-export function deriveInvoiceIndex(
-  accountKey: string,
-  invoiceKey: string | null,
-  startIndex: number,
-): number {
-  const input = accountKey + '\0' + (invoiceKey ?? '');
-  const hash = blake2b(new TextEncoder().encode(input), { dkLen: 32 });
-  const uint32 = ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
-  return startIndex + (uint32 % (2 ** 27));
-}
-
 export function deriveManagedIndex(accountKey: string): number {
   const hash = blake2b(new TextEncoder().encode(accountKey), { dkLen: 32 });
   const uint32 = ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
@@ -51,6 +40,8 @@ export type SendStatus =
 export type CompletionPolicy =
   | { type: 'at_least' }
   | { type: 'exact' };
+
+export type DepositDisposition = 'matched' | 'partial' | 'excess' | 'late' | 'unmatched';
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -95,6 +86,33 @@ export interface Payment {
   detectedAt: string;
 }
 
+/** A confirmed inbound Nano send. Invoice matching is optional and separate. */
+export interface Deposit {
+  id: string;
+  blockHash: string;
+  recipientAccount: string;
+  senderAccount: string | null;
+  amountRaw: string;
+  invoiceId: string | null;
+  disposition: DepositDisposition;
+  confirmedAt: string;
+}
+
+/** A refund is linked to one confirmed deposit and its durable outgoing send. */
+export interface Refund {
+  id: string;
+  depositId: string;
+  invoiceId: string | null;
+  sendId: string;
+  destination: string;
+  amountRaw: string;
+  status: SendStatus;
+  idempotencyKey: string;
+  createdAt: string;
+  publishedAt: string | null;
+  confirmedAt: string | null;
+}
+
 export interface Account {
   id: string;
   accountKey: string | null;
@@ -112,7 +130,9 @@ export interface Account {
 
 export interface Send {
   id: string;
-  accountId: string;
+  source:
+    | { type: 'account'; accountId: string; address: string; derivationIndex: number | null }
+    | { type: 'invoice'; invoiceId: string; address: string; derivationIndex: number };
   destination: string;
   amountRaw: string;
   status: SendStatus;
@@ -168,6 +188,7 @@ export type RaiFlowEventType =
   | 'invoice.expired'
   | 'invoice.canceled'
   | 'invoice.swept'
+  | 'deposit.observed'
   | 'account.created'
   | 'account.received'
   | 'account.balance_updated'
@@ -194,7 +215,7 @@ export interface RaiFlowEvent {
   timestamp: string;
   data: Record<string, unknown>;
   resourceId: string;
-  resourceType: 'invoice' | 'payment' | 'account' | 'send' | 'block' | 'rpc';
+  resourceType: 'invoice' | 'payment' | 'deposit' | 'account' | 'send' | 'block' | 'rpc';
 }
 
 export interface InvoiceCreatedEvent extends RaiFlowEvent {
@@ -381,17 +402,23 @@ export interface AccountEvent {
 // Request / Response DTOs
 // ---------------------------------------------------------------------------
 
-export interface CreateInvoiceRequest {
+interface CreateInvoiceRequestFields {
   accountKey: string;
   invoiceKey?: string;
-  expectedAmountRaw: string;
-  memo?: string;
+  /** Optional metadata values are strings so the wire shape matches Invoice. */
   metadata?: Record<string, string>;
-  idempotencyKey?: string;
-  expiresIn?: number;
   expiresAt?: string;
   completionPolicy?: CompletionPolicy;
 }
+
+/**
+ * Invoice amounts must be sent as an exact decimal string with an explicit
+ * unit. Supplying both representations is invalid.
+ */
+export type CreateInvoiceRequest = CreateInvoiceRequestFields & (
+  | { expectedAmountRaw: string; expectedAmount?: never }
+  | { expectedAmount: string; expectedAmountRaw?: never }
+);
 
 export interface CreateAccountRequest {
   accountKey: string;
@@ -463,7 +490,9 @@ export interface InvoiceStore {
   /** Resolve one invoice by its durable application identity. */
   getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<Invoice | undefined>;
   list(filter?: { status?: InvoiceStatus }): Promise<Invoice[]>;
+  listByAccountKey(accountKey: string): Promise<Invoice[]>;
   update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
+  transition(id: string, expectedStatus: InvoiceStatus, patch: Partial<Invoice>): Promise<Invoice | undefined>;
   getByPayAddress(address: string, status?: InvoiceStatus): Promise<Invoice[]>;
   getByIdempotencyKey(key: string): Promise<string | undefined>;
 }
@@ -472,7 +501,8 @@ export interface InvoiceAccountStore {
   getOrCreate(
     accountKey: string,
     invoiceKey: string | null,
-    derivationIndex: number,
+    derivationStartIndex: number,
+    derivationEndIndex: number,
     deriveAddress: (index: number) => string,
   ): Promise<InvoiceAccount>;
   get(accountKey: string, invoiceKey: string | null): Promise<InvoiceAccount | undefined>;
@@ -484,6 +514,27 @@ export interface PaymentStore {
   get(id: string): Promise<Payment | undefined>;
   getByBlockHash(hash: string): Promise<Payment | undefined>;
   listByInvoice(invoiceId: string): Promise<Payment[]>;
+}
+
+export interface DepositStore {
+  /** Persist once per confirmed source-send hash, returning the canonical row on replay. */
+  createIfAbsent(deposit: Deposit): Promise<Deposit>;
+  getByBlockHash(hash: string): Promise<Deposit | undefined>;
+  /** Optional convenience lookup by deposit resource ID. */
+  get?(id: string): Promise<Deposit | undefined>;
+  listByRecipientAccounts(addresses: string[]): Promise<Deposit[]>;
+}
+
+export interface RefundQueueResult {
+  refund: Refund;
+  send: Send;
+  created: boolean;
+}
+
+/** Atomically reserves a deposit amount and persists the linked durable send. */
+export interface RefundStore {
+  queue(deposit: Deposit, refund: Refund, send: Send): Promise<RefundQueueResult>;
+  listByDepositId(depositId: string): Promise<Refund[]>;
 }
 
 export interface AccountStore {
@@ -541,6 +592,8 @@ export interface ConfirmedBlock {
   recipientAccount: string;
   amountRaw: string;
   confirmedAt: string;
+  /** True when account-history reconciliation found this send was already received. */
+  alreadyReceived?: boolean;
 }
 
 export interface WatcherSink {
@@ -572,99 +625,3 @@ export type ErrorCode =
   | 'internal_error';
 
 export { RaiFlowError, StorageError, CustodyError, isErrorWithCode, getErrorCode } from './errors.js';
-
-// ---------------------------------------------------------------------------
-// Backward compatibility aliases (prototype-era)
-// These allow the old runtime to keep building while being rewritten.
-// Remove when runtime is fully rewritten.
-// ---------------------------------------------------------------------------
-
-export type LegacyPaymentStatus = PaymentStatus;
-
-/** Prototype-era Invoice shape. Remove when runtime is rewritten. */
-export interface LegacyInvoice {
-  id: string;
-  status: InvoiceStatus;
-  currency: 'XNO';
-  expectedAmountRaw: string;
-  confirmedAmountRaw: string;
-  recipientAccount: string;
-  accountKey?: string;
-  invoiceKey?: string;
-  derivationIndex?: number;
-  createdAt: string;
-  expiresAt?: string;
-  completedAt?: string;
-  expiredAt?: string;
-  canceledAt?: string;
-  metadata?: Record<string, unknown>;
-  completionPolicy?: CompletionPolicy;
-}
-
-/** Prototype-era Payment shape. Remove when runtime is rewritten. */
-export interface LegacyPayment {
-  id: string;
-  invoiceId: string;
-  status: PaymentStatus;
-  currency: 'XNO';
-  amountRaw: string;
-  recipientAccount: string;
-  senderAccount?: string;
-  sendBlockHash: string;
-  confirmedAt: string;
-  metadata?: Record<string, unknown>;
-}
-
-/** Prototype-era EventEnvelope. Remove when runtime is rewritten. */
-export interface LegacyEventEnvelope<TType extends string, TData> {
-  id: string;
-  type: TType;
-  createdAt: string;
-  data: TData;
-}
-
-/** Prototype-era store interface. Remove when runtime is rewritten. */
-export interface LegacyInvoiceStore {
-  create(invoice: LegacyInvoice, idempotencyKey?: string): Promise<LegacyInvoice>;
-  get(id: string): Promise<LegacyInvoice | undefined>;
-  /** Resolve one invoice by its durable application identity. */
-  getByAccountKeyAndInvoiceKey(accountKey: string, invoiceKey: string | null): Promise<LegacyInvoice | undefined>;
-  list(filter?: { status?: InvoiceStatus }): Promise<LegacyInvoice[]>;
-  update(id: string, patch: Partial<LegacyInvoice>): Promise<LegacyInvoice>;
-  getByRecipientAccount(account: string, status?: InvoiceStatus): Promise<LegacyInvoice[]>;
-  getByIdempotencyKey(key: string): Promise<string | undefined>;
-}
-
-/** Prototype-era PaymentStore. Remove when runtime is rewritten. */
-export interface LegacyPaymentStore {
-  create(payment: LegacyPayment): Promise<LegacyPayment>;
-  get(id: string): Promise<LegacyPayment | undefined>;
-  getByBlockHash(hash: string): Promise<LegacyPayment | undefined>;
-  listByInvoice(invoiceId: string): Promise<LegacyPayment[]>;
-}
-
-/** Prototype-era EventStore. Remove when runtime is rewritten. */
-export interface LegacyEventStore {
-  append(event: LegacyRaiFlowEvent): Promise<void>;
-  listByInvoice(invoiceId: string, options?: { after?: string }): Promise<LegacyRaiFlowEvent[]>;
-}
-
-export type LegacyRaiFlowEventType =
-  | 'invoice.created'
-  | 'payment.confirmed'
-  | 'invoice.completed'
-  | 'invoice.expired'
-  | 'invoice.canceled';
-
-export type LegacyRaiFlowEvent =
-  | LegacyInvoiceCreatedEvent
-  | LegacyPaymentConfirmedEvent
-  | LegacyInvoiceCompletedEvent
-  | LegacyInvoiceExpiredEvent
-  | LegacyInvoiceCanceledEvent;
-
-export interface LegacyInvoiceCreatedEvent extends LegacyEventEnvelope<'invoice.created', { invoice: LegacyInvoice }> {}
-export interface LegacyPaymentConfirmedEvent extends LegacyEventEnvelope<'payment.confirmed', { payment: LegacyPayment; invoice: LegacyInvoice }> {}
-export interface LegacyInvoiceCompletedEvent extends LegacyEventEnvelope<'invoice.completed', { invoice: LegacyInvoice }> {}
-export interface LegacyInvoiceExpiredEvent extends LegacyEventEnvelope<'invoice.expired', { invoice: LegacyInvoice }> {}
-export interface LegacyInvoiceCanceledEvent extends LegacyEventEnvelope<'invoice.canceled', { invoice: LegacyInvoice }> {}

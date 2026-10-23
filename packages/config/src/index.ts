@@ -2,6 +2,23 @@
 
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
+import { NanoAddress, NanoAmount } from '@openrai/nano-core';
+
+export const DEFAULT_MINIMUM_RECEIVE_AMOUNT_XNO = '0.000001';
+export const DEFAULT_STORAGE_MAX_DATABASE_BYTES = 1_073_741_824;
+export const DEFAULT_STORAGE_MAX_DEPOSITS_PER_ACCOUNT = 100_000;
+
+/** Validate the inbound admission minimum and convert it without floating point. */
+export function minimumReceiveAmountRaw(value: string): string {
+  try {
+    if (typeof value !== 'string') throw new Error('Expected a decimal string');
+    const amount = NanoAmount.fromNano(value);
+    if (amount.raw === '0') throw new Error('Expected a positive amount');
+    return amount.raw;
+  } catch (cause) {
+    throw new Error('receiving.minimumAmountXno must be a positive decimal XNO string with at most 30 fractional digits', { cause });
+  }
+}
 
 export type RunMode = 'custodial' | 'non-custodial';
 
@@ -16,6 +33,7 @@ export interface DaemonConfig {
 export interface NanoConfig {
   rpc: string[];
   ws: string[];
+  work: string[];
 }
 
 export interface CustodyConfig {
@@ -32,9 +50,18 @@ export interface InvoicesConfig {
   sweepDestination: string | null;
 }
 
+export interface ReceivingConfig {
+  /** Inclusive minimum for each inbound transfer, expressed as a decimal XNO string. */
+  minimumAmountXno: string;
+}
+
 export interface StorageConfig {
   driver: 'sqlite';
   path: string;
+  /** SQLite database page limit; inbound processing pauses before this is reached. */
+  maxDatabaseBytes: number;
+  /** Maximum retained confirmed deposits for one Nano destination address. */
+  maxDepositsPerAccount: number;
 }
 
 export interface WebhookConfig {
@@ -53,6 +80,7 @@ export interface RaiFlowConfig {
   nano: NanoConfig;
   custody: CustodyConfig | null;
   invoices: InvoicesConfig;
+  receiving: ReceivingConfig;
   storage: StorageConfig;
   webhooks: WebhookConfig[];
   logging: LoggingConfig;
@@ -63,6 +91,7 @@ interface RawConfig {
   nano?: unknown;
   custody?: unknown;
   invoices?: unknown;
+  receiving?: unknown;
   storage?: unknown;
   webhooks?: unknown;
   logging?: unknown;
@@ -102,6 +131,14 @@ function optionalNumber(obj: Record<string, unknown>, key: string): number | und
   if (val === undefined) return undefined;
   if (typeof val !== 'number') throw new Error(`config.${key} must be a number`);
   return val;
+}
+
+function positiveInteger(value: unknown, key: string): number {
+  const parsed = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  if (typeof parsed !== 'number' || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`config.storage.${key} must be a positive safe integer`);
+  }
+  return parsed;
 }
 
 function optionalBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
@@ -195,6 +232,7 @@ function parseNano(obj: Record<string, unknown>): NanoConfig {
   return {
     rpc: resolveStringArray(nano.rpc, 'nano.rpc'),
     ws: resolveStringArray(nano.ws, 'nano.ws'),
+    work: resolveStringArray(nano.work, 'nano.work'),
   };
 }
 
@@ -228,15 +266,27 @@ function parseCustody(obj: Record<string, unknown>): CustodyConfig | null {
 
 function parseInvoices(obj: Record<string, unknown>): InvoicesConfig {
   const invoices = isObject(obj.invoices) ? obj.invoices : {};
+  const defaultExpirySeconds = optionalNumber(invoices, 'defaultExpirySeconds') ?? 3600;
+  if (!Number.isSafeInteger(defaultExpirySeconds) || defaultExpirySeconds <= 0) {
+    throw new Error('config.invoices.defaultExpirySeconds must be a positive integer');
+  }
   const autoSweep = optionalBoolean(invoices, 'autoSweep') ?? false;
   const sweepDestination = optionalString(invoices, 'sweepDestination');
   if (autoSweep && !sweepDestination) {
     throw new Error('config.invoices.sweepDestination is required when autoSweep is true');
   }
+  const resolvedSweepDestination = sweepDestination ? resolveEnv(sweepDestination) : null;
+  if (autoSweep && resolvedSweepDestination) {
+    try {
+      NanoAddress.parse(resolvedSweepDestination);
+    } catch (cause) {
+      throw new Error('config.invoices.sweepDestination must be a valid Nano address', { cause });
+    }
+  }
   return {
-    defaultExpirySeconds: optionalNumber(invoices, 'defaultExpirySeconds') ?? 3600,
+    defaultExpirySeconds,
     autoSweep,
-    sweepDestination: sweepDestination ? resolveEnv(sweepDestination) : null,
+    sweepDestination: resolvedSweepDestination,
   };
 }
 
@@ -246,10 +296,42 @@ function parseStorage(obj: Record<string, unknown>): StorageConfig {
   if (driver !== 'sqlite') {
     throw new Error(`config.storage.driver must be 'sqlite' for now`);
   }
+  const maxDatabaseBytes = positiveInteger(
+    process.env['RAIFLOW_STORAGE_MAX_DATABASE_BYTES']
+      ?? storage.maxDatabaseBytes
+      ?? DEFAULT_STORAGE_MAX_DATABASE_BYTES,
+    'maxDatabaseBytes',
+  );
+  const maxDepositsPerAccount = positiveInteger(
+    process.env['RAIFLOW_STORAGE_MAX_DEPOSITS_PER_ACCOUNT']
+      ?? storage.maxDepositsPerAccount
+      ?? DEFAULT_STORAGE_MAX_DEPOSITS_PER_ACCOUNT,
+    'maxDepositsPerAccount',
+  );
+  if (maxDatabaseBytes < 16 * 1024 * 1024) {
+    throw new Error('config.storage.maxDatabaseBytes must be at least 16777216 bytes');
+  }
   return {
     driver: 'sqlite',
     path: resolveEnv(optionalString(storage, 'path') ?? './raiflow.db'),
+    maxDatabaseBytes,
+    maxDepositsPerAccount,
   };
+}
+
+function parseReceiving(obj: Record<string, unknown>): ReceivingConfig {
+  if (obj.receiving !== undefined && !isObject(obj.receiving)) {
+    throw new Error('config.receiving must be an object');
+  }
+  const receiving = isObject(obj.receiving) ? obj.receiving : {};
+  const minimumAmountXno = process.env['RAIFLOW_MINIMUM_RECEIVE_AMOUNT_XNO']
+    ?? receiving.minimumAmountXno
+    ?? DEFAULT_MINIMUM_RECEIVE_AMOUNT_XNO;
+  if (typeof minimumAmountXno !== 'string') {
+    throw new Error('config.receiving.minimumAmountXno must be a quoted decimal XNO string');
+  }
+  minimumReceiveAmountRaw(minimumAmountXno);
+  return { minimumAmountXno };
 }
 
 function parseWebhooks(obj: Record<string, unknown>): WebhookConfig[] {
@@ -293,6 +375,7 @@ export function loadConfig(path: string): RaiFlowConfig {
     nano: parseNano(obj),
     custody: parseCustody(obj),
     invoices: parseInvoices(obj),
+    receiving: parseReceiving(obj),
     storage: parseStorage(obj),
     webhooks: parseWebhooks(obj),
     logging: parseLogging(obj),

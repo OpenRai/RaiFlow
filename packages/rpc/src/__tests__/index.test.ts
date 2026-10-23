@@ -1,11 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createRpcPool, createWsClient } from '../index.js';
 
-vi.mock('nano-rspow-node', () => ({
-  generateWork: vi.fn().mockResolvedValue('test-work'),
-  WorkType: { Send: 'Send', Receive: 'Receive' },
-}));
-
 describe('@openrai/rpc nano-core defaults', () => {
   it('uses nano-core default RPC endpoints when no nodes are configured', () => {
     const pool = createRpcPool([]);
@@ -42,15 +37,20 @@ describe('@openrai/rpc workGenerate', () => {
     vi.restoreAllMocks();
   });
 
-  it('workGenerate calls rspow with WorkType.Send and returns work string', async () => {
-    const { generateWork } = await import('nano-rspow-node');
-    const pool = createRpcPool([]);
+  it('routes work generation through the injected WorkProvider', async () => {
+    const workProvider = { generate: vi.fn().mockResolvedValue('test-work') };
+    const pool = createRpcPool([], workProvider);
     const client = pool.getClient();
 
     const result = await client.workGenerate('abc123');
 
-    expect(generateWork).toHaveBeenCalledWith('abc123', 'Send');
+    expect(workProvider.generate).toHaveBeenCalledWith('abc123', 'send');
     expect(result).toEqual({ work: 'test-work' });
+  });
+
+  it('fails clearly when the pool has no injected WorkProvider', async () => {
+    await expect(createRpcPool([]).getClient().workGenerate('abc123'))
+      .rejects.toThrow('WorkProvider is not configured');
   });
 });
 
@@ -211,6 +211,33 @@ describe('@openrai/rpc endpoint failover', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain('healthy.example.com');
+  });
+
+  it('uses nano-core Bearer URL shorthand and redacts credentials in audit output', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      frontier: 'ABC', balance: '7', representative: 'nano_1rep', block_count: '1',
+    }), { status: 200 }));
+    const pool = createRpcPool([{ rpc: ['https://secret-token@auth.example.com/rpc'], ws: [] }]);
+
+    await pool.getClient().accountInfo('nano_1account');
+
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('authorization')).toBe('Bearer secret-token');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://auth.example.com/rpc');
+    expect(pool.getAuditReport()[0]?.url).toBe('https://auth.example.com/rpc');
+    expect(JSON.stringify(pool.getAuditReport())).not.toContain('secret-token');
+  });
+
+  it('preserves unsupported-action JSON for operation fallbacks without cooling the endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Action not allowed' }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ blocks: { ABC123: { amount: '1', source: 'nano_1sender' } } }), { status: 200 }));
+    const pool = createRpcPool([{ rpc: ['https://provider.example.com/rpc'], ws: [] }]);
+
+    await expect(pool.getClient().accountsReceivableBatch(['nano_1account'], 20))
+      .resolves.toEqual({ nano_1account: ['ABC123'] });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((pool.getAuditReport()[0]?.consecutiveFailures)).toBe(0);
   });
 });
 

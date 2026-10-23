@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { Account, AccountStore, EventStore, Send, SendStore } from '@openrai/model';
+import type { Account, AccountStore, EventStore, RaiFlowEvent, Send, SendStore } from '@openrai/model';
 import { Runtime, xnoToRaw } from '../runtime.js';
+import { AccountStateSync } from '../account-state-sync.js';
+import { createDatabase, createMigrationRunner, createSqliteDepositStore, createSqliteConfirmedDepositIngestStore } from '@openrai/storage';
 import {
   ONE_XNO,
   HALF_XNO,
@@ -9,6 +11,168 @@ import {
   createTestInvoice,
   makeBlock,
 } from './helpers.js';
+
+describe('minimum inbound amount', () => {
+  it('confirms an outgoing send below the inbound minimum', async () => {
+    const send = {
+      id: 'small-send', status: 'published', blockHash: 'small-send-hash',
+      source: { type: 'account' as const, accountId: 'source', address: TEST_ACCOUNT_2, derivationIndex: null },
+      destination: TEST_ACCOUNT_2, amountRaw: '1',
+      idempotencyKey: 'small-send', createdAt: new Date().toISOString(),
+      publishedAt: new Date().toISOString(), confirmedAt: null,
+    } satisfies Send;
+    const update = vi.fn(async (_id: string, patch: Partial<Send>) => ({ ...send, ...patch }));
+    const sendStore = { getByBlockHash: vi.fn().mockResolvedValue(send), update } as unknown as SendStore;
+    const runtime = new Runtime({ sendStore });
+    const listener = vi.fn();
+    runtime.on('*', listener);
+    await runtime.handleConfirmedBlock(makeBlock({ blockHash: send.blockHash, recipientAccount: send.destination, amountRaw: '1' }));
+    expect(update).toHaveBeenCalledWith(send.id, expect.objectContaining({ status: 'confirmed' }));
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: 'send.confirmed' }));
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('rejects new invoices below the minimum and accepts its exact boundary', async () => {
+    const { runtime } = createTestRuntime({ minimumReceiveAmountXno: '0.001' });
+    await expect(runtime.createInvoice({ accountKey: 'tiny', expectedAmountRaw: '1' })).rejects.toMatchObject({ code: 'bad_request' });
+    const invoice = await runtime.createInvoice({ accountKey: 'boundary', invoiceKey: 'order', expectedAmount: '0.001' }, 'boundary-key');
+    expect(invoice.expectedAmountRaw).toBe(xnoToRaw('0.001'));
+    const { runtime: raised } = createTestRuntime({ minimumReceiveAmountXno: '1' });
+    // Previously issued invoices keep their identity when replayed after a config change.
+    (raised as any).invoiceStore = runtime.invoiceStore;
+    const replay = await raised.createInvoice({ accountKey: 'boundary', invoiceKey: 'order', expectedAmount: '0.001' });
+    expect(replay.id).toBe(invoice.id);
+  });
+
+  it('drops dust before SQLite writes during live delivery and replay, then admits the boundary', async () => {
+    const db = createDatabase(':memory:');
+    try {
+      await createMigrationRunner(db).up();
+      const minimum = xnoToRaw('0.001');
+      const address = TEST_ACCOUNT_2;
+      db.prepare(`INSERT INTO invoices (id, status, pay_address, expected_amount_raw, received_amount_raw, created_at, updated_at, completion_policy)
+        VALUES ('invoice-min', 'open', ?, ?, '0', ?, ?, '{"type":"at_least"}')`).run(address, minimum, new Date().toISOString(), new Date().toISOString());
+      db.prepare(`INSERT INTO invoice_accounts (account_key, invoice_key, derivation_index, address, created_at)
+        VALUES ('minimum', 'invoice-min', 7, ?, ?)`).run(address, new Date().toISOString());
+      const config = {
+        minimumReceiveAmountXno: '0.001',
+        depositStore: createSqliteDepositStore(db),
+        confirmedDepositIngestStore: createSqliteConfirmedDepositIngestStore(db),
+      };
+      const runtime = new Runtime(config);
+      const recovered = new Runtime(config);
+      for (let i = 0; i < 50; i++) {
+        const block = makeBlock({ recipientAccount: address, blockHash: `dust-${i}`, amountRaw: i === 0 ? '1' : (BigInt(minimum) - 1n).toString() });
+        await runtime.handleConfirmedBlock(block);
+        await recovered.handleConfirmedBlock({ ...block, alreadyReceived: true });
+      }
+      for (const table of ['deposits', 'payments', 'events', 'receive_tasks']) {
+        expect(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get()).toBe(0);
+      }
+      const boundary = makeBlock({ recipientAccount: address, blockHash: 'boundary', amountRaw: minimum });
+      await runtime.handleConfirmedBlock(boundary);
+      await recovered.handleConfirmedBlock(boundary);
+      for (const table of ['deposits', 'payments', 'receive_tasks']) {
+        expect(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get()).toBe(1);
+      }
+      expect(db.prepare('SELECT status FROM invoices WHERE id = ?').pluck().get('invoice-min')).toBe('completed');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not create in-memory payments, deposits or events for dust', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    const listener = vi.fn();
+    const enqueueReceivables = vi.fn();
+    const handleConfirmedReceiveBlock = vi.fn();
+    (runtime as any).receiveOrchestrator = { enqueueReceivables, handleConfirmedReceiveBlock };
+    runtime.on('*', listener);
+    await runtime.handleConfirmedBlock(makeBlock({ recipientAccount: invoice.payAddress, amountRaw: '1' }));
+    expect(await runtime.getPaymentsByInvoice(invoice.id)).toHaveLength(0);
+    expect(await runtime.getDepositsByAccountKey(invoice.accountKey)).toHaveLength(0);
+    expect(enqueueReceivables).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    expect(handleConfirmedReceiveBlock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('invoice settlement', () => {
+  it('waits for receivables, queues one invoice sourced send, and emits invoice.swept on confirmation', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    await (runtime as any).invoiceStore.update(invoice.id, { status: 'completed' });
+
+    const sends = new Map<string, Send>();
+    const sendStore: SendStore = {
+      async create(send) {
+        if ([...sends.values()].some((existing) => existing.idempotencyKey === send.idempotencyKey)) throw new Error('duplicate key');
+        sends.set(send.id, send);
+        return send;
+      },
+      async get(id) { return sends.get(id); },
+      async getByBlockHash(hash) { return [...sends.values()].find((send) => send.blockHash === hash); },
+      async listByAccount(id) { return [...sends.values()].filter((send) => send.source.type === 'account' && send.source.accountId === id); },
+      async listByStatus(status) { return [...sends.values()].filter((send) => send.status === status); },
+      async getByIdempotencyKey(key) { return [...sends.values()].find((send) => send.idempotencyKey === key); },
+      async update(id, patch) {
+        const current = sends.get(id);
+        if (!current) throw new Error('send missing');
+        const updated = { ...current, ...patch };
+        sends.set(id, updated);
+        return updated;
+      },
+    };
+    const accountsReceivable = vi.fn()
+      .mockResolvedValueOnce([{ hash: 'still-pending', amount: '500' }])
+      .mockResolvedValue([]);
+    (runtime as any).autoSweepInvoices = true;
+    (runtime as any).invoiceSweepDestination = TEST_ACCOUNT_2;
+    (runtime as any).sendStore = sendStore;
+    (runtime as any).rpcPool = { getClient: () => ({
+      accountsReceivable,
+      accountInfo: vi.fn().mockResolvedValue({ balance: '500' }),
+    }) };
+    const listener = vi.fn();
+    runtime.on('*', listener);
+
+    await runtime.runInvoiceSweepCheck();
+    expect(sends.size).toBe(0);
+
+    await (runtime as any).receiveTaskStore.create({
+      accountAddress: invoice.payAddress,
+      derivationIndex: invoice.derivationIndex,
+      pendingBlockHash: 'failed-receive-hash',
+      amountRaw: '500',
+      status: 'failed',
+      publishedAt: null,
+      confirmedAt: null,
+      failedAt: new Date().toISOString(),
+      failReason: 'temporary receive failure',
+      retryCount: 3,
+    });
+
+    await runtime.runInvoiceSweepCheck();
+    expect(sends.size).toBe(1);
+    const [sweep] = [...sends.values()];
+    expect(sweep).toMatchObject({
+      source: { type: 'invoice', invoiceId: invoice.id, address: invoice.payAddress, derivationIndex: invoice.derivationIndex },
+      destination: TEST_ACCOUNT_2,
+      amountRaw: '500',
+      idempotencyKey: `invoice-sweep:${invoice.id}`,
+      status: 'queued',
+    });
+    await runtime.runInvoiceSweepCheck();
+    expect(sends.size).toBe(1);
+    const confirmed = await sendStore.update(sweep!.id, { status: 'confirmed', confirmedAt: new Date().toISOString() });
+    await Promise.all([runtime.runInvoiceSweepCheck(), runtime.runInvoiceSweepCheck()]);
+    expect(confirmed.source.type).toBe('invoice');
+    const sweptEvents = listener.mock.calls.filter(([event]) => event.type === 'invoice.swept');
+    expect(sweptEvents).toHaveLength(1);
+    expect(sweptEvents[0]![0].id).toBe(`invoice.swept:${invoice.id}`);
+  });
+});
 
 describe('createInvoice', () => {
   it('registers each invoice pay address with the watcher', async () => {
@@ -29,6 +193,31 @@ describe('createInvoice', () => {
     expect(invoice.accountKey).toBe('acct-1');
   });
 
+  it('gives one-time invoices distinct destinations when no invoiceKey is supplied', async () => {
+    const { runtime } = createTestRuntime();
+    const first = await runtime.createInvoice({ accountKey: 'acct-no-reference', expectedAmountRaw: ONE_XNO });
+    const second = await runtime.createInvoice({ accountKey: 'acct-no-reference', expectedAmountRaw: ONE_XNO });
+
+    expect(first.invoiceKey).toBeNull();
+    expect(second.invoiceKey).toBeNull();
+    expect(first.derivationIndex).not.toBe(second.derivationIndex);
+    expect(first.payAddress).not.toBe(second.payAddress);
+  });
+
+  it('applies a configured default expiry and rejects invalid or past explicit dates', async () => {
+    const { runtime } = createTestRuntime({ defaultExpirySeconds: 120 });
+    const now = Date.now();
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-expiry', expectedAmountRaw: ONE_XNO });
+
+    expect(Date.parse(invoice.expiresAt!)).toBeGreaterThanOrEqual(now + 119_000);
+    await expect(runtime.createInvoice({
+      accountKey: 'acct-expiry', expectedAmountRaw: ONE_XNO, expiresAt: 'not-a-date',
+    })).rejects.toThrow('valid date-time');
+    await expect(runtime.createInvoice({
+      accountKey: 'acct-expiry', expectedAmountRaw: ONE_XNO, expiresAt: '2000-01-01T00:00:00Z',
+    })).rejects.toThrow('in the future');
+  });
+
   it('is idempotent by key and returns the original invoice', async () => {
     const { runtime } = createTestRuntime();
     const inv1 = await runtime.createInvoice({ accountKey: 'acct-1', expectedAmountRaw: ONE_XNO }, 'inv-create-1');
@@ -36,6 +225,67 @@ describe('createInvoice', () => {
 
     expect(inv1.id).toBe(inv2.id);
     expect(inv1.payAddress).toBe(inv2.payAddress);
+  });
+});
+
+describe('queueSend idempotency', () => {
+  it('returns one send for concurrent retries and rejects a changed payload', async () => {
+    const account: Account = {
+      id: 'send-account',
+      accountKey: 'send-account',
+      type: 'managed',
+      address: TEST_ACCOUNT_2,
+      label: null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const sends = new Map<string, Send>();
+    const accountStore: AccountStore = {
+      create: async (value) => value,
+      get: async (id) => id === account.id ? account : undefined,
+      getByAddress: async () => undefined,
+      list: async () => [account],
+      update: async () => account,
+      delete: async () => true,
+    };
+    const sendStore: SendStore = {
+      async create(send) {
+        if ([...sends.values()].some((existing) => existing.idempotencyKey === send.idempotencyKey)) {
+          throw new Error('UNIQUE constraint failed: sends.idempotency_key');
+        }
+        sends.set(send.id, send);
+        return send;
+      },
+      async get(id) { return sends.get(id); },
+      async getByBlockHash(hash) { return [...sends.values()].find((send) => send.blockHash === hash); },
+      async listByAccount(id) { return [...sends.values()].filter((send) => send.source.type === 'account' && send.source.accountId === id); },
+      async listByStatus(status) { return [...sends.values()].filter((send) => send.status === status); },
+      async getByIdempotencyKey(key) { return [...sends.values()].find((send) => send.idempotencyKey === key); },
+      async update(id, patch) {
+        const send = sends.get(id);
+        if (!send) throw new Error(`Send ${id} not found`);
+        const updated = { ...send, ...patch };
+        sends.set(id, updated);
+        return updated;
+      },
+    };
+    const runtime = new Runtime({ accountStore, sendStore });
+    const request = {
+      accountId: account.id,
+      destination: 'xrb_3hsbezen1yu6egfh7ijbx4cbuk39uf5b5nofr7e3sq6d8iip89b5j8ff3rbe',
+      amountRaw: ONE_XNO,
+      idempotencyKey: 'same-send-key',
+    };
+
+    const [first, replay] = await Promise.all([runtime.queueSend(request), runtime.queueSend(request)]);
+    expect(first.id).toBe(replay.id);
+    expect(sends.size).toBe(1);
+    await expect(runtime.queueSend({ ...request, amountRaw: HALF_XNO })).rejects.toThrow('different send request');
   });
 });
 
@@ -51,7 +301,7 @@ describe('createInvoice — accountKey required', () => {
     ).rejects.toThrow('accountKey is required');
   });
 
-  it('same accountKey + same invoiceKey → same payAddress across two separate createInvoice calls', async () => {
+  it('same accountKey + same invoiceKey → same invoice across two createInvoice calls', async () => {
     const { runtime } = createTestRuntime();
 
     const inv1 = await runtime.createInvoice({
@@ -62,10 +312,10 @@ describe('createInvoice — accountKey required', () => {
     const inv2 = await runtime.createInvoice({
       accountKey: 'acct-stable',
       invoiceKey: 'inv-key-1',
-      expectedAmountRaw: HALF_XNO,
+      expectedAmountRaw: ONE_XNO,
     });
 
-    expect(inv1.id).not.toBe(inv2.id);
+    expect(inv1.id).toBe(inv2.id);
     expect(inv1.payAddress).toBe(inv2.payAddress);
   });
 
@@ -117,10 +367,23 @@ describe('getInvoiceByAccountKeyAndInvoiceKey', () => {
   it('resolves one invoice by its compound application identity', async () => {
     const { runtime } = createTestRuntime();
     const invoice = await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-123', expectedAmountRaw: ONE_XNO });
+    const replay = await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-123', expectedAmountRaw: ONE_XNO });
     await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-456', expectedAmountRaw: ONE_XNO });
 
+    expect(replay.id).toBe(invoice.id);
     expect((await runtime.getInvoiceByAccountKeyAndInvoiceKey('acct-recovery', 'game-123'))?.id).toBe(invoice.id);
     expect(await runtime.getInvoiceByAccountKeyAndInvoiceKey('acct-recovery', 'missing')).toBeUndefined();
+  });
+
+  it('rejects reuse of an application invoiceKey with a changed amount', async () => {
+    const { runtime } = createTestRuntime();
+    await runtime.createInvoice({ accountKey: 'acct-recovery', invoiceKey: 'game-123', expectedAmountRaw: ONE_XNO });
+
+    await expect(runtime.createInvoice({
+      accountKey: 'acct-recovery',
+      invoiceKey: 'game-123',
+      expectedAmountRaw: '200',
+    })).rejects.toMatchObject({ code: 'conflict' });
   });
 });
 
@@ -145,6 +408,42 @@ describe('cancelInvoice', () => {
     expect(first.id).toBe(second.id);
     expect(second.status).toBe('canceled');
   });
+
+  it('expires an open invoice once and does not overwrite a completed state', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    await (runtime as any).invoiceStore.update(invoice.id, { expiresAt: '2000-01-01T00:00:00.000Z' });
+
+    await (runtime as any).runExpiryCheck();
+    await (runtime as any).runExpiryCheck();
+    expect((await runtime.getInvoice(invoice.id))?.status).toBe('expired');
+    expect((await runtime.getEventsByInvoice(invoice.id)).filter((event) => event.type === 'invoice.expired')).toHaveLength(1);
+
+    const completed = await createTestInvoice(runtime);
+    await (runtime as any).invoiceStore.update(completed.id, {
+      status: 'completed',
+      expiresAt: '2000-01-01T00:00:00.000Z',
+    });
+    await (runtime as any).runExpiryCheck();
+    expect((await runtime.getInvoice(completed.id))?.status).toBe('completed');
+  });
+
+  it('serializes cancellation against an already-due expiry', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    await (runtime as any).invoiceStore.update(invoice.id, { expiresAt: '2000-01-01T00:00:00.000Z' });
+
+    await Promise.allSettled([
+      runtime.cancelInvoice(invoice.id),
+      (runtime as any).runExpiryCheck(),
+    ]);
+
+    const result = await runtime.getInvoice(invoice.id);
+    expect(['canceled', 'expired']).toContain(result?.status);
+    const lifecycleEvents = (await runtime.getEventsByInvoice(invoice.id))
+      .filter((event) => event.type === 'invoice.canceled' || event.type === 'invoice.expired');
+    expect(lifecycleEvents).toHaveLength(1);
+  });
 });
 
 describe('handleConfirmedBlock', () => {
@@ -161,6 +460,105 @@ describe('handleConfirmedBlock', () => {
     expect(payments[0]!.status).toBe('confirmed');
     expect(updated!.status).toBe('completed');
     expect(updated!.receivedAmountRaw).toBe(ONE_XNO);
+  });
+
+  it('uses the default watcher forwarding path without crediting the incoming send as recipient state', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    let currentAccount: Account = {
+      id: 'managed-recipient',
+      accountKey: 'managed-recipient',
+      type: 'managed',
+      address: invoice.payAddress,
+      label: null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: 2 ** 31,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const accountStore: AccountStore = {
+      create: async (account) => account,
+      get: async (id) => id === currentAccount.id ? currentAccount : undefined,
+      getByAddress: async (address) => address === currentAccount.address ? currentAccount : undefined,
+      list: async () => [currentAccount],
+      update: vi.fn(async (_id, patch) => {
+        currentAccount = { ...currentAccount, ...patch };
+        return currentAccount;
+      }),
+      delete: async () => true,
+    };
+    (runtime as any).accountStore = accountStore;
+
+    const accountInfo = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({
+        frontier: 'receive-frontier',
+        balance: ONE_XNO,
+        representative: 'nano_1representative',
+        blockCount: 2,
+      });
+    const sync = new AccountStateSync(
+      { getClient: () => ({ accountInfo }) } as any,
+      accountStore,
+      { addAccount: vi.fn(), removeAccount: vi.fn() },
+      undefined,
+      (block) => runtime.handleConfirmedBlock(block),
+      { reconcileIntervalMs: 10, initialSyncDelayMs: 0 },
+    );
+    let recoveredSync: AccountStateSync | undefined;
+
+    try {
+      await sync.addAccount(currentAccount.address);
+      const block = makeBlock({
+        blockHash: 'confirmed-incoming-send',
+        recipientAccount: currentAccount.address,
+        amountRaw: ONE_XNO,
+      });
+
+      await sync.handleConfirmedBlock(block);
+      await sync.handleConfirmedBlock(block);
+
+      expect(currentAccount).toMatchObject({ balanceRaw: '0', frontier: null });
+      expect(accountStore.update).not.toHaveBeenCalled();
+      expect(await runtime.getPaymentsByInvoice(invoice.id)).toHaveLength(1);
+
+      vi.useFakeTimers();
+      sync.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(accountStore.update).toHaveBeenCalledTimes(1);
+      expect(accountStore.update).toHaveBeenCalledWith('managed-recipient', {
+        balanceRaw: ONE_XNO,
+        frontier: 'receive-frontier',
+      });
+      expect(currentAccount).toMatchObject({ balanceRaw: ONE_XNO, frontier: 'receive-frontier' });
+
+      const recoveredRuntime = new Runtime({
+        accountStore,
+        invoiceStore: runtime.invoiceStore,
+        paymentStore: runtime.paymentStore,
+      });
+      recoveredSync = new AccountStateSync(
+        { getClient: () => ({ accountInfo }) } as any,
+        accountStore,
+        { addAccount: vi.fn(), removeAccount: vi.fn() },
+        undefined,
+        (replayedBlock) => recoveredRuntime.handleConfirmedBlock(replayedBlock),
+        { reconcileIntervalMs: 10, initialSyncDelayMs: 0 },
+      );
+      await recoveredSync.addAccount(currentAccount.address);
+      await recoveredSync.handleConfirmedBlock(block);
+
+      expect(accountStore.update).toHaveBeenCalledTimes(1);
+      expect(currentAccount).toMatchObject({ balanceRaw: ONE_XNO, frontier: 'receive-frontier' });
+      expect(await recoveredRuntime.getPaymentsByInvoice(invoice.id)).toHaveLength(1);
+    } finally {
+      sync.stop();
+      recoveredSync?.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('emits canonical invoice payment events', async () => {
@@ -191,6 +589,136 @@ describe('handleConfirmedBlock', () => {
     const confirmedEvents = deliveredEvents.filter((e) => e.event.type === 'invoice.payment_confirmed');
     expect(payments).toHaveLength(1);
     expect(confirmedEvents).toHaveLength(1);
+  });
+
+  it('queues receive discovery for an invoice address even after the invoice is complete', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    await (runtime as any).invoiceStore.update(invoice.id, { status: 'completed' });
+    const enqueueReceivables = vi.fn().mockResolvedValue(undefined);
+    const handleConfirmedReceiveBlock = vi.fn().mockResolvedValue(undefined);
+    (runtime as any).receiveOrchestrator = { enqueueReceivables, handleConfirmedReceiveBlock };
+
+    await runtime.handleConfirmedBlock(makeBlock({ recipientAccount: invoice.payAddress, amountRaw: ONE_XNO }));
+
+    expect(enqueueReceivables).toHaveBeenCalledWith(invoice.payAddress, invoice.derivationIndex);
+    await expect(runtime.getDepositsByAccountKey(invoice.accountKey)).resolves.toMatchObject([
+      {
+        recipientAccount: invoice.payAddress,
+        amountRaw: ONE_XNO,
+        invoiceId: invoice.id,
+        disposition: 'late',
+      },
+    ]);
+  });
+
+  it('persists and deduplicates confirmed deposits independently of invoice payments', async () => {
+    const { runtime } = createTestRuntime();
+    const invoice = await createTestInvoice(runtime);
+    const block = makeBlock({ recipientAccount: invoice.payAddress, amountRaw: HALF_XNO });
+
+    await runtime.handleConfirmedBlock(block);
+    await runtime.handleConfirmedBlock(block);
+
+    const deposits = await runtime.getDepositsByAccountKey(invoice.accountKey);
+    expect(deposits).toHaveLength(1);
+    expect(deposits[0]).toMatchObject({
+      blockHash: block.blockHash,
+      recipientAccount: invoice.payAddress,
+      senderAccount: block.senderAccount,
+      amountRaw: HALF_XNO,
+      invoiceId: invoice.id,
+      disposition: 'partial',
+      confirmedAt: block.confirmedAt,
+    });
+    expect(await runtime.getPaymentsByInvoice(invoice.id)).toHaveLength(1);
+  });
+
+  it('dispatches events after the atomic ingest store has persisted them', async () => {
+    const event: RaiFlowEvent = {
+      id: 'deposit-event-1',
+      type: 'invoice.payment_confirmed',
+      timestamp: new Date().toISOString(),
+      data: {},
+      resourceId: 'invoice-1',
+      resourceType: 'invoice',
+    };
+    const ingest = vi.fn().mockResolvedValue({
+      created: true,
+      deposit: {
+        id: 'deposit-1',
+        blockHash: 'block-1',
+        recipientAccount: 'nano_atomic_recipient',
+        senderAccount: 'nano_sender',
+        amountRaw: ONE_XNO,
+        invoiceId: 'invoice-1',
+        disposition: 'matched',
+        confirmedAt: new Date().toISOString(),
+      },
+      events: [event],
+    });
+    const append = vi.fn();
+    const listener = vi.fn();
+    const runtime = new Runtime({
+      depositStore: {
+        createIfAbsent: vi.fn(),
+        getByBlockHash: vi.fn(),
+        get: vi.fn(),
+        listByRecipientAccounts: vi.fn(),
+      },
+      confirmedDepositIngestStore: { ingest },
+      eventStore: { append, list: vi.fn().mockResolvedValue([]) },
+    });
+    runtime.on('*', listener);
+
+    await runtime.handleConfirmedBlock(makeBlock({ recipientAccount: 'nano_atomic_recipient' }));
+
+    expect(ingest).toHaveBeenCalledTimes(1);
+    expect(append).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith(event);
+  });
+});
+
+describe('getAccount', () => {
+  it('returns live chain state without writing the account projection', async () => {
+    const { runtime } = createTestRuntime();
+    const account: Account = {
+      id: 'managed-account',
+      accountKey: 'managed-account',
+      type: 'managed',
+      address: TEST_ACCOUNT_2,
+      label: null,
+      balanceRaw: '0',
+      pendingRaw: '0',
+      frontier: null,
+      representative: null,
+      derivationIndex: 2 ** 31,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const update = vi.fn(async (_id: string, patch: Partial<Account>) => ({ ...account, ...patch }));
+    (runtime as any).accountStore = {
+      get: vi.fn().mockResolvedValue(account),
+      update,
+    };
+    (runtime as any).rpcPool = {
+      getClient: () => ({
+        accountInfo: vi.fn().mockResolvedValue({
+          frontier: 'receive-frontier',
+          balance: ONE_XNO,
+          representative: 'nano_1representative',
+        }),
+      }),
+    };
+
+    const current = await runtime.getAccount(account.id);
+
+    expect(current).toMatchObject({
+      balanceRaw: ONE_XNO,
+      frontier: 'receive-frontier',
+      representative: 'nano_1representative',
+    });
+    expect(update).not.toHaveBeenCalled();
   });
 });
 
@@ -249,7 +777,7 @@ describe('caller-signed block confirmation recovery', () => {
       .mockResolvedValueOnce({ confirmed: false })
       .mockResolvedValueOnce({ confirmed: true });
     const runtime = new Runtime({
-      v2EventStore: eventStore,
+      eventStore: eventStore,
       rpcPool: { getClient: () => ({ blockInfo } as any) } as any,
       blockConfirmationIntervalMs: 1,
       blockConfirmationTimeoutMs: 100,
@@ -287,7 +815,7 @@ describe('caller-signed block confirmation recovery', () => {
     ];
     const blockInfo = vi.fn();
     const runtime = new Runtime({
-      v2EventStore: { append: async () => {}, list: async (options) => events.filter((event) => !options?.type || event.type === options.type) },
+      eventStore: { append: async () => {}, list: async (options) => events.filter((event) => !options?.type || event.type === options.type) },
       rpcPool: { getClient: () => ({ blockInfo } as any) } as any,
     });
 
@@ -331,7 +859,7 @@ describe('deleteAccount', () => {
     };
     const send: Send = {
       id: 'send-1',
-      accountId: account.id,
+      source: { type: 'account', accountId: account.id, address: account.address, derivationIndex: account.derivationIndex },
       destination: account.address,
       amountRaw: '1',
       status: 'confirmed',
@@ -350,7 +878,7 @@ describe('deleteAccount', () => {
       getByBlockHash: async () => send,
       update: async () => send,
     } : undefined;
-    return { runtime: new Runtime({ accountStore, sendStore, v2EventStore: eventStore }), events };
+    return { runtime: new Runtime({ accountStore, sendStore, eventStore: eventStore }), events };
   }
 
   it('removes an empty account and persists account.removed', async () => {

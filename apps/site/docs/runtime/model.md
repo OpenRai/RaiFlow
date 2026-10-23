@@ -2,12 +2,9 @@
 
 This page describes the canonical v2 model defined in `@openrai/model`.
 
-Important distinction:
-
-- this is the contract the project is converging on
-- it is not a guarantee that every field and event family is already exercised through the current runtime API
-
-For current runtime behavior, read the runtime and roadmap pages alongside this one.
+These contracts are used by the current runtime and SDK. Operational caveats,
+including the inbound minimum and outstanding storage-retention work, are listed
+on the [runtime](./) and [roadmap](../roadmap) pages.
 
 ## Invoice
 

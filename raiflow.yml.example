@@ -16,16 +16,30 @@ daemon:
 nano:
   rpc: ["env:NANO_RPC_URL"]          # required: at least one Nano node RPC
   ws: []
-  work: []
+  work: []                            # optional work_generate endpoints; local CPU fallback is automatic
 
 invoices:
   defaultExpirySeconds: 3600
   autoSweep: false
   # sweepDestination: "env:RAIFLOW_SWEEP_DESTINATION"
 
+receiving:
+  # Per transfer, inclusive. Smaller sends create no deposits, events or receive jobs.
+  # Quote XNO amounts to preserve exact decimal precision.
+  minimumAmountXno: "0.000001"
+  # RAIFLOW_MINIMUM_RECEIVE_AMOUNT_XNO overrides this value at startup.
+  # minimumAmountXno: "env:MY_APP_MINIMUM_XNO"
+
 storage:
   driver: "sqlite"
   path: "./raiflow.db"
+  # Retain all evidence; pause new inbound records at the configured budgets.
+  # Database bytes include a safety margin for SQLite WAL and existing operations.
+  maxDatabaseBytes: 1073741824
+  # Per destination Nano address. Raise this for high-volume deposit accounts.
+  maxDepositsPerAccount: 100000
+  # RAIFLOW_STORAGE_MAX_DATABASE_BYTES and
+  # RAIFLOW_STORAGE_MAX_DEPOSITS_PER_ACCOUNT override these values.
 
 webhooks: []
 

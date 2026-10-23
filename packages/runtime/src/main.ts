@@ -10,11 +10,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { loadConfig, type RaiFlowConfig } from '@openrai/config';
-import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteIdempotencyReplayStore, createSqliteInvoiceAccountStore, createSqliteReceiveTaskStore, type Database } from '@openrai/storage';
+import { createDatabase, createMigrationRunner, createSqliteInvoiceStore, createSqlitePaymentStore, createSqliteAccountStore, createSqliteSendStore, createSqliteEventStore, createSqliteWebhookStore, createSqliteWebhookOutboxStore, createSqliteIdempotencyReplayStore, createSqliteInvoiceAccountStore, createSqliteReceiveTaskStore, createSqliteAccountOperationLeaseStore, createSqliteSendBlockIntentStore, createSqliteReceiveBlockIntentStore, createSqliteDepositStore, createSqliteRefundStore, createSqliteConfirmedDepositIngestStore, createSqliteAccountHistoryRecoveryCursorStore, type Database } from '@openrai/storage';
 import { createEventBus, createPersistentEventStore } from '@openrai/events';
 import { INVOICE_DERIVATION_START, MANAGED_DERIVATION_START } from '@openrai/model';
 import { createRpcPool } from '@openrai/rpc';
 import {
+  createIsolatedPowEngine,
   createOwsCustodyProvider,
   createProviderCustodyEngine,
   type CustodyEngine,
@@ -28,11 +29,7 @@ import { SubscriptionManager } from './subscription-manager.js';
 import { createRuntimeMetrics } from './monitoring.js';
 import { resolveApiKey } from './auth.js';
 import { findWorkspaceRoot } from './workspace.js';
-import {
-  createLegacySqliteEventStore,
-  createLegacySqliteInvoiceStore,
-  createLegacySqlitePaymentStore,
-} from './sqlite-legacy-adapters.js';
+import { createRuntimeWorkProvider } from './work-provider.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -146,7 +143,7 @@ let db: Database;
 let dbPath = '';
 try {
   dbPath = resolve(WORKSPACE_ROOT, config.storage.path);
-  db = createDatabase(dbPath);
+  db = createDatabase(dbPath, { maxDatabaseBytes: config.storage.maxDatabaseBytes });
   logger.info('sqlite open', dbPath);
 } catch (err) {
   logger.error('failed to open database:', err instanceof Error ? err.message : err);
@@ -173,26 +170,39 @@ const eventStore = createPersistentEventStore(
   createSqliteEventStore(db),
   eventBus,
 );
-const invoiceStore = createLegacySqliteInvoiceStore(sqliteInvoiceStore);
-const paymentStore = createLegacySqlitePaymentStore(sqlitePaymentStore, sqliteInvoiceStore);
+const invoiceStore = sqliteInvoiceStore;
+const paymentStore = sqlitePaymentStore;
 const accountStore = createSqliteAccountStore(db);
 const sendStore = createSqliteSendStore(db);
 const invoiceAccountStore = createSqliteInvoiceAccountStore(db);
 const receiveTaskStore = createSqliteReceiveTaskStore(db);
+const accountOperationLeaseStore = createSqliteAccountOperationLeaseStore(db);
+const sendBlockIntentStore = createSqliteSendBlockIntentStore(db);
+const receiveBlockIntentStore = createSqliteReceiveBlockIntentStore(db);
+const depositStore = createSqliteDepositStore(db);
+const refundStore = createSqliteRefundStore(db);
+const confirmedDepositIngestStore = createSqliteConfirmedDepositIngestStore(db, {
+  databasePath: dbPath,
+  maxDatabaseBytes: config.storage.maxDatabaseBytes,
+  maxDepositsPerAccount: config.storage.maxDepositsPerAccount,
+});
+const accountHistoryRecoveryCursorStore = createSqliteAccountHistoryRecoveryCursorStore(db);
 const webhookStore = createSqliteWebhookStore(db);
+const webhookOutboxStore = createSqliteWebhookOutboxStore(db);
 const idempotencyStore = createSqliteIdempotencyReplayStore(db);
-const legacyEventStore = createLegacySqliteEventStore(eventStore);
 
 // ---------------------------------------------------------------------------
 // RPC pool
 // ---------------------------------------------------------------------------
 
-let rpcPool = createRpcPool([]);
+const workProvider = createRuntimeWorkProvider(config.nano.work, createIsolatedPowEngine());
+
+let rpcPool = createRpcPool([], workProvider);
 if (config.nano.rpc.length > 0 || config.nano.ws.length > 0) {
   rpcPool = createRpcPool([{
     rpc: config.nano.rpc,
     ws: config.nano.ws,
-  }]);
+  }], workProvider);
   logger.info('rpc pool initialized', `rpc=${config.nano.rpc.length} ws=${config.nano.ws.length}`);
 }
 
@@ -200,86 +210,21 @@ if (config.nano.rpc.length > 0 || config.nano.ws.length > 0) {
 // Startup Probe
 // ---------------------------------------------------------------------------
 
-const rpcUrls = config.nano.rpc;
-if (rpcUrls.length === 0) {
+const rpcHealthReport = await rpcPool.getHealthReport?.({ force: true });
+if (!rpcHealthReport || rpcHealthReport.status === 'unconfigured') {
   logger.warn('no nano RPC endpoints configured — runtime will operate in degraded mode');
 } else {
-  while (true) {
-    const results = await Promise.allSettled(
-      rpcUrls.map(async (url) => {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
-        // Handle basic auth in URL
-        let cleanUrl = url;
-        try {
-          const parsed = new URL(url);
-          if (parsed.username || parsed.password) {
-            const credentials = btoa(`${parsed.username}:${parsed.password}`);
-            headers['Authorization'] = `Basic ${credentials}`;
-            parsed.username = '';
-            parsed.password = '';
-            cleanUrl = parsed.toString();
-          }
-        } catch {
-          // Ignore URL parsing errors, fetch will catch them
-        }
-
-        const res = await fetch(cleanUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ action: 'version' }),
-          signal: AbortSignal.timeout(10_000),
-        });
-
-        // A 429 means the endpoint is reachable but rate-limited (quota exhausted).
-        // Treat this as a degraded-but-reachable state so the runtime can still
-        // start — the circuit breakers in the polling loops will handle backoff.
-        if (res.status === 429) {
-          const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-          const detail = typeof body['message'] === 'string' ? body['message'] : 'quota exhausted';
-          return { url, vendor: `rate-limited (${detail})` };
-        }
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body = await res.json() as any;
-        if (!body.node_vendor) throw new Error('unexpected response shape');
-        return { url, vendor: body.node_vendor };
-      }),
-    );
-
-    const succeeded = results.filter((r): r is PromiseFulfilledResult<{ url: string; vendor: string }> => r.status === 'fulfilled');
-    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-
-    if (succeeded.length > 0) {
-      for (const s of succeeded) {
-        logger.info(`RPC endpoint OK: ${s.value.url} (${s.value.vendor})`);
-      }
-
-      if (failed.length > 0) {
-        for (let i = 0; i < rpcUrls.length; i++) {
-          const result = results[i];
-          if (result?.status === 'rejected') {
-            const reason = (result as PromiseRejectedResult).reason;
-            logger.warn(`RPC endpoint unreachable (degraded): ${rpcUrls[i]} — ${reason}`);
-          }
-        }
-        logger.warn(`${failed.length}/${rpcUrls.length} RPC endpoints unreachable — operating in degraded mode`);
-      }
-      break;
+  for (const endpoint of rpcHealthReport.endpoints) {
+    if (endpoint.status === 'healthy') {
+      logger.info(`RPC endpoint reachable: ${endpoint.url} (${endpoint.probeAction ?? 'probe'})`);
+    } else {
+      logger.warn(`RPC endpoint unreachable: ${endpoint.url} — ${endpoint.error ?? 'unknown error'}`);
     }
-
-    for (let i = 0; i < rpcUrls.length; i++) {
-      const result = results[i];
-      const reason = result?.status === 'rejected'
-        ? (result as PromiseRejectedResult).reason
-        : 'unknown';
-      logger.error(`RPC endpoint unreachable: ${rpcUrls[i]} — ${reason}`);
-    }
-
-    logger.warn(
-      'all configured Nano RPC endpoints are currently unreachable; starting in not-ready mode so health and diagnostics remain available',
-    );
-    break;
+  }
+  if (rpcHealthReport.status === 'degraded') {
+    logger.warn(`${rpcHealthReport.failedCount}/${rpcHealthReport.endpoints.length} RPC endpoints unreachable — operating in degraded mode`);
+  } else if (rpcHealthReport.status === 'down') {
+    logger.warn('all configured Nano RPC endpoints are currently unreachable; starting in not-ready mode so health and diagnostics remain available');
   }
 }
 
@@ -338,6 +283,7 @@ if (config.custody) {
     }
     custodyEngine = createProviderCustodyEngine({
       provider,
+      workProvider,
       representative: config.custody.representative,
       codec: {
         stateBlockSigningPayload: nanoCore.stateBlockSigningPayload,
@@ -356,18 +302,28 @@ if (config.custody) {
 // ---------------------------------------------------------------------------
 
 const runtime = new Runtime({
-  invoiceStore: invoiceStore as any,
-  paymentStore: paymentStore as any,
-  eventStore: legacyEventStore as any,
-  v2EventStore: eventStore,
+  invoiceStore,
+  paymentStore,
+  eventStore,
   webhookEndpointStore: webhookStore as any,
+  webhookOutboxStore,
   accountStore,
   sendStore,
   invoiceAccountStore,
   receiveTaskStore,
+  accountOperationLeaseStore,
+  sendBlockIntentStore,
+  receiveBlockIntentStore,
+  depositStore,
+  refundStore,
+  confirmedDepositIngestStore,
   custodyEngine,
   rpcPool,
   expiryIntervalMs: 10_000,
+  defaultExpirySeconds: config.invoices.defaultExpirySeconds,
+  minimumReceiveAmountXno: config.receiving.minimumAmountXno,
+  autoSweepInvoices: config.invoices.autoSweep,
+  invoiceSweepDestination: config.invoices.sweepDestination ?? undefined,
   mode,
   idempotencyStore,
   derivationStartIndex: DERIVATION_START_INDEX,
@@ -415,19 +371,21 @@ const accountStateSync = new AccountStateSync(
 watcher = new Watcher({
   wsUrl: config.nano.ws[0],
   rpcUrls: config.nano.rpc,
+  rpcClient: rpcPool.getClient(),
   accounts: [],
   sink: accountStateSync,
   pollIntervalMs,
+  recoveryCursorStore: accountHistoryRecoveryCursorStore,
 });
 
 // Seed state sync with existing accounts after the listener is live. The sync
 // helper bounds account_info requests when restoring many accounts.
 const existingAccounts = await accountStore.list();
-const existingOpenInvoices = await invoiceStore.list({ status: 'open' });
+const existingInvoices = await invoiceStore.list();
 runtime.watcher = watcher;
 watcher.start();
-for (const invoice of existingOpenInvoices) watcher.addAccount(invoice.recipientAccount);
-logger.info('watcher started', `accounts=${existingAccounts.length} invoice_accounts=${existingOpenInvoices.length} pending_initial_sync=true`);
+for (const invoice of existingInvoices) watcher.addAccount(invoice.payAddress);
+logger.info('watcher started', `accounts=${existingAccounts.length} invoice_accounts=${existingInvoices.length} pending_initial_sync=true`);
 
 accountStateSync.start();
 logger.info('account state sync started');
@@ -452,7 +410,14 @@ void accountStateSync.syncExistingAccounts(
 // Handler
 // ---------------------------------------------------------------------------
 
-const handle = createHandler(runtime, config, APP_VERSION, accountStateSync, subscriptionManager);
+const handle = createHandler(
+  runtime,
+  config,
+  APP_VERSION,
+  accountStateSync,
+  subscriptionManager,
+  () => confirmedDepositIngestStore.getStorageBudgetStatus?.(),
+);
 
 // ---------------------------------------------------------------------------
 // HTTP server

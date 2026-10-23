@@ -193,7 +193,7 @@ export async function renderDashboard(
       recentEvents.push({
         id: event.id,
         type: event.type,
-        createdAt: 'timestamp' in event ? event.timestamp : event.createdAt,
+        createdAt: event.timestamp,
         label: String(invoice.metadata?.orderId ?? invoice.id.slice(0, 8)),
       });
     }
@@ -209,7 +209,7 @@ export async function renderDashboard(
   const invoiceRows = recentInvoices.length === 0
     ? '<tr><td colspan="5" class="empty">No invoices yet</td></tr>'
     : recentInvoices.map((invoice) => {
-      const recipientAccount = String((invoice as unknown as { recipientAccount?: string }).recipientAccount ?? '');
+      const recipientAccount = invoice.payAddress;
       const orderLabel = String(invoice.metadata?.orderId ?? '');
 
       return `

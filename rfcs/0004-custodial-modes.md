@@ -5,6 +5,15 @@
 
 ## Context
 
+### Current implementation note — 2026-10-22
+
+This RFC's mode and API key decisions remain current. Custody is provided by the
+configured OWS wallet provider; RaiFlow does not require or load a raw seed in
+the current custodial integration. Receiving, account-chain serialization, and
+recovery are runtime responsibilities. Deposit refunds use an explicit
+application-verified destination and the normal durable send pipeline. For
+current routes and available operations, see the root README and SDK reference.
+
 RaiFlow sits between an application and Nano nodes. The application may want different levels of control over the Nano protocol:
 
 1. **Full delegation** — the app never touches keys, blocks, PoW, or frontiers. RaiFlow handles everything.
@@ -22,6 +31,30 @@ RaiFlow requires a `RAIFLOW_MODE` environment variable (or `daemon.mode` in `rai
 - `non-custodial` — RaiFlow acts as a relay and monitor. All signing happens client-side.
 
 If the mode is not set, RaiFlow refuses to start with a clear error message explaining both options.
+
+### Account-chain write coordination — 2026-10-22
+
+RaiFlow serializes custodial writes per Nano account address through one
+internal executor. Sends and receives use it now; representative-field updates
+also acquire it, and future on-chain representative changes and treasury
+settlement must use the same executor. SQLite stores expiring leases and
+monotonically increasing fencing tokens. The executor renews its lease while
+active and checks that its token is still current before each publish or
+operation-state write. A worker that loses its lease must stop; after
+expiration, another worker can recover the account. Lease ownership and fencing
+tokens remain internal and are not part of the public SDK or HTTP API.
+
+Before publishing a send, RaiFlow persists its exact signed block, work value,
+expected hash and resulting balance in private storage. Restarts reuse this
+intent rather than signing against a newer frontier. A timeout or failure after
+the publish call begins remains recoverable and does not mark the transfer
+failed; RaiFlow queries or rebroadcasts the saved block to resolve the outcome.
+
+Receives use the same account lease and persist their exact signed block intent
+before publishing. Confirmed inbound sends trigger receivable discovery during
+ingest, even when invoice matching completes the invoice. Source-send
+confirmation and RaiFlow's own receive-block confirmation are tracked as
+separate events and states.
 
 ### Mode-Gated Features
 

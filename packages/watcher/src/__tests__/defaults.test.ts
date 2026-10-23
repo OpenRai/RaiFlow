@@ -23,6 +23,23 @@ describe('@openrai/watcher nano-core defaults', () => {
     ]);
   });
 
+  it('pages account history forward from a persisted head hash', async () => {
+    const client = new NanoRpcClient({ url: 'https://history.example' }) as any;
+    const postJson = vi.fn().mockResolvedValue({ history: [] });
+    client.client.rpcPool.postJson = postJson;
+
+    await client.accountHistory('nano_account', 50, { head: 'cursor-hash', reverse: true });
+
+    expect(postJson).toHaveBeenCalledWith({
+      action: 'account_history',
+      account: 'nano_account',
+      count: '50',
+      raw: true,
+      head: 'cursor-hash',
+      reverse: true,
+    });
+  });
+
   it('constructs WebSocket client without an explicit URL', () => {
     const client = new NanoWebSocketClient({});
     expect(client.getAuditReport()[0]?.url).toBe('wss://rpc.nano.to/');

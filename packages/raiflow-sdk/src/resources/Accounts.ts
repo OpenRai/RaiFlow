@@ -1,4 +1,4 @@
-import type { Account, AccountEvent, Receivable, UpdateAccountRequest } from '@openrai/model';
+import type { Account, Deposit, UpdateAccountRequest } from '@openrai/model';
 import type { RaiFlowClient } from '../client.js';
 
 export interface CreateManagedAccountOptions {
@@ -57,30 +57,7 @@ export class AccountsResource {
     await this.client.request<void>('DELETE', `/accounts/${id}`, undefined, { 'Idempotency-Key': idempotencyKey });
   }
 
-  async receivable(id: string): Promise<{ data: Receivable[] }> {
-    return this.client.request<{ data: Receivable[] }>('GET', `/accounts/${id}/receivable`);
-  }
-
-  async watch(accountId: string, options?: { signal?: AbortSignal }): Promise<AsyncIterable<AccountEvent>> {
-    const account = await this.client.request<Account>('GET', `/accounts/${accountId}`);
-    const sse = this.client.sseConnection;
-    const streamId = await sse.getStreamId();
-
-    await this.client.request('POST', `/accounts/${accountId}/watch`, undefined, {
-      'X-Raiflow-Stream-Id': streamId,
-    });
-
-    const iterable = sse.watch(account.address);
-
-    if (options?.signal) {
-      options.signal.addEventListener('abort', () => {
-        this.client.request('DELETE', `/accounts/${accountId}/watch`, undefined, {
-          'X-Raiflow-Stream-Id': streamId,
-        }).catch(() => {});
-        sse.unwatch(account.address);
-      }, { once: true });
-    }
-
-    return iterable;
+  async listDeposits(id: string): Promise<{ data: Deposit[] }> {
+    return this.client.request<{ data: Deposit[] }>('GET', `/accounts/${id}/deposits`);
   }
 }

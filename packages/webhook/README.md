@@ -15,10 +15,15 @@ pnpm add @openrai/webhook
 
 - `signPayload`
 - `verifySignature`
+- `attemptWebhookDelivery`
 - `createWebhookDelivery`
 - `createWebhookEndpointStore`
 
 It also re-exports the relevant webhook and event types from `@openrai/model`.
+
+`attemptWebhookDelivery(endpoint, event, timeoutMs?)` performs exactly one
+bounded HTTP attempt and returns its response outcome. Runtime workers can use
+that result to persist the attempt and schedule retries in durable storage.
 
 ## Example
 

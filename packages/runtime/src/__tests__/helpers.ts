@@ -23,16 +23,26 @@ export function createTestConfig(overrides?: Partial<RaiFlowConfig['daemon']>): 
       enableDashboardAuth: true,
       ...overrides,
     },
-    nano: { rpc: [], ws: [] },
+    nano: { rpc: [], ws: [], work: [] },
     custody: null,
     invoices: { defaultExpirySeconds: 3600, autoSweep: false, sweepDestination: null },
-    storage: { driver: 'sqlite', path: './raiflow.db' },
+    receiving: { minimumAmountXno: '0.000001' },
+    storage: {
+      driver: 'sqlite',
+      path: './raiflow.db',
+      maxDatabaseBytes: 1_073_741_824,
+      maxDepositsPerAccount: 100_000,
+    },
     webhooks: [],
     logging: { level: 'info', format: 'pretty' },
   };
 }
 
-export function createTestRuntime(options: { watcher?: { addAccount(account: string): void; removeAccount(account: string): void } } = {}) {
+export function createTestRuntime(options: {
+  watcher?: { addAccount(account: string): void; removeAccount(account: string): void };
+  defaultExpirySeconds?: number;
+  minimumReceiveAmountXno?: string;
+} = {}) {
   const deliveredEvents: { event: RaiFlowEvent; endpoints: unknown[] }[] = [];
   const fakeDelivery: WebhookDelivery = {
     deliver: async (event: unknown, endpoints: unknown[]) => {
@@ -42,6 +52,7 @@ export function createTestRuntime(options: { watcher?: { addAccount(account: str
   };
   const custodyEngine = createCustodyEngine({
     seed: '9f4f272617f01c4db7d5ebc0f4ef5baf6286f09ad7f295d08f6f41e88c2e6d14',
+    workProvider: { generate: vi.fn().mockResolvedValue('mockedwork0000000') },
     representative: 'nano_3arg3asgtigae3zha8xw5rh4n83d3f4h6f9y4w6q37fph4n8tqbo6j8qzszk',
     derivationStartIndex: {
       invoice: 0,
@@ -50,7 +61,7 @@ export function createTestRuntime(options: { watcher?: { addAccount(account: str
   });
   custodyEngine.loadSeed('9f4f272617f01c4db7d5ebc0f4ef5baf6286f09ad7f295d08f6f41e88c2e6d14');
   const v2Events: RaiFlowEvent[] = [];
-  const v2EventStore: EventStore = {
+  const eventStore: EventStore = {
     async append(event) {
       event.sequence = v2Events.length + 1;
       v2Events.push(event);
@@ -65,7 +76,14 @@ export function createTestRuntime(options: { watcher?: { addAccount(account: str
         .slice(0, limit);
     },
   };
-  const runtime = new Runtime({ webhookDelivery: fakeDelivery, custodyEngine, v2EventStore, watcher: options.watcher });
+  const runtime = new Runtime({
+    webhookDelivery: fakeDelivery,
+    custodyEngine,
+    eventStore,
+    watcher: options.watcher,
+    defaultExpirySeconds: options.defaultExpirySeconds,
+    minimumReceiveAmountXno: options.minimumReceiveAmountXno,
+  });
   return { runtime, deliveredEvents };
 }
 

@@ -1,5 +1,4 @@
 export { RaiFlowClient, RaiFlowApiError, type RaiFlowClientOptions } from './client.js';
-export { SseConnection } from './sse-connection.js';
 export {
   AccountsResource,
   type CreateManagedAccountOptions,
@@ -12,15 +11,9 @@ export {
   type PublishBlockResult,
 } from './resources/Blocks.js';
 export {
-  InvoiceAccountsResource,
-  type InvoiceAccountBalance,
-  type InvoiceAccountAggregatedBalance,
-} from './resources/InvoiceAccounts.js';
-export {
   InvoicesResource,
   type CreateInvoiceOptions,
   type ListInvoicesOptions,
-  type ListEventsOptions,
 } from './resources/Invoices.js';
 export {
   SendsResource,
@@ -32,6 +25,7 @@ export {
 } from './resources/Webhooks.js';
 export { SystemResource, type RuntimeHealth, type RuntimeVersion } from './resources/System.js';
 export { EventsResource } from './resources/Events.js';
+export { DepositsResource, type CreateRefundOptions } from './resources/Deposits.js';
 /** Low-level work generation. If you need this directly, it indicates a missing SDK feature. */
 export {
   WorkResource,
@@ -46,13 +40,12 @@ export type {
   PaymentStatus,
   Account,
   AccountType,
-  Receivable,
   Send,
   SendStatus,
+  Deposit,
+  Refund,
   RaiFlowEvent,
   RaiFlowEventType,
-  AccountEvent,
-  AccountEventType,
   CompletionPolicy,
   WebhookEndpoint,
   CreateInvoiceRequest,

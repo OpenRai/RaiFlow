@@ -34,16 +34,18 @@ Main entrypoint for the SDK.
 const client = RaiFlowClient.initialize({
   baseUrl: 'http://127.0.0.1:3100',  // required
   apiKey: 'your-secret-key',          // required
-  basePath: '/api',                   // optional, default: "/api"
+  basePath: '/v1',                    // optional, default: "/v1"
 });
 ```
 
 Resource accessors:
 
 - `client.accounts` — `AccountsResource`
+- `client.deposits` — `DepositsResource` for explicit deposit refunds
 - `client.blocks` — `BlocksResource`
 - `client.invoices` — `InvoicesResource`
 - `client.sends` — `SendsResource`
+- `client.events` — `EventsResource` for durable event replay and streaming
 - `client.system` — `SystemResource`
 - `client.webhooks` — `WebhooksResource`
 - `client.work` — `WorkResource`
@@ -62,7 +64,7 @@ Create a custodial managed account. RaiFlow derives the address, holds the keys,
 const account = await client.accounts.createManaged({
   label: 'Primary wallet',
   representative: 'nano_1...',      // optional
-  idempotencyKey: 'create-primary', // optional but recommended
+  idempotencyKey: 'create-primary', // required
 });
 ```
 
@@ -74,6 +76,7 @@ Create a watched account for an external address you do not control.
 const account = await client.accounts.createWatched({
   address: 'nano_1...',
   label: 'Exchange deposit',
+  idempotencyKey: 'watch-exchange-deposit', // required
 });
 ```
 
@@ -102,15 +105,17 @@ Update an account's label or representative.
 const updated = await client.accounts.update('acc_...', {
   label: 'New label',
   representative: 'nano_1...',
-});
+}, 'rename-primary-account');
 ```
 
-#### `receivable(id)`
+#### `listDeposits(id)`
 
-Fetch pending receivable blocks for the account's address from the connected Nano node.
+List confirmed inbound transfers for a managed or watched account. Use this for
+account deposit history; receiving and pending-block handling stay inside the
+runtime.
 
 ```ts
-const { data } = await client.accounts.receivable('acc_...');
+const { data } = await client.accounts.listDeposits('acc_...');
 ```
 
 ---
@@ -121,21 +126,32 @@ Create payment expectations and track their lifecycle.
 
 > Invoices require custodial mode. Non-custodial runtimes reject these requests with HTTP 501.
 
-#### `create(options, idempotencyKey?)`
+#### `create(options, idempotencyKey)`
 
-Create a new invoice. The `idempotencyKey` header is sent automatically when provided.
+Create a new invoice. Provide the amount as either an exact raw integer string or
+an exact decimal XNO string. Do not provide both. Decimal values are converted
+to raw units without floating-point arithmetic. The `idempotencyKey` is sent as
+the required `Idempotency-Key` header.
+
+Every call without `invoiceKey` creates a one-time invoice with its own payment
+destination. Supply an `invoiceKey` to identify and replay the same invoice for
+an application order. For reusable customer deposit accounts, create a managed
+account with `client.accounts.createManaged()` instead of reusing an invoice.
 
 ```ts
 const invoice = await client.invoices.create(
   {
-    recipientAccount: 'acc_...',
     expectedAmountRaw: '1000000000000000000000000000000',
+    accountKey: 'customer-123',
     expiresAt: '2026-12-31T23:59:59Z',      // optional
     metadata: { orderId: '123' },            // optional
     completionPolicy: { type: 'exact' },     // optional: "exact" | "at_least"
   },
-  'invoice-order-123',                       // optional idempotency key
+  'invoice-order-123',
 );
+
+// Or use a decimal XNO string instead of expectedAmountRaw:
+await client.invoices.create({ accountKey: 'customer-123', expectedAmount: '1.25' }, 'invoice-order-124');
 ```
 
 #### `get(id)`
@@ -152,15 +168,20 @@ List invoices. Optionally filter by `status`.
 
 ```ts
 const { data } = await client.invoices.list();
-const pending = await client.invoices.list({ status: 'pending' });
+const open = await client.invoices.list({ status: 'open' });
 ```
 
-#### `cancel(id)`
+Use `listByAccountKey(accountKey)` to list a customer's invoices or
+`getByKey(accountKey, invoiceKey)` to resolve the stable application reference.
+When no `invoiceKey` is supplied to `create`, RaiFlow creates a distinct,
+one-time payment destination.
+
+#### `cancel(id, idempotencyKey)`
 
 Cancel a pending invoice.
 
 ```ts
-const cancelled = await client.invoices.cancel('inv_...');
+const cancelled = await client.invoices.cancel('inv_...', 'cancel-order-123');
 ```
 
 #### `listPayments(id)`
@@ -171,13 +192,28 @@ List payments matched to an invoice.
 const { data } = await client.invoices.listPayments('inv_...');
 ```
 
-#### `listEvents(id, options?)`
+Read invoice lifecycle and payment events through the durable global event
+feed, filtering by `resourceType: 'invoice'` and the invoice ID. Its cursor can
+be stored and replayed after a disconnect or process restart.
 
-List events for an invoice, optionally paginated with `after`.
+---
+
+### `DepositsResource`
+
+Refund a confirmed deposit through the durable send pipeline, or list its refund
+history. The application is responsible for verifying the destination and must
+provide it explicitly. RaiFlow never defaults to the incoming sender address.
+Refund totals cannot exceed the deposit amount while refunds are queued,
+published, or confirmed. Each refund requires an idempotency key.
 
 ```ts
-const { data } = await client.invoices.listEvents('inv_...');
-const later = await client.invoices.listEvents('inv_...', { after: 'evt_...' });
+const refund = await client.deposits.refund(deposit.id, {
+  destination: verifiedCustomerAddress,
+  amountRaw: deposit.amountRaw,
+  idempotencyKey: `refund-${deposit.id}`,
+});
+
+const { data: refunds } = await client.deposits.listRefunds(deposit.id);
 ```
 
 ---
@@ -216,13 +252,18 @@ Fetch a single send by its global ID.
 const send = await client.sends.get('snd_...');
 ```
 
+Every returned `Send` has a discriminated `source`. Managed-account sends use
+`{ type: 'account', accountId, address, derivationIndex }`. Automatic invoice
+settlement sends use `{ type: 'invoice', invoiceId, address, derivationIndex }`.
+Invoice addresses remain one-time collection targets, not reusable accounts.
+
 ---
 
 ### `WebhooksResource`
 
 Register webhook endpoints for event delivery.
 
-#### `create(options)`
+#### `create(options, idempotencyKey)`
 
 Register a new webhook endpoint.
 
@@ -231,7 +272,7 @@ const endpoint = await client.webhooks.create({
   url: 'https://example.com/webhooks/raiflow',
   eventTypes: ['invoice.completed', 'send.confirmed'],
   secret: 'whsec_...', // optional
-});
+}, 'register-checkout-webhook');
 ```
 
 #### `list()`
@@ -244,10 +285,10 @@ const { data } = await client.webhooks.list();
 
 #### `delete(id)`
 
-Remove a webhook endpoint.
+Remove a webhook endpoint with an idempotency key.
 
 ```ts
-await client.webhooks.delete('whk_...');
+await client.webhooks.delete('whk_...', 'remove-checkout-webhook');
 ```
 
 ---
@@ -263,6 +304,25 @@ const health = await client.system.health();
 // => { status: "ok" }
 ```
 
+### `EventsResource`
+
+Events are persisted in sequence. `after` is a replay cursor, so consumers can
+resume from the last processed event after reconnecting or restarting.
+
+```ts
+const page = await client.events.list({
+  after: '41',
+  resourceType: 'invoice',
+  resourceId: 'inv_...',
+  limit: 100,
+});
+
+const cursor = page.nextCursor ?? String(page.data[page.data.length - 1]?.sequence ?? 41);
+for await (const event of client.events.stream({ after: cursor })) {
+  // Persist the cursor only after your application has handled the event.
+}
+```
+
 ---
 
 ### `BlocksResource`
@@ -271,12 +331,12 @@ Low-level block publishing for pre-signed blocks.
 
 > This is an escape hatch for non-custodial flows where blocks are signed client-side (e.g., a browser wallet or thin client). For custodial flows, use `SendsResource` — RaiFlow handles signing and PoW automatically.
 
-#### `publish(block)`
+#### `publish(block, idempotencyKey)`
 
 Publish a pre-signed block JSON string to the network.
 
 ```ts
-const result = await client.blocks.publish('{"block":"..."}');
+const result = await client.blocks.publish('{"block":"..."}', 'publish-signed-block-123');
 // => { hash: "ABC123..." }
 ```
 
@@ -288,7 +348,7 @@ Low-level work generation for non-custodial flows.
 
 > If you find yourself using this directly, it usually indicates a missing SDK feature. For custodial flows, RaiFlow generates work automatically.
 
-#### `generate(hash, difficulty?, blockType?)`
+#### `generate(hash)`
 
 Generate proof-of-work for a block hash.
 
@@ -296,8 +356,6 @@ Generate proof-of-work for a block hash.
 const result = await client.work.generate('ABC123...');
 // => { work: "1f0e2d..." }
 
-const withDifficulty = await client.work.generate('ABC123...', 'fffffff800000000');
-const receiveWork = await client.work.generate('ABC123...', undefined, 'receive');
 ```
 
 ## Re-exported Types
@@ -312,7 +370,6 @@ import type {
   PaymentStatus,
   Account,
   AccountType,
-  Receivable,
   Send,
   SendStatus,
   RaiFlowEvent,

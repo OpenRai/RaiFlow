@@ -6,7 +6,8 @@ settings:
 
 overrides:
   '@ungap/structured-clone': 1.3.1
-  '@openrai/nano-core': 3.5.0
+  '@openrai/nano-core': 3.6.0
+  nano-rspow-node: 0.17.2
 
 importers:
 
@@ -39,9 +40,6 @@ importers:
 
   examples/htmx-wallet:
     dependencies:
-      '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
       '@openrai/raiflow-sdk':
         specifier: workspace:*
         version: link:../../packages/raiflow-sdk
@@ -51,9 +49,6 @@ importers:
 
   examples/next-checkout:
     dependencies:
-      '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
       '@openrai/raiflow-sdk':
         specifier: workspace:*
         version: link:../../packages/raiflow-sdk
@@ -87,6 +82,9 @@ importers:
 
   packages/config:
     dependencies:
+      '@openrai/nano-core':
+        specifier: 3.6.0
+        version: 3.6.0(nano-rspow-node@0.17.2)
       yaml:
         specifier: ^2.8.3
         version: 2.8.3
@@ -107,11 +105,11 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
+        specifier: 3.6.0
+        version: 3.6.0(nano-rspow-node@0.17.2)
       nano-rspow-node:
-        specifier: ^0.17.1
-        version: 0.17.1
+        specifier: 0.17.2
+        version: 0.17.2
       nanocurrency:
         specifier: ^2.5.0
         version: 2.5.0
@@ -177,11 +175,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
-      nano-rspow-node:
-        specifier: ^0.17.1
-        version: 0.17.1
+        specifier: 3.6.0
+        version: 3.6.0(nano-rspow-node@0.17.2)
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -211,8 +206,8 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
+        specifier: 3.6.0
+        version: 3.6.0(nano-rspow-node@0.17.2)
       '@openrai/rpc':
         specifier: workspace:*
         version: link:../rpc
@@ -264,8 +259,11 @@ importers:
         specifier: workspace:*
         version: link:../model
       '@openrai/nano-core':
-        specifier: 3.5.0
-        version: 3.5.0(nano-rspow-node@0.17.1)
+        specifier: 3.6.0
+        version: 3.6.0(nano-rspow-node@0.17.2)
+      '@openrai/rpc':
+        specifier: workspace:*
+        version: link:../rpc
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -730,10 +728,10 @@ packages:
     version: 1.3.2
     hasBin: true
 
-  '@openrai/nano-core@3.5.0':
-    resolution: {integrity: sha512-NY4vHYXKpez9bo+zUiRhfaFPcpUrsBsaUQveQ8MpRqk3xw/p0y3AyY+QegXHnoEDTRmljfVG4t1kSH/0v+11qA==}
+  '@openrai/nano-core@3.6.0':
+    resolution: {integrity: sha512-GgfxDFcZWuV95OewNgCDEGNwHv/fH7JzS6Kt1Px2Im74G9grfXqiPlKHS2DbHrv+r6aell7hSVhbp+LSaTnn1g==}
     peerDependencies:
-      nano-rspow-node: ^0.17.0
+      nano-rspow-node: 0.17.2
       nano-rspow-web: ^0.17.1
     peerDependenciesMeta:
       nano-rspow-node:
@@ -743,6 +741,9 @@ packages:
 
   '@openrai/nano-pow-contract@0.1.2':
     resolution: {integrity: sha512-a6BxDkNCrffq9Qh0oiq+Aoe4UuN1mv5byjoEFNNylKDcpC2F8uBeYPZuXVk4O7nTCI9XvrXQxVnCc8Anzrhqpg==}
+
+  '@openrai/nano-pow-contract@0.2.0':
+    resolution: {integrity: sha512-S6HZSjuAifBM1ivnf0uJHQE+sbsZAXN/rXSHc7IItdAuWuFbmRVZeKfUFcofxIkwmvHloxFcm4YI0rLRdRc1CQ==}
 
   '@rollup/rollup-android-arm-eabi@4.60.0':
     resolution: {integrity: sha512-WOhNW9K8bR3kf4zLxbfg6Pxu2ybOUbB2AjMDHSQx86LIF4rH4Ft7vmMwNt0loO0eonglSNy4cpD3MKXXKQu0/A==}
@@ -1619,33 +1620,33 @@ packages:
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
-  nano-rspow-node-darwin-arm64@0.17.1:
-    resolution: {integrity: sha512-lNg+9zYg1iBxmknibPY7kAs7tTJ7cgvZBfGoywHrp1jvOdLfJ8PrTsKakF9bmBpnhLgjKzWc8i6aXIUYusWSqQ==}
+  nano-rspow-node-darwin-arm64@0.17.2:
+    resolution: {integrity: sha512-e6MPV9TsN6beU5FaIpt4GXa0xHKhPPZF+7qoeCwFq538B2XEQCab52e3AyZL6ocMx2jFQ6LVvs3LliXZJtBPMw==}
     cpu: [arm64]
     os: [darwin]
 
-  nano-rspow-node-darwin-x64@0.17.1:
-    resolution: {integrity: sha512-so0gEX3hy0sG4phsDNOekvqq7Tfgszqpo7+uOUEI/fCiq/dJ8T3YMxqkMy14tszrjIbDCo4KpWqVlRPTXhKvtQ==}
+  nano-rspow-node-darwin-x64@0.17.2:
+    resolution: {integrity: sha512-9RGIRYK+2LEHNfmaTeQ7makF6kwHORd0XtQ4ijhWO5QhYIZOzLbNcaeTabmG3hBWfpGsLz+wqW4MWjGF+v19rw==}
     cpu: [x64]
     os: [darwin]
 
-  nano-rspow-node-linux-arm64-gnu@0.17.1:
-    resolution: {integrity: sha512-jPjdQKwrhj3W/2swLofUZTCyoxDpC0L7wxCLt23Sy6Qv0/7in3vE4zKXo8jp792KaR9mIjjH43yucEu0O8V4jA==}
+  nano-rspow-node-linux-arm64-gnu@0.17.2:
+    resolution: {integrity: sha512-uB7M2rlqATP8sZmAXRgustLLuT4iZnRKiUaMRdEvaZ40igFL0f9fzjMRLFnpleBmRztGSd8OGuxkPsiFq/vRFw==}
     cpu: [arm64]
     os: [linux]
 
-  nano-rspow-node-linux-x64-gnu@0.17.1:
-    resolution: {integrity: sha512-8rc5IfBHaW2CRPJZkW1GQW2j1uydw+fAHwztzUJYDv2lKa2BFvS5hwqwxTDkkvoobC78EEEghr7J2ZxJ3a3C6Q==}
+  nano-rspow-node-linux-x64-gnu@0.17.2:
+    resolution: {integrity: sha512-62N5MssIXefHU3vSopQ4xQd21hoOSxZ+H5kRNlsJVFxEqUjjv8+0gLw2tDEBX0xITjIhguRmbXPz12kEPQhj1g==}
     cpu: [x64]
     os: [linux]
 
-  nano-rspow-node-win32-x64-msvc@0.17.1:
-    resolution: {integrity: sha512-PPYT3s0wVmcclAtGoLVTJrg18r+/SBgPr04Bz4dDpsJD4UxqCc2Z2S+HKzU4A3fon48unzMyNW/XJbmtCFSoFw==}
+  nano-rspow-node-win32-x64-msvc@0.17.2:
+    resolution: {integrity: sha512-rSmslTwHLvP9zsj9gJpXwIMhaqQ+QGugLYiz10RxQkuxq3agq0tWkvWjsR/yq21Kt725OTJeNq7s3kQsNCaCOw==}
     cpu: [x64]
     os: [win32]
 
-  nano-rspow-node@0.17.1:
-    resolution: {integrity: sha512-4n8dlKYl+NH40FVgHWyIh4LBOYNZ8BET7TRAVK38cI315hCEziK4dTNSQrWXbtbilU4awTpr/c/oR5rJ1J1qBQ==}
+  nano-rspow-node@0.17.2:
+    resolution: {integrity: sha512-fo0amkhQhisizSk1xjEHNG16uJCpn82zFH0r+7nYf9fdVBBsekCOQV6sIz7tmM91Dg30BldYx+zj2zFZ3Slv3Q==}
     hasBin: true
 
   nanocurrency@2.5.0:
@@ -2665,15 +2666,17 @@ snapshots:
       '@open-wallet-standard/core-linux-arm64-gnu': 1.3.2
       '@open-wallet-standard/core-linux-x64-gnu': 1.3.2
 
-  '@openrai/nano-core@3.5.0(nano-rspow-node@0.17.1)':
+  '@openrai/nano-core@3.6.0(nano-rspow-node@0.17.2)':
     dependencies:
-      '@openrai/nano-pow-contract': 0.1.2
+      '@openrai/nano-pow-contract': 0.2.0
       blakejs: 1.2.1
       nanocurrency: 2.5.0
     optionalDependencies:
-      nano-rspow-node: 0.17.1
+      nano-rspow-node: 0.17.2
 
   '@openrai/nano-pow-contract@0.1.2': {}
+
+  '@openrai/nano-pow-contract@0.2.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.60.0':
     optional: true
@@ -3558,30 +3561,30 @@ snapshots:
 
   ms@2.1.3: {}
 
-  nano-rspow-node-darwin-arm64@0.17.1:
+  nano-rspow-node-darwin-arm64@0.17.2:
     optional: true
 
-  nano-rspow-node-darwin-x64@0.17.1:
+  nano-rspow-node-darwin-x64@0.17.2:
     optional: true
 
-  nano-rspow-node-linux-arm64-gnu@0.17.1:
+  nano-rspow-node-linux-arm64-gnu@0.17.2:
     optional: true
 
-  nano-rspow-node-linux-x64-gnu@0.17.1:
+  nano-rspow-node-linux-x64-gnu@0.17.2:
     optional: true
 
-  nano-rspow-node-win32-x64-msvc@0.17.1:
+  nano-rspow-node-win32-x64-msvc@0.17.2:
     optional: true
 
-  nano-rspow-node@0.17.1:
+  nano-rspow-node@0.17.2:
     dependencies:
       '@openrai/nano-pow-contract': 0.1.2
     optionalDependencies:
-      nano-rspow-node-darwin-arm64: 0.17.1
-      nano-rspow-node-darwin-x64: 0.17.1
-      nano-rspow-node-linux-arm64-gnu: 0.17.1
-      nano-rspow-node-linux-x64-gnu: 0.17.1
-      nano-rspow-node-win32-x64-msvc: 0.17.1
+      nano-rspow-node-darwin-arm64: 0.17.2
+      nano-rspow-node-darwin-x64: 0.17.2
+      nano-rspow-node-linux-arm64-gnu: 0.17.2
+      nano-rspow-node-linux-x64-gnu: 0.17.2
+      nano-rspow-node-win32-x64-msvc: 0.17.2
 
   nanocurrency@2.5.0:
     dependencies:

@@ -1,15 +1,11 @@
-# HTMX Wallet Example
+# Customer Deposit and Withdrawal Example
 
-> **Status:** This example uses the prototype v1 API and `@openrai/nano-core`. It will be rebuilt against the v2 runtime.
+This Express and HTMX example creates a managed account for a stable customer
+reference, shows confirmed deposits, and queues custodial withdrawals. It uses
+only `@openrai/raiflow-sdk`; account keys, signing, receiving, and work stay in
+the RaiFlow runtime.
 
-A demonstration of the `@openrai/raiflow-sdk` and `@openrai/nano-core`. The backend uses Node.js (Express), and the frontend is powered by HTMX.
-
-## Prerequisites
-
-1. RaiFlow daemon running in a separate terminal
-2. pnpm installed and the workspace built
-
-## Running
+Set `RAIFLOW_URL` and `RAIFLOW_API_KEY`, then run:
 
 ```bash
 cd examples/htmx-wallet
@@ -17,17 +13,12 @@ pnpm install
 pnpm start
 ```
 
-## What it demonstrates (prototype API)
+Open `http://localhost:3000`. Submitting the same customer reference returns the
+same managed account. A withdrawal request carries a stable request reference;
+RaiFlow rejects reuse of that idempotency key with a different destination or
+amount. The example consumes the persisted global event sequence and saves its
+cursor under `.raiflow/event-cursors.json`, then lists account deposit and send
+records through their SDK resources.
 
-- **Wallet Auto-Generation**: Generates and persists a local Nano seed into an `.gitignore`d `example-wallet-data.json`
-- **RaiFlow Event Observation**: Subscribes to `payment.confirmed` events
-- **HTMX Server-Side Rendering**: Reactive interface served via HTML fragments
-- **nano-core Integration**: Uses `@openrai/nano-core` for key management and block construction
-
-## v2 API migration
-
-When the v2 runtime is complete, this example will be rebuilt to demonstrate:
-- Managed account creation via `POST /v1/accounts`
-- Send operations via `POST /v1/accounts/:id/send`
-- Wallet domain: balance tracking, auto-receive, frontier management
-- Pre-signed block publishing workflow
+All values are examples. Do not send real funds to an account unless the
+operator has explicitly configured and funded the RaiFlow runtime for that use.

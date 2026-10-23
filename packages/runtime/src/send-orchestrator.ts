@@ -9,12 +9,33 @@ import type {
 } from '@openrai/model';
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
+import type { SendBlockIntent, SendBlockIntentStore } from '@openrai/storage';
+import { AccountOperationExecutor, AccountOperationLeaseLostError, createInMemoryAccountOperationLeaseStore } from './account-operation-executor.js';
+import { createInMemorySendBlockIntentStore } from './send-block-intents.js';
 
 const WORK_REJECTION_MESSAGE = 'Block work is less than threshold';
 
 export class SendOrchestrator {
   private timer: ReturnType<typeof setInterval> | undefined;
   private processing = false;
+  private readonly confirmingSends = new Set<string>();
+
+  private async resolveSource(send: Send): Promise<{
+    address: string;
+    derivationIndex: number | undefined;
+    account?: NonNullable<Awaited<ReturnType<AccountStore['get']>>>;
+  }> {
+    if (send.source.type === 'invoice') {
+      return { address: send.source.address, derivationIndex: send.source.derivationIndex };
+    }
+    const account = await this.accountStore.get(send.source.accountId);
+    if (!account || account.type !== 'managed') throw new Error('Managed source account not found');
+    return {
+      address: account.address,
+      derivationIndex: account.derivationIndex ?? undefined,
+      account,
+    };
+  }
 
   constructor(
     private readonly sendStore: SendStore,
@@ -22,6 +43,9 @@ export class SendOrchestrator {
     private readonly custodyEngine: CustodyEngine,
     private readonly rpcPool: RpcPool,
     private readonly emitEvent: (event: RaiFlowEvent) => Promise<void>,
+    private readonly accountOperations = new AccountOperationExecutor(createInMemoryAccountOperationLeaseStore()),
+    private readonly sendBlockIntentStore: SendBlockIntentStore = createInMemorySendBlockIntentStore(),
+    private readonly onConfirmed?: (send: Send) => Promise<void>,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -43,7 +67,13 @@ export class SendOrchestrator {
     if (this.processing) return;
     this.processing = true;
     try {
-      const queued = await this.sendStore.listByStatus('queued');
+      const [queued, published] = await Promise.all([
+        this.sendStore.listByStatus('queued'),
+        this.sendStore.listByStatus('published'),
+      ]);
+      for (const send of published) {
+        if (send.blockHash) this.startConfirmation(send.id, send.blockHash);
+      }
       for (const send of queued) {
         await this.publishSend(send);
       }
@@ -54,86 +84,139 @@ export class SendOrchestrator {
 
   private async publishSend(send: Send): Promise<void> {
     try {
-      // 1. Fetch account info (frontier, balance, representative)
-      const account = await this.accountStore.get(send.accountId);
-      if (!account) throw new Error('Account not found');
+      const source = await this.resolveSource(send);
 
-      const client = this.rpcPool.getClient();
-      let info = await client.accountInfo(account.address);
-      if (!info) {
-        // Unopened account — use zero state
-        info = {
-          frontier: '0000000000000000000000000000000000000000000000000000000000000000',
-          balance: '0',
-          representative: account.representative ?? '',
-          blockCount: 0,
-        };
-      }
-
-      const currentBalanceRaw = info.balance ?? '0';
-      if (BigInt(currentBalanceRaw) < BigInt(send.amountRaw)) {
-        throw new Error('Insufficient balance');
-      }
-
-      // 2. Compute new balance (current balance - send amount)
-      const newBalanceRaw = (BigInt(currentBalanceRaw) - BigInt(send.amountRaw)).toString();
-      const frontier = info.frontier ?? '0000000000000000000000000000000000000000000000000000000000000000';
-
-      // 3. Sign the block
-      const signed = await this.custodyEngine.signSend(
-        account.address,
-        send.destination,
-        newBalanceRaw, // balance AFTER this send
-        frontier,
-        account.derivationIndex ?? undefined,
-      );
-
-      // 4. Generate work
-      const work = await this.custodyEngine.generateWork(frontier);
-
-      // 5. Build final block JSON with work included
-      const blockJson = JSON.parse(signed.contents);
-      blockJson.work = work;
-
-      // 6. Publish to network (with retry-once for work rejection)
-      const publish = async () => {
+      await this.accountOperations.run(source.address, async ({ assertCurrent }) => {
         try {
-          return await client.process(JSON.stringify(blockJson));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          // A crash after a successful process call can leave the send queued.
-          // Re-publishing the exact deterministic block returns "Old block";
-          // treating that as success closes the ambiguous-commit window.
-          if (message.includes('Old block')) return { hash: signed.hash };
-          throw error;
+          await this.publishSendUnderLease(send, source, assertCurrent);
+        } catch (err) {
+          if (err instanceof AccountOperationLeaseLostError) throw err;
+          // Once a signed intent exists, any storage/provider failure is
+          // ambiguous and must leave it queued for exact-intent recovery.
         }
-      };
-      let result;
+      });
+    } catch (err) {
+      if (err instanceof AccountOperationLeaseLostError) return;
+      // Lease contention is normal. An account lookup failure is retryable too.
+    }
+  }
+
+  private async publishSendUnderLease(
+    send: Send,
+    source: Awaited<ReturnType<SendOrchestrator['resolveSource']>>,
+    assertCurrent: () => Promise<void>,
+  ): Promise<void> {
+    let intent = await this.sendBlockIntentStore.get(send.id);
+    if (!intent) {
       try {
-        result = await publish();
-      } catch (processErr) {
-        const message = processErr instanceof Error ? processErr.message : String(processErr);
-        if (!message.includes(WORK_REJECTION_MESSAGE)) throw processErr;
-
-        // Work was rejected — regenerate and retry once
-        const newWork = await this.custodyEngine.generateWork(frontier);
-        blockJson.work = newWork;
-        result = await publish();
+        const client = this.rpcPool.getClient();
+        const info = await client.accountInfo(source.address);
+        const balance = info?.balance ?? '0';
+        if (BigInt(balance) < BigInt(send.amountRaw)) throw new Error('Insufficient balance');
+        const resultingBalanceRaw = (BigInt(balance) - BigInt(send.amountRaw)).toString();
+        const frontier = info?.frontier ?? '0'.repeat(64);
+        const signed = await this.custodyEngine.signSend(
+          source.address,
+          send.destination,
+          resultingBalanceRaw,
+          frontier,
+          source.derivationIndex,
+        );
+        const blockJson = JSON.parse(signed.contents) as Record<string, unknown>;
+        blockJson['work'] = await this.custodyEngine.generateWork(frontier);
+        await assertCurrent();
+        intent = await this.sendBlockIntentStore.createIfAbsent({
+          sendId: send.id,
+          blockHash: signed.hash,
+          blockJson: JSON.stringify(blockJson),
+          frontier,
+          resultingBalanceRaw,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        // No block has been broadcast. Only deterministic preparation failures
+        // are terminal; provider/storage failures remain queued for retry.
+        if (error instanceof Error && error.message === 'Insufficient balance') {
+          await assertCurrent();
+          const failed = await this.sendStore.update(send.id, { status: 'failed' });
+          await this.emitEvent({
+            id: randomUUID(),
+            type: 'send.failed',
+            timestamp: new Date().toISOString(),
+            data: { send: failed, reason: error.message },
+            resourceId: failed.id,
+            resourceType: 'send',
+          });
+        }
+        return;
       }
+    }
 
-      // 7. Update send to published
+    const client = this.rpcPool.getClient();
+    let blockJson = intent.blockJson;
+    let acceptedHash: string;
+    const publish = async (): Promise<string> => {
+      await assertCurrent();
+      try {
+        const result = await client.process(blockJson);
+        if (result.hash !== intent!.blockHash) throw new Error('Published block hash did not match the saved send intent');
+        return result.hash;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('Old block')) {
+          const existing = await client.blockInfo(intent!.blockHash);
+          if (existing) return intent!.blockHash;
+        }
+        throw error;
+      }
+    };
+
+    try {
+      acceptedHash = await publish();
+    } catch (error) {
+      if (error instanceof AccountOperationLeaseLostError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes(WORK_REJECTION_MESSAGE)) return;
+
+      try {
+        const updatedBlock = JSON.parse(blockJson) as Record<string, unknown>;
+        updatedBlock['work'] = await this.custodyEngine.generateWork(intent.frontier);
+        blockJson = JSON.stringify(updatedBlock);
+        await assertCurrent();
+        if (!(await this.sendBlockIntentStore.updateWork(send.id, intent.blockHash, blockJson))) return;
+        acceptedHash = await publish();
+      } catch (retryError) {
+        if (retryError instanceof AccountOperationLeaseLostError) throw retryError;
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        if (retryMessage.includes(WORK_REJECTION_MESSAGE)) {
+          await assertCurrent();
+          const failed = await this.sendStore.update(send.id, { status: 'failed' });
+          await this.emitEvent({
+            id: randomUUID(),
+            type: 'send.failed',
+            timestamp: new Date().toISOString(),
+            data: { send: failed, reason: retryMessage },
+            resourceId: failed.id,
+            resourceType: 'send',
+          });
+        }
+        return;
+      }
+    }
+
+    try {
+      await assertCurrent();
       const published = await this.sendStore.update(send.id, {
         status: 'published',
-        blockHash: result.hash,
+        blockHash: acceptedHash,
         publishedAt: new Date().toISOString(),
       });
-
-      // 8. Update account frontier
-      await this.accountStore.update(account.id, {
-        frontier: result.hash,
-        balanceRaw: newBalanceRaw,
-      });
-
+      if (source.account) {
+        await this.accountStore.update(source.account.id, {
+          frontier: acceptedHash,
+          balanceRaw: intent.resultingBalanceRaw,
+        });
+      }
       await this.emitEvent({
         id: randomUUID(),
         type: 'send.published',
@@ -142,22 +225,18 @@ export class SendOrchestrator {
         resourceId: published.id,
         resourceType: 'send',
       });
-      void this.confirmPublishedSend(published.id, result.hash);
-    } catch (err) {
-      // On failure, mark as failed and emit event
-      const failed = await this.sendStore.update(send.id, {
-        status: 'failed',
-      });
-
-      await this.emitEvent({
-        id: randomUUID(),
-        type: 'send.failed',
-        timestamp: new Date().toISOString(),
-        data: { send: failed, reason: err instanceof Error ? err.message : String(err) },
-        resourceId: failed.id,
-        resourceType: 'send',
-      });
+    } catch {
+      // The exact intent remains durable. The next tick can replay it and
+      // repair send state without constructing a second transfer.
+      return;
     }
+    this.startConfirmation(send.id, acceptedHash);
+  }
+
+  private startConfirmation(sendId: string, blockHash: string): void {
+    if (this.confirmingSends.has(sendId)) return;
+    this.confirmingSends.add(sendId);
+    void this.confirmPublishedSend(sendId, blockHash).finally(() => this.confirmingSends.delete(sendId));
   }
 
   /** Reconcile send confirmation even when no WebSocket watcher is configured. */
@@ -181,6 +260,9 @@ export class SendOrchestrator {
               resourceId: confirmed.id,
               resourceType: 'send',
             });
+            await this.onConfirmed?.(confirmed);
+          } else {
+            await this.onConfirmed?.(current);
           }
           return;
         }

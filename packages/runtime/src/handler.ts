@@ -4,7 +4,9 @@ import { randomUUID } from 'node:crypto';
 import type { InvoiceStatus, RaiFlowEventType } from '@openrai/model';
 import { RaiFlowError, isErrorWithCode } from '@openrai/model';
 import { type RaiFlowConfig } from '@openrai/config';
+import type { StorageBudgetStatus } from '@openrai/storage';
 import { Runtime } from './runtime.js';
+import { parseCreateInvoiceRequest } from './invoice-request.js';
 import { renderDashboard } from './dashboard.js';
 import type { AccountStateSync } from './account-state-sync.js';
 import type { SubscriptionManager, SSEController } from './subscription-manager.js';
@@ -102,7 +104,7 @@ function checkAuth(req: Request, config: RaiFlowConfig): Response | undefined {
   }
 
   // Health endpoints are intentionally unauthenticated for orchestrator probes.
-  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && (parts[1] === 'live' || parts[1] === 'ready')) {
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && ['live', 'ready', 'storage'].includes(parts[1] ?? '')) {
     return undefined;
   }
   if (method === 'GET' && parts.length === 2 && parts[0] === 'v1' && parts[1] === 'version') {
@@ -131,6 +133,7 @@ export function createHandler(
   version?: string,
   accountStateSync?: AccountStateSync,
   subscriptionManager?: SubscriptionManager,
+  getStorageBudgetStatus?: () => StorageBudgetStatus | undefined,
 ): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const requestId = req.headers.get('x-request-id')?.trim() || randomUUID();
@@ -138,16 +141,18 @@ export function createHandler(
       const authFailure = checkAuth(req, config);
       if (authFailure) return withRequestId(authFailure, requestId);
 
-      const response = await route(req, runtime, config, version, accountStateSync, subscriptionManager);
+      const response = await route(req, runtime, config, version, accountStateSync, subscriptionManager, getStorageBudgetStatus);
       return withRequestId(response, requestId);
     } catch (err) {
+      const handled = handleRaiFlowError(err);
+      if (handled) return withRequestId(handled, requestId);
       const message = err instanceof Error ? err.message : 'Internal server error';
       return withRequestId(errorResponse(message, 'internal_error', 500), requestId);
     }
   };
 }
 
-async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, version?: string, accountStateSync?: AccountStateSync, subscriptionManager?: SubscriptionManager): Promise<Response> {
+async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, version?: string, accountStateSync?: AccountStateSync, subscriptionManager?: SubscriptionManager, getStorageBudgetStatus?: () => StorageBudgetStatus | undefined): Promise<Response> {
   const { url, parts, method } = parseRoute(req);
 
   // GET / — wayfinder (static landing page)
@@ -206,6 +211,21 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
     return json({ status: 'ok' });
   }
 
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && parts[1] === 'storage') {
+    const storage = getStorageBudgetStatus?.();
+    if (!storage) return json({ status: 'unknown' }, 503);
+    const paused = storage.globallyPaused || storage.pausedAccountCount > 0;
+    return json({
+      status: paused ? 'paused' : 'ok',
+      inboundProcessing: paused ? 'paused' : 'active',
+      databaseBytes: storage.databaseBytes,
+      maxDatabaseBytes: storage.maxDatabaseBytes,
+      remainingBytes: storage.remainingBytes,
+      pausedAccountCount: storage.pausedAccountCount,
+      globallyPaused: storage.globallyPaused,
+    }, paused ? 503 : 200);
+  }
+
   if (method === 'GET' && parts.length === 2 && parts[0] === 'health' && parts[1] === 'ready') {
     let rpcReady = false;
     try {
@@ -218,8 +238,10 @@ async function route(req: Request, runtime: Runtime, config: RaiFlowConfig, vers
       rpcReady = false;
     }
     const accountsReady = accountStateSync?.isInitialSyncComplete() ?? true;
-    const ready = rpcReady && accountsReady;
-    return json({ status: ready ? 'ready' : 'not_ready', checks: { rpc: rpcReady, accounts: accountsReady } }, ready ? 200 : 503);
+    const storage = getStorageBudgetStatus?.();
+    const storageReady = !storage?.globallyPaused;
+    const ready = rpcReady && accountsReady && storageReady;
+    return json({ status: ready ? 'ready' : 'not_ready', checks: { rpc: rpcReady, accounts: accountsReady, storage: storageReady } }, ready ? 200 : 503);
   }
 
   // v3 exposes one canonical API prefix. Legacy /api routes intentionally 404.
@@ -240,6 +262,43 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
   // ---------------------------------------------------------------------------
   // Accounts
   // ---------------------------------------------------------------------------
+
+  if (parts[0] === 'deposits' && parts.length === 3 && parts[2] === 'refunds') {
+    const depositId = decodeURIComponent(parts[1] ?? '');
+    if (!depositId) return errorResponse('depositId is required', 'bad_request', 400);
+
+    if (method === 'GET') {
+      try {
+        return json({ data: await runtime.getRefundsByDeposit(depositId) });
+      } catch (err) {
+        const handled = handleRaiFlowError(err);
+        if (handled) return handled;
+        throw err;
+      }
+    }
+
+    if (method === 'POST') {
+      const mutationKey = idempotencyKey(req);
+      if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
+      const body = await req.json() as Record<string, unknown>;
+      if (typeof body.destination !== 'string' || typeof body.amountRaw !== 'string') {
+        return errorResponse('destination and amountRaw are required', 'bad_request', 400);
+      }
+      try {
+        const refund = await runtime.queueRefund({
+          depositId,
+          destination: body.destination,
+          amountRaw: body.amountRaw,
+          idempotencyKey: mutationKey,
+        });
+        return json(refund, 201);
+      } catch (err) {
+        const handled = handleRaiFlowError(err);
+        if (handled) return handled;
+        throw err;
+      }
+    }
+  }
 
   if (parts[0] === 'accounts') {
     // GET /api/accounts/stream — SSE endpoint
@@ -527,6 +586,15 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         return json({ data: sends });
       }
 
+      // GET /api/accounts/:id/deposits
+      if (method === 'GET' && parts.length === 3 && parts[2] === 'deposits') {
+        const account = await runtime.getAccount(accountId);
+        if (account === undefined) {
+          return errorResponse(`Account not found: ${accountId}`, 'not_found', 404);
+        }
+        return json({ data: await runtime.getDepositsByAccount(accountId) });
+      }
+
       // GET /api/accounts/:id/receivable
       if (method === 'GET' && parts.length === 3 && parts[2] === 'receivable') {
         const account = await runtime.getAccount(accountId);
@@ -710,6 +778,11 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
       const invoices = await runtime.getInvoicesByAccountKey(accountKey);
       return json({ data: invoices });
     }
+
+    if (method === 'GET' && parts.length === 3 && parts[2] === 'deposits') {
+      const deposits = await runtime.getDepositsByAccountKey(accountKey);
+      return json({ data: deposits });
+    }
   }
 
   if (parts[0] === 'invoices') {
@@ -723,48 +796,20 @@ async function routeApi(parts: string[], url: URL, method: string, req: Request,
         );
       }
 
-      const body = await req.json() as Record<string, unknown>;
-      const { recipientAccount, expectedAmountRaw, accountKey, invoiceKey, expiresAt, metadata, completionPolicy } = body;
-      if (recipientAccount !== undefined) {
+      const body: unknown = await req.json();
+      if (typeof body === 'object' && body !== null && 'recipientAccount' in body) {
         return errorResponse(
           'recipientAccount is deprecated and no longer accepted. Remove it; RaiFlow now derives payAddress per invoice.',
           'bad_request',
           400,
         );
       }
-      if (typeof expectedAmountRaw !== 'string') {
-        return errorResponse(
-          'Missing required field: expectedAmountRaw',
-          'bad_request',
-          400,
-        );
-      }
-      if (typeof accountKey !== 'string' || accountKey.length === 0) {
-        return errorResponse(
-          'Missing required field: accountKey',
-          'bad_request',
-          400,
-        );
-      }
+      const invoiceRequest = parseCreateInvoiceRequest(body);
 
       const mutationKey = idempotencyKey(req);
       if (!mutationKey) return errorResponse('Idempotency-Key header is required', 'bad_request', 400);
 
-      const invoice = await runtime.createInvoice(
-        {
-          expectedAmountRaw,
-          accountKey,
-          invoiceKey: typeof invoiceKey === 'string' ? invoiceKey : undefined,
-          expiresAt: typeof expiresAt === 'string' ? expiresAt : undefined,
-          metadata: typeof metadata === 'object' && metadata !== null
-            ? (metadata as Record<string, unknown>)
-            : undefined,
-          completionPolicy: typeof completionPolicy === 'object' && completionPolicy !== null
-            ? (completionPolicy as { type: 'exact' | 'at_least' })
-            : undefined,
-        },
-        mutationKey,
-      );
+      const invoice = await runtime.createInvoice(invoiceRequest, mutationKey);
 
       return json(invoice, 201);
     }

@@ -9,13 +9,19 @@ import type {
   Payment,
   PaymentStore,
   PaymentStatus,
+  Deposit,
+  DepositStore,
+  Refund,
+  RefundStore,
+  RefundQueueResult,
+  ConfirmedBlock,
+  ReceiveTask,
   Account,
   AccountStore,
   AccountType,
   Send,
   SendStore,
   SendStatus,
-  ReceiveTask,
   ReceiveTaskStatus,
   ReceiveTaskStore,
   EventStore,
@@ -27,6 +33,7 @@ import type {
   IdempotencyRecord,
 } from '@openrai/model';
 import { randomUUID } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
 import BetterSqlite3 from 'better-sqlite3';
 
 export type Database = BetterSqlite3.Database;
@@ -34,6 +41,93 @@ export type Database = BetterSqlite3.Database;
 export interface StorageConfig {
   driver: 'sqlite';
   path: string;
+  maxDatabaseBytes: number;
+  maxDepositsPerAccount: number;
+}
+
+export interface ConfirmedDepositIngestResult {
+  deposit: Deposit;
+  payment?: Payment;
+  created: boolean;
+  events: RaiFlowEvent[];
+}
+
+/** Atomic durable boundary for confirmed inbound sends and invoice effects. */
+export interface ConfirmedDepositIngestStore {
+  ingest(block: ConfirmedBlock): Promise<ConfirmedDepositIngestResult>;
+  getStorageBudgetStatus?(): StorageBudgetStatus;
+}
+
+export interface StorageBudgetStatus {
+  databaseBytes: number;
+  maxDatabaseBytes: number;
+  remainingBytes: number;
+  globallyPaused: boolean;
+  pausedAccountCount: number;
+}
+
+export class StorageBudgetExceededError extends Error {
+  readonly code = 'storage_budget_exceeded';
+
+  constructor(readonly reason: 'global' | 'account') {
+    super(reason === 'global'
+      ? 'Inbound processing is paused because the SQLite storage budget is nearly full'
+      : 'Inbound processing is paused because this account reached its deposit storage budget');
+    this.name = 'StorageBudgetExceededError';
+  }
+}
+
+export interface ConfirmedDepositIngestOptions {
+  maxDatabaseBytes: number;
+  maxDepositsPerAccount: number;
+}
+
+/** Internal persistence contract for per-address account-chain write leases. */
+export interface AccountOperationLease {
+  accountAddress: string;
+  ownerId: string;
+  fencingToken: number;
+  expiresAt: string;
+}
+
+export interface AccountOperationLeaseStore {
+  acquire(accountAddress: string, ownerId: string, now: string, expiresAt: string): Promise<AccountOperationLease | undefined>;
+  renew(lease: AccountOperationLease, now: string, expiresAt: string): Promise<boolean>;
+  isCurrent(lease: AccountOperationLease, now: string): Promise<boolean>;
+  release(lease: AccountOperationLease): Promise<void>;
+}
+
+/** Internal durable representation of a signed send before network broadcast. */
+export interface SendBlockIntent {
+  sendId: string;
+  blockHash: string;
+  blockJson: string;
+  frontier: string;
+  resultingBalanceRaw: string;
+  createdAt: string;
+}
+
+export interface SendBlockIntentStore {
+  get(sendId: string): Promise<SendBlockIntent | undefined>;
+  /** Insert once; return the stored intent if another attempt already won. */
+  createIfAbsent(intent: SendBlockIntent): Promise<SendBlockIntent>;
+  updateWork(sendId: string, blockHash: string, blockJson: string): Promise<boolean>;
+}
+
+/** Internal durable representation of a receive block before network broadcast. */
+export interface ReceiveBlockIntent {
+  taskId: string;
+  blockHash: string;
+  blockJson: string;
+  frontier: string;
+  resultingBalanceRaw: string;
+  createdAt: string;
+}
+
+export interface ReceiveBlockIntentStore {
+  get(taskId: string): Promise<ReceiveBlockIntent | undefined>;
+  createIfAbsent(intent: ReceiveBlockIntent): Promise<ReceiveBlockIntent>;
+  updateWork(taskId: string, blockHash: string, blockJson: string): Promise<boolean>;
 }
 
 export interface Migration {
@@ -49,10 +143,18 @@ export interface MigrationRunner {
 
 export const SCHEMA_VERSION = 3;
 
-export function createDatabase(path: string): Database {
+export function createDatabase(path: string, options?: { maxDatabaseBytes?: number }): Database {
   const db = new BetterSqlite3(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  if (options?.maxDatabaseBytes !== undefined) {
+    const pageSize = Number(db.pragma('page_size', { simple: true }));
+    const walLimitBytes = Math.min(16 * 1024 * 1024, Math.floor(options.maxDatabaseBytes / 8));
+    const maxPages = Math.floor((options.maxDatabaseBytes - walLimitBytes) / pageSize);
+    db.pragma(`max_page_count = ${maxPages}`);
+    db.pragma(`journal_size_limit = ${walLimitBytes}`);
+    db.pragma('wal_autocheckpoint = 256');
+  }
   return db;
 }
 
@@ -349,6 +451,231 @@ export function createMigrationRunner(db: Database): MigrationRunner {
         db.exec(`CREATE INDEX IF NOT EXISTS idx_receive_tasks_receive_block_hash ON receive_tasks(receive_block_hash)`);
       },
     },
+    {
+      id: 9,
+      name: '009_account_operation_leases',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE account_operation_leases (
+            account_address TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            expires_at TEXT NOT NULL
+          );
+        `);
+      },
+    },
+    {
+      id: 10,
+      name: '010_send_block_intents',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE send_block_intents (
+            send_id TEXT PRIMARY KEY REFERENCES sends(id),
+            block_hash TEXT NOT NULL,
+            block_json TEXT NOT NULL,
+            frontier TEXT NOT NULL,
+            resulting_balance_raw TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+        `);
+      },
+    },
+    {
+      id: 11,
+      name: '011_receive_block_intents',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE receive_block_intents (
+            task_id TEXT PRIMARY KEY REFERENCES receive_tasks(id),
+            block_hash TEXT NOT NULL,
+            block_json TEXT NOT NULL,
+            frontier TEXT NOT NULL,
+            resulting_balance_raw TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+        `);
+      },
+    },
+    {
+      id: 12,
+      name: '012_confirmed_deposits',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE deposits (
+            block_hash TEXT PRIMARY KEY,
+            id TEXT NOT NULL UNIQUE,
+            recipient_account TEXT NOT NULL,
+            sender_account TEXT,
+            amount_raw TEXT NOT NULL,
+            invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL,
+            confirmed_at TEXT NOT NULL
+          );
+          CREATE INDEX idx_deposits_recipient_confirmed
+            ON deposits(recipient_account, confirmed_at DESC);
+          CREATE INDEX idx_deposits_invoice ON deposits(invoice_id, confirmed_at DESC);
+        `);
+      },
+    },
+    {
+      id: 13,
+      name: '013_account_history_recovery_cursors',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE account_history_recovery_cursors (
+            account_address TEXT PRIMARY KEY,
+            block_hash TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+      },
+    },
+    {
+      id: 14,
+      name: '014_invoice_account_reference_index',
+      up: (db) => {
+        db.exec(`
+          CREATE UNIQUE INDEX idx_invoice_accounts_reference
+            ON invoice_accounts(account_key, invoice_key)
+            WHERE invoice_key IS NOT NULL;
+        `);
+      },
+    },
+    {
+      id: 15,
+      name: '015_deposit_dispositions',
+      up: (db) => {
+        db.exec(`
+          ALTER TABLE deposits ADD COLUMN disposition TEXT NOT NULL DEFAULT 'matched';
+          UPDATE deposits SET disposition = 'unmatched' WHERE invoice_id IS NULL;
+        `);
+      },
+    },
+    {
+      id: 16,
+      name: '016_send_sources',
+      up: (db) => {
+        db.exec(`
+          ALTER TABLE send_block_intents RENAME TO send_block_intents_legacy;
+          ALTER TABLE sends RENAME TO sends_legacy;
+
+          CREATE TABLE sends (
+            id TEXT PRIMARY KEY,
+            account_id TEXT REFERENCES accounts(id),
+            source_type TEXT NOT NULL,
+            source_address TEXT NOT NULL,
+            source_derivation_index INTEGER,
+            source_invoice_id TEXT REFERENCES invoices(id),
+            destination TEXT NOT NULL,
+            amount_raw TEXT NOT NULL,
+            status TEXT NOT NULL,
+            block_hash TEXT,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            published_at TEXT,
+            confirmed_at TEXT,
+            CHECK (
+              (source_type = 'account' AND account_id IS NOT NULL AND source_invoice_id IS NULL)
+              OR (source_type = 'invoice' AND account_id IS NULL AND source_invoice_id IS NOT NULL AND source_derivation_index IS NOT NULL)
+            )
+          );
+          INSERT INTO sends (
+            id, account_id, source_type, source_address, source_derivation_index,
+            source_invoice_id, destination, amount_raw, status, block_hash,
+            idempotency_key, created_at, published_at, confirmed_at
+          )
+          SELECT s.id, s.account_id, 'account', a.address, a.derivation_index,
+            NULL, s.destination, s.amount_raw, s.status, s.block_hash,
+            s.idempotency_key, s.created_at, s.published_at, s.confirmed_at
+          FROM sends_legacy AS s JOIN accounts AS a ON a.id = s.account_id;
+
+          CREATE TABLE send_block_intents (
+            send_id TEXT PRIMARY KEY REFERENCES sends(id),
+            block_hash TEXT NOT NULL,
+            block_json TEXT NOT NULL,
+            frontier TEXT NOT NULL,
+            resulting_balance_raw TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO send_block_intents SELECT * FROM send_block_intents_legacy;
+          DROP TABLE send_block_intents_legacy;
+          DROP TABLE sends_legacy;
+          CREATE INDEX idx_sends_account ON sends(account_id, id);
+          CREATE INDEX idx_sends_idempotency ON sends(idempotency_key);
+          CREATE INDEX idx_sends_invoice ON sends(source_invoice_id, id);
+        `);
+      },
+    },
+    {
+      id: 17,
+      name: '017_webhook_outbox',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE webhook_outbox (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+            webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered', 'failed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_until TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (event_id, webhook_id)
+          );
+          CREATE INDEX idx_webhook_outbox_ready
+            ON webhook_outbox(status, next_attempt_at, lease_until, created_at);
+          CREATE INDEX idx_webhook_outbox_webhook
+            ON webhook_outbox(webhook_id, created_at);
+        `);
+      },
+    },
+    {
+      id: 18,
+      name: '018_webhook_attempt_history',
+      up: (db) => {
+        db.exec(`
+          ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_legacy;
+          CREATE TABLE webhook_deliveries (
+            id TEXT PRIMARY KEY,
+            webhook_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            response_code INTEGER,
+            response_body TEXT,
+            next_retry_at TEXT,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO webhook_deliveries SELECT * FROM webhook_deliveries_legacy;
+          DROP TABLE webhook_deliveries_legacy;
+          CREATE INDEX idx_webhook_deliveries_event ON webhook_deliveries(event_id);
+          CREATE INDEX idx_webhook_deliveries_target ON webhook_deliveries(webhook_id, event_id, attempt);
+        `);
+      },
+    },
+    {
+      id: 19,
+      name: '019_deposit_refunds',
+      up: (db) => {
+        db.exec(`
+          CREATE TABLE refunds (
+            id TEXT PRIMARY KEY,
+            deposit_id TEXT NOT NULL REFERENCES deposits(id) ON DELETE RESTRICT,
+            invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL,
+            send_id TEXT NOT NULL UNIQUE REFERENCES sends(id) ON DELETE RESTRICT,
+            destination TEXT NOT NULL,
+            amount_raw TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (deposit_id, idempotency_key)
+          );
+          CREATE INDEX idx_refunds_deposit ON refunds(deposit_id, created_at, id);
+        `);
+      },
+    },
   ];
 
   return {
@@ -371,6 +698,141 @@ export function createMigrationRunner(db: Database): MigrationRunner {
       const rows = db.prepare('SELECT name FROM migrations ORDER BY id').all() as { name: string }[];
       return rows.map((r) => r.name);
     },
+  };
+}
+
+/** Persisted account-chain ownership with monotonically increasing fencing tokens. */
+export function createSqliteAccountOperationLeaseStore(db: Database): AccountOperationLeaseStore {
+  const acquire = db.transaction((accountAddress: string, ownerId: string, now: string, expiresAt: string) => {
+    const result = db.prepare(`
+      INSERT INTO account_operation_leases (account_address, owner_id, fencing_token, expires_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(account_address) DO UPDATE SET
+        owner_id = excluded.owner_id,
+        fencing_token = account_operation_leases.fencing_token + 1,
+        expires_at = excluded.expires_at
+      WHERE account_operation_leases.expires_at <= ?
+    `).run(accountAddress, ownerId, expiresAt, now);
+    if (result.changes === 0) return undefined;
+    const row = db.prepare(`
+      SELECT account_address, owner_id, fencing_token, expires_at
+      FROM account_operation_leases WHERE account_address = ?
+    `).get(accountAddress) as Record<string, unknown>;
+    return rowToAccountOperationLease(row);
+  });
+
+  return {
+    async acquire(accountAddress, ownerId, now, expiresAt) {
+      return acquire(accountAddress, ownerId, now, expiresAt);
+    },
+    async renew(lease, now, expiresAt) {
+      const result = db.prepare(`
+        UPDATE account_operation_leases SET expires_at = ?
+        WHERE account_address = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+      `).run(expiresAt, lease.accountAddress, lease.ownerId, lease.fencingToken, now);
+      return result.changes === 1;
+    },
+    async isCurrent(lease, now) {
+      return Boolean(db.prepare(`
+        SELECT 1 FROM account_operation_leases
+        WHERE account_address = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+      `).get(lease.accountAddress, lease.ownerId, lease.fencingToken, now));
+    },
+    async release(lease) {
+      db.prepare(`
+        UPDATE account_operation_leases SET expires_at = '1970-01-01T00:00:00.000Z'
+        WHERE account_address = ? AND owner_id = ? AND fencing_token = ?
+      `).run(lease.accountAddress, lease.ownerId, lease.fencingToken);
+    },
+  };
+}
+
+export function createSqliteSendBlockIntentStore(db: Database): SendBlockIntentStore {
+  const insert = db.transaction((intent: SendBlockIntent): SendBlockIntent => {
+    db.prepare(`
+      INSERT INTO send_block_intents (send_id, block_hash, block_json, frontier, resulting_balance_raw, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(send_id) DO NOTHING
+    `).run(intent.sendId, intent.blockHash, intent.blockJson, intent.frontier, intent.resultingBalanceRaw, intent.createdAt);
+    const row = db.prepare('SELECT * FROM send_block_intents WHERE send_id = ?').get(intent.sendId) as Record<string, unknown>;
+    return rowToSendBlockIntent(row);
+  });
+
+  return {
+    async get(sendId) {
+      const row = db.prepare('SELECT * FROM send_block_intents WHERE send_id = ?').get(sendId) as Record<string, unknown> | undefined;
+      return row ? rowToSendBlockIntent(row) : undefined;
+    },
+    async createIfAbsent(intent) {
+      return insert(intent);
+    },
+    async updateWork(sendId, blockHash, blockJson) {
+      const result = db.prepare(`
+        UPDATE send_block_intents SET block_json = ?
+        WHERE send_id = ? AND block_hash = ?
+      `).run(blockJson, sendId, blockHash);
+      return result.changes === 1;
+    },
+  };
+}
+
+function rowToSendBlockIntent(row: Record<string, unknown>): SendBlockIntent {
+  return {
+    sendId: row.send_id as string,
+    blockHash: row.block_hash as string,
+    blockJson: row.block_json as string,
+    frontier: row.frontier as string,
+    resultingBalanceRaw: row.resulting_balance_raw as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+export function createSqliteReceiveBlockIntentStore(db: Database): ReceiveBlockIntentStore {
+  const insert = db.transaction((intent: ReceiveBlockIntent): ReceiveBlockIntent => {
+    db.prepare(`
+      INSERT INTO receive_block_intents (task_id, block_hash, block_json, frontier, resulting_balance_raw, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO NOTHING
+    `).run(intent.taskId, intent.blockHash, intent.blockJson, intent.frontier, intent.resultingBalanceRaw, intent.createdAt);
+    const row = db.prepare('SELECT * FROM receive_block_intents WHERE task_id = ?').get(intent.taskId) as Record<string, unknown>;
+    return rowToReceiveBlockIntent(row);
+  });
+
+  return {
+    async get(taskId) {
+      const row = db.prepare('SELECT * FROM receive_block_intents WHERE task_id = ?').get(taskId) as Record<string, unknown> | undefined;
+      return row ? rowToReceiveBlockIntent(row) : undefined;
+    },
+    async createIfAbsent(intent) {
+      return insert(intent);
+    },
+    async updateWork(taskId, blockHash, blockJson) {
+      const result = db.prepare(`
+        UPDATE receive_block_intents SET block_json = ?
+        WHERE task_id = ? AND block_hash = ?
+      `).run(blockJson, taskId, blockHash);
+      return result.changes === 1;
+    },
+  };
+}
+
+function rowToReceiveBlockIntent(row: Record<string, unknown>): ReceiveBlockIntent {
+  return {
+    taskId: row.task_id as string,
+    blockHash: row.block_hash as string,
+    blockJson: row.block_json as string,
+    frontier: row.frontier as string,
+    resultingBalanceRaw: row.resulting_balance_raw as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+function rowToAccountOperationLease(row: Record<string, unknown>): AccountOperationLease {
+  return {
+    accountAddress: row.account_address as string,
+    ownerId: row.owner_id as string,
+    fencingToken: row.fencing_token as number,
+    expiresAt: row.expires_at as string,
   };
 }
 
@@ -435,6 +897,25 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
     INSERT OR IGNORE INTO idempotency_keys (key, resource_type, resource_id, created_at)
     VALUES (?, 'invoice', ?, ?)
   `);
+  const transition = db.transaction((id: string, expectedStatus: Invoice['status'], patch: Partial<Invoice>) => {
+    const row = db.prepare('SELECT * FROM invoices WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const current = rowToInvoice(row);
+    if (current.status !== expectedStatus) return undefined;
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    const values = invoiceToRow(updated);
+    const result = db.prepare(`
+      UPDATE invoices SET
+        account_key = @account_key, invoice_key = @invoice_key,
+        status = @status, pay_address = @pay_address, expected_amount_raw = @expected_amount_raw,
+        received_amount_raw = @received_amount_raw, memo = @memo, metadata = @metadata,
+        idempotency_key = @idempotency_key, expires_at = @expires_at, completed_at = @completed_at,
+        canceled_at = @canceled_at, created_at = @created_at, updated_at = @updated_at,
+        completion_policy = @completion_policy, derivation_index = @derivation_index
+      WHERE id = @id AND status = @expected_status
+    `).run({ ...values, expected_status: expectedStatus });
+    return result.changes === 1 ? updated : undefined;
+  });
 
   return {
     async create(invoice: Invoice, idempotencyKey?: string): Promise<Invoice> {
@@ -475,6 +956,11 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
       return rows.map(rowToInvoice);
     },
 
+    async listByAccountKey(accountKey: string): Promise<Invoice[]> {
+      const rows = db.prepare('SELECT * FROM invoices WHERE account_key = ? ORDER BY created_at DESC').all(accountKey) as Record<string, unknown>[];
+      return rows.map(rowToInvoice);
+    },
+
     async update(id: string, patch: Partial<Invoice>): Promise<Invoice> {
       const existing = await this.get(id);
       if (!existing) throw new Error(`Invoice ${id} not found`);
@@ -492,6 +978,10 @@ export function createSqliteInvoiceStore(db: Database): InvoiceStore {
         WHERE id = @id
       `).run(row);
       return updated;
+    },
+
+    async transition(id, expectedStatus, patch) {
+      return transition.immediate(id, expectedStatus, patch);
     },
 
     async getByPayAddress(address: string, status?: InvoiceStatus): Promise<Invoice[]> {
@@ -521,47 +1011,49 @@ function rowToInvoiceAccount(row: Record<string, unknown>): InvoiceAccount {
 }
 
 export function createSqliteInvoiceAccountStore(db: Database): InvoiceAccountStore {
-  return {
-    async getOrCreate(accountKey, invoiceKey, derivationIndex, deriveAddress) {
-      const existing = db
-        .prepare(
-          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
-        )
-        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown> | undefined;
-
+  const allocate = db.transaction((
+    accountKey: string,
+    invoiceKey: string | null,
+    derivationStartIndex: number,
+    derivationEndIndex: number,
+    deriveAddress: (index: number) => string,
+  ) => {
+    if (invoiceKey !== null) {
+      const existing = db.prepare(
+        'SELECT * FROM invoice_accounts WHERE account_key = ? AND invoice_key = ?',
+      ).get(accountKey, invoiceKey) as Record<string, unknown> | undefined;
       if (existing) return rowToInvoiceAccount(existing);
+    }
 
-      const collision = db
-        .prepare('SELECT account_key, invoice_key FROM invoice_accounts WHERE derivation_index = ?')
-        .get(derivationIndex) as { account_key: string; invoice_key: string | null } | undefined;
+    const row = db.prepare(`
+      SELECT MAX(derivation_index) AS max_index FROM invoice_accounts
+      WHERE derivation_index >= ? AND derivation_index < ?
+    `).get(derivationStartIndex, derivationEndIndex) as { max_index: number | null };
+    const derivationIndex = Math.max(derivationStartIndex, (row.max_index ?? (derivationStartIndex - 1)) + 1);
+    if (derivationIndex >= derivationEndIndex) {
+      throw new Error(`Invoice derivation range exhausted at index ${derivationEndIndex}`);
+    }
 
-      if (collision && (collision.account_key !== accountKey || collision.invoice_key !== invoiceKey)) {
-        throw new Error(
-          `Derivation index collision: index ${derivationIndex} is already assigned to (${collision.account_key}, ${collision.invoice_key ?? 'null'})`,
-        );
-      }
+    const address = deriveAddress(derivationIndex);
+    const createdAt = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO invoice_accounts (account_key, invoice_key, derivation_index, address, created_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(accountKey, invoiceKey, derivationIndex, address, createdAt);
 
-      const address = deriveAddress(derivationIndex);
-      const createdAt = new Date().toISOString();
-      db.prepare(
-        'INSERT OR IGNORE INTO invoice_accounts (account_key, invoice_key, derivation_index, address, created_at) VALUES (?, ?, ?, ?, ?)',
-      ).run(accountKey, invoiceKey, derivationIndex, address, createdAt);
+    return rowToInvoiceAccount(db.prepare(
+      'SELECT * FROM invoice_accounts WHERE derivation_index = ?',
+    ).get(derivationIndex) as Record<string, unknown>);
+  });
 
-      const row = db
-        .prepare(
-          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
-        )
-        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown>;
-
-      return rowToInvoiceAccount(row);
+  return {
+    async getOrCreate(accountKey, invoiceKey, derivationStartIndex, derivationEndIndex, deriveAddress) {
+      return allocate.immediate(accountKey, invoiceKey, derivationStartIndex, derivationEndIndex, deriveAddress);
     },
 
     async get(accountKey, invoiceKey) {
-      const row = db
-        .prepare(
-          'SELECT * FROM invoice_accounts WHERE account_key = ? AND (invoice_key = ? OR (invoice_key IS NULL AND ? IS NULL))',
-        )
-        .get(accountKey, invoiceKey, invoiceKey) as Record<string, unknown> | undefined;
+      const row = invoiceKey === null
+        ? db.prepare('SELECT * FROM invoice_accounts WHERE account_key = ? AND invoice_key IS NULL ORDER BY derivation_index DESC LIMIT 1').get(accountKey) as Record<string, unknown> | undefined
+        : db.prepare('SELECT * FROM invoice_accounts WHERE account_key = ? AND invoice_key = ?').get(accountKey, invoiceKey) as Record<string, unknown> | undefined;
       return row ? rowToInvoiceAccount(row) : undefined;
     },
 
@@ -684,6 +1176,401 @@ function rowToPayment(row: Record<string, unknown>): Payment {
     amountRaw: row.amount_raw as string,
     confirmedAt: row.confirmed_at as string | null,
     detectedAt: row.detected_at as string,
+  };
+}
+
+function rowToDeposit(row: Record<string, unknown>): Deposit {
+  return {
+    id: row.id as string,
+    blockHash: row.block_hash as string,
+    recipientAccount: row.recipient_account as string,
+    senderAccount: row.sender_account as string | null,
+    amountRaw: row.amount_raw as string,
+    invoiceId: row.invoice_id as string | null,
+    disposition: row.disposition as Deposit['disposition'],
+    confirmedAt: row.confirmed_at as string,
+  };
+}
+
+export function createSqliteDepositStore(db: Database): DepositStore {
+  const createIfAbsent = db.transaction((deposit: Deposit): Deposit => {
+    db.prepare(`
+      INSERT INTO deposits (block_hash, id, recipient_account, sender_account, amount_raw, invoice_id, disposition, confirmed_at)
+      VALUES (@block_hash, @id, @recipient_account, @sender_account, @amount_raw, @invoice_id, @disposition, @confirmed_at)
+      ON CONFLICT(block_hash) DO UPDATE SET
+        invoice_id = COALESCE(deposits.invoice_id, excluded.invoice_id),
+        disposition = CASE WHEN deposits.invoice_id IS NULL THEN excluded.disposition ELSE deposits.disposition END
+    `).run({
+      block_hash: deposit.blockHash,
+      id: deposit.id,
+      recipient_account: deposit.recipientAccount,
+      sender_account: deposit.senderAccount,
+      amount_raw: deposit.amountRaw,
+      invoice_id: deposit.invoiceId,
+      disposition: deposit.disposition,
+      confirmed_at: deposit.confirmedAt,
+    });
+    const row = db.prepare('SELECT * FROM deposits WHERE block_hash = ?').get(deposit.blockHash) as Record<string, unknown>;
+    return rowToDeposit(row);
+  });
+
+  return {
+    async createIfAbsent(deposit) {
+      return createIfAbsent(deposit);
+    },
+    async getByBlockHash(hash) {
+      const row = db.prepare('SELECT * FROM deposits WHERE block_hash = ?').get(hash) as Record<string, unknown> | undefined;
+      return row ? rowToDeposit(row) : undefined;
+    },
+    async get(id) {
+      const row = db.prepare('SELECT * FROM deposits WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      return row ? rowToDeposit(row) : undefined;
+    },
+    async listByRecipientAccounts(addresses) {
+      if (addresses.length === 0) return [];
+      const placeholders = addresses.map(() => '?').join(', ');
+      const rows = db.prepare(`
+        SELECT * FROM deposits WHERE recipient_account IN (${placeholders})
+        ORDER BY confirmed_at DESC, block_hash DESC
+      `).all(...addresses) as Record<string, unknown>[];
+      return rows.map(rowToDeposit);
+    },
+  };
+}
+
+export interface AccountHistoryRecoveryCursorStore {
+  get(accountAddress: string): Promise<string | undefined>;
+  set(accountAddress: string, blockHash: string): Promise<void>;
+}
+
+export interface WebhookOutboxDelivery {
+  id: string;
+  event: RaiFlowEvent;
+  endpoint: WebhookEndpoint;
+  attemptCount: number;
+}
+
+export interface WebhookOutboxAttempt {
+  number: number;
+  status: 'delivered' | 'retry' | 'failed';
+  responseCode: number | null;
+  responseBody: string | null;
+  error: string | null;
+  nextRetryAt: string | null;
+  attemptedAt: string;
+}
+
+export interface WebhookOutboxStore {
+  claimReady(workerId: string, now: string, leaseUntil: string, limit: number): Promise<WebhookOutboxDelivery[]>;
+  recordAttempt(jobId: string, workerId: string, attempt: WebhookOutboxAttempt): Promise<boolean>;
+}
+
+function webhookMatchesEvent(eventType: string, filters: string[]): boolean {
+  return filters.some((filter) => filter === '*'
+    || filter === eventType
+    || (filter.endsWith('.*') && eventType.startsWith(filter.slice(0, -1))));
+}
+
+function enqueueWebhookOutbox(db: Database, event: RaiFlowEvent, createdAt = new Date().toISOString()): void {
+  const endpoints = db.prepare('SELECT id, event_types FROM webhooks').all() as Array<{
+    id: string;
+    event_types: string;
+  }>;
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO webhook_outbox (
+      id, event_id, webhook_id, status, attempt_count, next_attempt_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+  `);
+  for (const endpoint of endpoints) {
+    const filters = JSON.parse(endpoint.event_types) as string[];
+    if (webhookMatchesEvent(event.type, filters)) {
+      insert.run(randomUUID(), event.id, endpoint.id, createdAt, createdAt, createdAt);
+    }
+  }
+}
+
+export function createSqliteAccountHistoryRecoveryCursorStore(db: Database): AccountHistoryRecoveryCursorStore {
+  return {
+    async get(accountAddress) {
+      const row = db.prepare(`
+        SELECT block_hash FROM account_history_recovery_cursors WHERE account_address = ?
+      `).get(accountAddress) as { block_hash: string } | undefined;
+      return row?.block_hash;
+    },
+    async set(accountAddress, blockHash) {
+      db.prepare(`
+        INSERT INTO account_history_recovery_cursors (account_address, block_hash, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(account_address) DO UPDATE SET
+          block_hash = excluded.block_hash,
+          updated_at = excluded.updated_at
+      `).run(accountAddress, blockHash, new Date().toISOString());
+    },
+  };
+}
+
+const STORAGE_INGEST_HEADROOM_BYTES = 16 * 1024 * 1024;
+
+function sqliteFilesBytes(db: Database, databasePath?: string): number {
+  const pageSize = Number(db.pragma('page_size', { simple: true }));
+  const logicalBytes = Number(db.pragma('page_count', { simple: true })) * pageSize;
+  if (!databasePath || databasePath === ':memory:') return logicalBytes;
+
+  return [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
+    .reduce((total, path) => total + (existsSync(path) ? statSync(path).size : 0), 0);
+}
+
+export function createSqliteConfirmedDepositIngestStore(
+  db: Database,
+  options?: Partial<ConfirmedDepositIngestOptions> & { databasePath?: string },
+): ConfirmedDepositIngestStore {
+  const maxDatabaseBytes = options?.maxDatabaseBytes ?? Number.MAX_SAFE_INTEGER;
+  const maxDepositsPerAccount = options?.maxDepositsPerAccount ?? Number.MAX_SAFE_INTEGER;
+  const pauseAtBytes = Math.max(0, maxDatabaseBytes - Math.min(
+      STORAGE_INGEST_HEADROOM_BYTES,
+      Math.floor(maxDatabaseBytes / 8),
+  ));
+  const getDatabaseBytes = (): number => sqliteFilesBytes(db, options?.databasePath);
+  const isGloballyPaused = (): boolean => getDatabaseBytes() >= pauseAtBytes;
+  const getStorageBudgetStatus = (): StorageBudgetStatus => {
+    const databaseBytes = getDatabaseBytes();
+    const pausedAccountCount = Number((db.prepare(`
+      SELECT COUNT(*) AS count FROM (
+        SELECT recipient_account FROM deposits
+        GROUP BY recipient_account HAVING COUNT(*) >= ?
+      )
+    `).get(maxDepositsPerAccount) as { count: number }).count);
+    return {
+      databaseBytes,
+      maxDatabaseBytes,
+      remainingBytes: Math.max(0, maxDatabaseBytes - databaseBytes),
+      globallyPaused: databaseBytes >= pauseAtBytes,
+      pausedAccountCount,
+    };
+  };
+
+  const appendEvent = (event: RaiFlowEvent): boolean => {
+    const result = db.prepare(`
+      INSERT INTO events (id, type, timestamp, resource_id, resource_type, data)
+      VALUES (@id, @type, @timestamp, @resource_id, @resource_type, @data)
+      ON CONFLICT(id) DO NOTHING
+    `).run({
+      id: event.id,
+      type: event.type,
+      timestamp: event.timestamp,
+      resource_id: event.resourceId,
+      resource_type: event.resourceType,
+      data: JSON.stringify(event.data),
+    });
+    if (result.changes === 1) enqueueWebhookOutbox(db, event, event.timestamp);
+    return result.changes === 1;
+  };
+
+  const ensureReceiveTask = (block: ConfirmedBlock): void => {
+    if (block.alreadyReceived) return;
+    const invoiceAddress = db.prepare(`
+      SELECT derivation_index FROM invoice_accounts WHERE address = ?
+    `).get(block.recipientAccount) as { derivation_index: number } | undefined;
+    const managedAccount = invoiceAddress ? undefined : db.prepare(`
+      SELECT derivation_index FROM accounts WHERE address = ? AND derivation_index IS NOT NULL
+    `).get(block.recipientAccount) as { derivation_index: number } | undefined;
+    const derivationIndex = invoiceAddress?.derivation_index ?? managedAccount?.derivation_index;
+    if (derivationIndex === undefined) return;
+
+    db.prepare(`
+      INSERT INTO receive_tasks (
+        id, account_address, derivation_index, pending_block_hash, amount_raw,
+        status, created_at, retry_count
+      ) VALUES (?, ?, ?, ?, ?, 'pending', ?, 0)
+      ON CONFLICT(pending_block_hash) DO NOTHING
+    `).run(randomUUID(), block.recipientAccount, derivationIndex, block.blockHash, block.amountRaw, new Date().toISOString());
+  };
+
+  const transaction = db.transaction((block: ConfirmedBlock): ConfirmedDepositIngestResult => {
+    const existingDepositRow = db.prepare('SELECT * FROM deposits WHERE block_hash = ?').get(block.blockHash) as Record<string, unknown> | undefined;
+    const existingPaymentRow = db.prepare('SELECT * FROM payments WHERE block_hash = ?').get(block.blockHash) as Record<string, unknown> | undefined;
+    const candidateInvoiceRow = db.prepare(`
+      SELECT * FROM invoices WHERE pay_address = ? ORDER BY created_at ASC LIMIT 1
+    `).get(block.recipientAccount) as Record<string, unknown> | undefined;
+    const invoiceId = (existingPaymentRow?.['invoice_id'] as string | undefined)
+      ?? (existingDepositRow?.['invoice_id'] as string | undefined)
+      ?? (!existingDepositRow ? (candidateInvoiceRow?.['id'] as string | undefined) : undefined)
+      ?? null;
+    const invoiceRow = invoiceId
+      ? db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId) as Record<string, unknown> | undefined
+      : undefined;
+    if (invoiceId && !invoiceRow) throw new Error(`Invoice ${invoiceId} not found while ingesting deposit ${block.blockHash}`);
+
+    // Existing evidence can be replayed at the limit. New sends stop before
+    // writing a deposit, payment, event, webhook job, or receive task.
+    if (!existingDepositRow) {
+      if (isGloballyPaused()) {
+        throw new StorageBudgetExceededError('global');
+      }
+      const accountDepositCount = Number((db.prepare(`
+        SELECT COUNT(*) AS count FROM deposits WHERE recipient_account = ?
+      `).get(block.recipientAccount) as { count: number }).count);
+      if (accountDepositCount >= maxDepositsPerAccount) {
+        throw new StorageBudgetExceededError('account');
+      }
+    }
+
+    let disposition: Deposit['disposition'];
+    if (existingDepositRow) {
+      disposition = rowToDeposit(existingDepositRow).disposition;
+    } else if (!invoiceRow) {
+      disposition = 'unmatched';
+    } else if (invoiceRow['status'] !== 'open') {
+      disposition = 'late';
+    } else {
+      const priorAmounts = db.prepare(`
+        SELECT amount_raw FROM payments WHERE invoice_id = ? AND status = 'confirmed'
+      `).all(invoiceId) as Array<{ amount_raw: string }>;
+      const priorTotal = priorAmounts.reduce((sum, row) => sum + BigInt(row.amount_raw), 0n);
+      const projectedTotal = priorTotal + (existingPaymentRow ? 0n : BigInt(block.amountRaw));
+      const expected = BigInt(invoiceRow['expected_amount_raw'] as string);
+      disposition = projectedTotal > expected ? 'excess' : projectedTotal < expected ? 'partial' : 'matched';
+    }
+
+    let deposit: Deposit;
+    let created = false;
+    if (existingDepositRow) {
+      deposit = rowToDeposit(existingDepositRow);
+      if (deposit.invoiceId === null && invoiceId !== null) {
+        db.prepare('UPDATE deposits SET invoice_id = ? WHERE block_hash = ? AND invoice_id IS NULL')
+          .run(invoiceId, deposit.blockHash);
+        deposit = { ...deposit, invoiceId };
+      }
+    } else {
+      deposit = {
+        id: randomUUID(),
+        blockHash: block.blockHash,
+        recipientAccount: block.recipientAccount,
+        senderAccount: block.senderAccount || null,
+        amountRaw: block.amountRaw,
+        invoiceId,
+        disposition,
+        confirmedAt: block.confirmedAt,
+      };
+      db.prepare(`
+        INSERT INTO deposits (block_hash, id, recipient_account, sender_account, amount_raw, invoice_id, disposition, confirmed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(deposit.blockHash, deposit.id, deposit.recipientAccount, deposit.senderAccount, deposit.amountRaw, deposit.invoiceId, deposit.disposition, deposit.confirmedAt);
+      created = true;
+    }
+
+    ensureReceiveTask(block);
+
+    const events: RaiFlowEvent[] = [];
+    const hasDepositEvent = Boolean(db.prepare(`
+      SELECT 1 FROM events WHERE type = 'deposit.observed'
+        AND json_extract(data, '$.deposit.blockHash') = ?
+    `).get(block.blockHash));
+    if (!hasDepositEvent) {
+      const event: RaiFlowEvent = {
+        id: randomUUID(),
+        type: 'deposit.observed',
+        timestamp: block.confirmedAt,
+        data: { deposit },
+        resourceId: deposit.id,
+        resourceType: 'deposit',
+      };
+      if (appendEvent(event)) events.push(event);
+    }
+
+    let payment: Payment | undefined;
+    if (!invoiceId || !invoiceRow || disposition === 'late') return { deposit, created, events };
+    if (existingPaymentRow) {
+      payment = rowToPayment(existingPaymentRow);
+    } else {
+      payment = {
+        id: randomUUID(),
+        invoiceId,
+        status: 'confirmed',
+        blockHash: block.blockHash,
+        senderAddress: block.senderAccount || null,
+        amountRaw: block.amountRaw,
+        confirmedAt: block.confirmedAt,
+        detectedAt: block.confirmedAt,
+      };
+      db.prepare(`
+        INSERT INTO payments (id, invoice_id, status, block_hash, sender_address, amount_raw, confirmed_at, detected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(payment.id, payment.invoiceId, payment.status, payment.blockHash, payment.senderAddress, payment.amountRaw, payment.confirmedAt, payment.detectedAt);
+    }
+
+    if (!payment) return { deposit, created, events };
+
+    const amounts = db.prepare(`
+      SELECT amount_raw FROM payments WHERE invoice_id = ? AND status = 'confirmed'
+    `).all(invoiceId) as Array<{ amount_raw: string }>;
+    const receivedAmountRaw = amounts.reduce((sum, row) => sum + BigInt(row.amount_raw), 0n).toString();
+    const expectedAmountRaw = invoiceRow['expected_amount_raw'] as string;
+    const completionPolicy = JSON.parse(invoiceRow['completion_policy'] as string) as { type?: string };
+    const isComplete = completionPolicy.type === 'exact'
+      ? BigInt(receivedAmountRaw) === BigInt(expectedAmountRaw)
+      : BigInt(receivedAmountRaw) >= BigInt(expectedAmountRaw);
+    const previousStatus = invoiceRow['status'] as string;
+    const nextStatus = previousStatus === 'open' && isComplete ? 'completed' : previousStatus;
+    const updatedAt = new Date().toISOString();
+    const completedAt = nextStatus === 'completed'
+      ? (invoiceRow['completed_at'] as string | null) ?? new Date().toISOString()
+      : invoiceRow['completed_at'] as string | null;
+    const paymentInvoice = rowToInvoice({
+      ...invoiceRow,
+      received_amount_raw: receivedAmountRaw,
+      updated_at: updatedAt,
+    });
+    db.prepare(`
+      UPDATE invoices SET received_amount_raw = ?, status = ?, completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(receivedAmountRaw, nextStatus, completedAt, updatedAt, invoiceId);
+    const updatedInvoiceRow = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId) as Record<string, unknown>;
+    const updatedInvoice = rowToInvoice(updatedInvoiceRow);
+    const paymentReceived: RaiFlowEvent = {
+      id: randomUUID(),
+      type: 'invoice.payment_received',
+      timestamp: block.confirmedAt,
+      data: { payment, invoice: paymentInvoice },
+      resourceId: invoiceId,
+      resourceType: 'invoice',
+    };
+    const paymentConfirmed: RaiFlowEvent = {
+      ...paymentReceived,
+      id: randomUUID(),
+      type: 'invoice.payment_confirmed',
+    };
+    const hasPaymentEvent = (type: string): boolean => Boolean(db.prepare(`
+      SELECT 1 FROM events
+      WHERE type = ? AND (
+        json_extract(data, '$.payment.blockHash') = ? OR
+        json_extract(data, '$.payment.sendBlockHash') = ?
+      )
+    `).get(type, block.blockHash, block.blockHash));
+    if (!hasPaymentEvent(paymentReceived.type) && appendEvent(paymentReceived)) events.push(paymentReceived);
+    if (!hasPaymentEvent(paymentConfirmed.type) && appendEvent(paymentConfirmed)) events.push(paymentConfirmed);
+    const hasCompletionEvent = Boolean(db.prepare(`
+      SELECT 1 FROM events WHERE type = 'invoice.completed' AND resource_id = ?
+    `).get(invoiceId));
+    if (nextStatus === 'completed' && !hasCompletionEvent) {
+      const completedEvent: RaiFlowEvent = {
+        id: randomUUID(),
+        type: 'invoice.completed',
+        timestamp: block.confirmedAt,
+        data: { invoice: updatedInvoice },
+        resourceId: invoiceId,
+        resourceType: 'invoice',
+      };
+      if (appendEvent(completedEvent)) events.push(completedEvent);
+    }
+
+    return { deposit, payment, created, events };
+  });
+
+  return {
+    async ingest(block) {
+      return transaction.immediate(block);
+    },
+    getStorageBudgetStatus,
   };
 }
 
@@ -817,9 +1704,22 @@ export function createSqliteAccountStore(db: Database): AccountStore {
 }
 
 function rowToSend(row: Record<string, unknown>): Send {
+  const source: Send['source'] = row.source_type === 'invoice'
+    ? {
+      type: 'invoice',
+      invoiceId: row.source_invoice_id as string,
+      address: row.source_address as string,
+      derivationIndex: row.source_derivation_index as number,
+    }
+    : {
+      type: 'account',
+      accountId: row.account_id as string,
+      address: row.source_address as string,
+      derivationIndex: row.source_derivation_index as number | null,
+    };
   return {
     id: row.id as string,
-    accountId: row.account_id as string,
+    source,
     destination: row.destination as string,
     amountRaw: row.amount_raw as string,
     status: row.status as SendStatus,
@@ -835,11 +1735,17 @@ export function createSqliteSendStore(db: Database): SendStore {
   return {
     async create(send: Send): Promise<Send> {
       db.prepare(`
-        INSERT INTO sends (id, account_id, destination, amount_raw, status, block_hash, idempotency_key, created_at, published_at, confirmed_at)
-        VALUES (@id, @account_id, @destination, @amount_raw, @status, @block_hash, @idempotency_key, @created_at, @published_at, @confirmed_at)
+        INSERT INTO sends (id, account_id, source_type, source_address, source_derivation_index, source_invoice_id,
+          destination, amount_raw, status, block_hash, idempotency_key, created_at, published_at, confirmed_at)
+        VALUES (@id, @account_id, @source_type, @source_address, @source_derivation_index, @source_invoice_id,
+          @destination, @amount_raw, @status, @block_hash, @idempotency_key, @created_at, @published_at, @confirmed_at)
       `).run({
         id: send.id,
-        account_id: send.accountId,
+        account_id: send.source.type === 'account' ? send.source.accountId : null,
+        source_type: send.source.type,
+        source_address: send.source.address,
+        source_derivation_index: send.source.derivationIndex,
+        source_invoice_id: send.source.type === 'invoice' ? send.source.invoiceId : null,
         destination: send.destination,
         amount_raw: send.amountRaw,
         status: send.status,
@@ -883,13 +1789,19 @@ export function createSqliteSendStore(db: Database): SendStore {
       const updated = { ...existing, ...patch };
       db.prepare(`
         UPDATE sends SET
-          account_id = @account_id, destination = @destination, amount_raw = @amount_raw,
+          account_id = @account_id, source_type = @source_type, source_address = @source_address,
+          source_derivation_index = @source_derivation_index, source_invoice_id = @source_invoice_id,
+          destination = @destination, amount_raw = @amount_raw,
           status = @status, block_hash = @block_hash, idempotency_key = @idempotency_key,
           created_at = @created_at, published_at = @published_at, confirmed_at = @confirmed_at
         WHERE id = @id
       `).run({
         id: updated.id,
-        account_id: updated.accountId,
+        account_id: updated.source.type === 'account' ? updated.source.accountId : null,
+        source_type: updated.source.type,
+        source_address: updated.source.address,
+        source_derivation_index: updated.source.derivationIndex,
+        source_invoice_id: updated.source.type === 'invoice' ? updated.source.invoiceId : null,
         destination: updated.destination,
         amount_raw: updated.amountRaw,
         status: updated.status,
@@ -900,6 +1812,117 @@ export function createSqliteSendStore(db: Database): SendStore {
         confirmed_at: updated.confirmedAt,
       });
       return updated;
+    },
+  };
+}
+
+function rowToRefund(row: Record<string, unknown>, send: Send): Refund {
+  return {
+    id: row.id as string,
+    depositId: row.deposit_id as string,
+    invoiceId: row.invoice_id as string | null,
+    sendId: row.send_id as string,
+    destination: row.destination as string,
+    amountRaw: row.amount_raw as string,
+    status: send.status,
+    idempotencyKey: row.idempotency_key as string,
+    createdAt: row.created_at as string,
+    publishedAt: send.publishedAt,
+    confirmedAt: send.confirmedAt,
+  };
+}
+
+export function createSqliteRefundStore(db: Database): RefundStore {
+  const getResult = (refundRow: Record<string, unknown>, created: boolean): RefundQueueResult => {
+    const sendId = refundRow.send_id as string;
+    const sendRow = db.prepare('SELECT * FROM sends WHERE id = ?').get(sendId) as Record<string, unknown> | undefined;
+    if (!sendRow) throw new Error(`Refund ${refundRow['id']} has no durable send`);
+    const send = rowToSend(sendRow);
+    return { refund: rowToRefund(refundRow, send), send, created };
+  };
+
+  const queue = db.transaction((deposit: Deposit, refund: Refund, send: Send): RefundQueueResult => {
+    const invoiceSourceMatches = deposit.invoiceId
+      ? send.source.type === 'invoice' && send.source.invoiceId === deposit.invoiceId
+      : send.source.type === 'account';
+    if (refund.depositId !== deposit.id || refund.invoiceId !== deposit.invoiceId
+      || refund.sendId !== send.id || refund.destination !== send.destination
+      || refund.amountRaw !== send.amountRaw || refund.idempotencyKey.length === 0
+      || send.source.address !== deposit.recipientAccount || !invoiceSourceMatches
+      || send.status !== 'queued' || send.blockHash !== null) {
+      throw new Error('Refund and durable send do not match the confirmed deposit');
+    }
+    const existingRow = db.prepare('SELECT * FROM refunds WHERE deposit_id = ? AND idempotency_key = ?').get(deposit.id, refund.idempotencyKey) as Record<string, unknown> | undefined;
+    if (existingRow) {
+      if (existingRow['deposit_id'] !== deposit.id
+        || existingRow['destination'] !== refund.destination
+        || existingRow['amount_raw'] !== refund.amountRaw) {
+        throw new Error('Refund idempotency key was reused with different parameters');
+      }
+      const existing = getResult(existingRow, false);
+      if (existing.send.source.address !== send.source.address) {
+        throw new Error('Refund idempotency key was reused with a different source account');
+      }
+      return existing;
+    }
+
+    const storedDeposit = db.prepare('SELECT amount_raw FROM deposits WHERE id = ?').get(deposit.id) as { amount_raw: string } | undefined;
+    if (!storedDeposit) throw new Error(`Deposit ${deposit.id} not found`);
+    const activeRefunds = db.prepare(`
+      SELECT refunds.amount_raw FROM refunds
+      JOIN sends ON sends.id = refunds.send_id
+      WHERE refunds.deposit_id = ? AND sends.status IN ('queued', 'published', 'confirmed')
+    `).all(deposit.id) as Array<{ amount_raw: string }>;
+    const refundedRaw = activeRefunds.reduce((total, row) => total + BigInt(row.amount_raw), 0n);
+    if (refundedRaw + BigInt(refund.amountRaw) > BigInt(storedDeposit.amount_raw)) {
+      throw new Error('Refund amount exceeds the unrefunded deposit amount');
+    }
+
+    db.prepare(`
+      INSERT INTO sends (id, account_id, source_type, source_address, source_derivation_index, source_invoice_id,
+        destination, amount_raw, status, block_hash, idempotency_key, created_at, published_at, confirmed_at)
+      VALUES (@id, @account_id, @source_type, @source_address, @source_derivation_index, @source_invoice_id,
+        @destination, @amount_raw, @status, @block_hash, @idempotency_key, @created_at, @published_at, @confirmed_at)
+    `).run({
+      id: send.id,
+      account_id: send.source.type === 'account' ? send.source.accountId : null,
+      source_type: send.source.type,
+      source_address: send.source.address,
+      source_derivation_index: send.source.derivationIndex,
+      source_invoice_id: send.source.type === 'invoice' ? send.source.invoiceId : null,
+      destination: send.destination,
+      amount_raw: send.amountRaw,
+      status: send.status,
+      block_hash: send.blockHash,
+      idempotency_key: send.idempotencyKey,
+      created_at: send.createdAt,
+      published_at: send.publishedAt,
+      confirmed_at: send.confirmedAt,
+    });
+    db.prepare(`
+      INSERT INTO refunds (id, deposit_id, invoice_id, send_id, destination, amount_raw, idempotency_key, created_at)
+      VALUES (@id, @deposit_id, @invoice_id, @send_id, @destination, @amount_raw, @idempotency_key, @created_at)
+    `).run({
+      id: refund.id,
+      deposit_id: deposit.id,
+      invoice_id: deposit.invoiceId,
+      send_id: send.id,
+      destination: refund.destination,
+      amount_raw: refund.amountRaw,
+      idempotency_key: refund.idempotencyKey,
+      created_at: refund.createdAt,
+    });
+    const storedRefund = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refund.id) as Record<string, unknown>;
+    return getResult(storedRefund, true);
+  });
+
+  return {
+    async queue(deposit, refund, send) {
+      return queue(deposit, refund, send);
+    },
+    async listByDepositId(depositId) {
+      const rows = db.prepare('SELECT * FROM refunds WHERE deposit_id = ? ORDER BY created_at, id').all(depositId) as Record<string, unknown>[];
+      return rows.map((row) => getResult(row, false).refund);
     },
   };
 }
@@ -917,19 +1940,25 @@ function rowToEvent(row: Record<string, unknown>): RaiFlowEvent {
 }
 
 export function createSqliteEventStore(db: Database): EventStore {
+  const appendWithOutbox = db.transaction((event: RaiFlowEvent): void => {
+    const result = db.prepare(`
+      INSERT INTO events (id, type, timestamp, resource_id, resource_type, data)
+      VALUES (@id, @type, @timestamp, @resource_id, @resource_type, @data)
+      ON CONFLICT(id) DO NOTHING
+    `).run({
+      id: event.id,
+      type: event.type,
+      timestamp: event.timestamp,
+      resource_id: event.resourceId,
+      resource_type: event.resourceType,
+      data: JSON.stringify(event.data),
+    });
+    if (result.changes === 1) enqueueWebhookOutbox(db, event, event.timestamp);
+  });
+
   return {
     async append(event: RaiFlowEvent): Promise<void> {
-      db.prepare(`
-        INSERT INTO events (id, type, timestamp, resource_id, resource_type, data)
-        VALUES (@id, @type, @timestamp, @resource_id, @resource_type, @data)
-      `).run({
-        id: event.id,
-        type: event.type,
-        timestamp: event.timestamp,
-        resource_id: event.resourceId,
-        resource_type: event.resourceType,
-        data: JSON.stringify(event.data),
-      });
+      appendWithOutbox(event);
     },
 
     async list(options?: EventQueryOptions): Promise<RaiFlowEvent[]> {
@@ -972,6 +2001,101 @@ function rowToWebhook(row: Record<string, unknown>): WebhookEndpoint {
     secret: row.secret as string,
     eventTypes: JSON.parse(row.event_types as string) as string[],
     createdAt: row.created_at as string,
+  };
+}
+
+export function createSqliteWebhookOutboxStore(db: Database): WebhookOutboxStore {
+  const claim = db.transaction((workerId: string, now: string, leaseUntil: string, limit: number): WebhookOutboxDelivery[] => {
+    const due = db.prepare(`
+      SELECT id FROM webhook_outbox
+      WHERE (status = 'pending' AND next_attempt_at <= ?)
+         OR (status = 'processing' AND lease_until <= ?)
+      ORDER BY next_attempt_at ASC, created_at ASC
+      LIMIT ?
+    `).all(now, now, limit) as Array<{ id: string }>;
+    if (due.length === 0) return [];
+    const update = db.prepare(`
+      UPDATE webhook_outbox
+      SET status = 'processing', lease_owner = ?, lease_until = ?, updated_at = ?
+      WHERE id = ? AND (
+        (status = 'pending' AND next_attempt_at <= ?)
+        OR (status = 'processing' AND lease_until <= ?)
+      )
+    `);
+    for (const row of due) update.run(workerId, leaseUntil, now, row.id, now, now);
+    const ids = due.map((row) => row.id);
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = db.prepare(`
+      SELECT
+        o.id AS outbox_id, o.attempt_count,
+        e.sequence, e.id, e.type, e.timestamp, e.resource_id, e.resource_type, e.data,
+        w.id AS endpoint_id, w.url, w.secret, w.event_types, w.created_at AS endpoint_created_at
+      FROM webhook_outbox AS o
+      JOIN events AS e ON e.id = o.event_id
+      JOIN webhooks AS w ON w.id = o.webhook_id
+      WHERE o.lease_owner = ? AND o.id IN (${placeholders})
+      ORDER BY o.next_attempt_at ASC, o.created_at ASC
+    `).all(workerId, ...ids) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: row.outbox_id as string,
+      attemptCount: row.attempt_count as number,
+      event: rowToEvent(row),
+      endpoint: {
+        id: row.endpoint_id as string,
+        url: row.url as string,
+        secret: row.secret as string,
+        eventTypes: JSON.parse(row.event_types as string) as string[],
+        createdAt: row.endpoint_created_at as string,
+      },
+    }));
+  });
+
+  const record = db.transaction((jobId: string, workerId: string, attempt: WebhookOutboxAttempt): boolean => {
+    const status = attempt.status === 'retry' ? 'pending' : attempt.status;
+    const update = db.prepare(`
+      UPDATE webhook_outbox SET
+        status = ?, attempt_count = ?, next_attempt_at = COALESCE(?, next_attempt_at),
+        lease_owner = NULL, lease_until = NULL, last_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_owner = ?
+    `).run(
+      status,
+      attempt.number,
+      attempt.nextRetryAt,
+      attempt.error,
+      attempt.attemptedAt,
+      jobId,
+      workerId,
+    );
+    if (update.changes !== 1) return false;
+    const job = db.prepare('SELECT webhook_id, event_id FROM webhook_outbox WHERE id = ?').get(jobId) as {
+      webhook_id: string;
+      event_id: string;
+    };
+    db.prepare(`
+      INSERT INTO webhook_deliveries (
+        id, webhook_id, event_id, attempt, status, response_code, response_body, next_retry_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      job.webhook_id,
+      job.event_id,
+      attempt.number,
+      attempt.status,
+      attempt.responseCode,
+      attempt.responseBody ?? attempt.error,
+      attempt.nextRetryAt,
+      attempt.attemptedAt,
+    );
+    return true;
+  });
+
+  return {
+    async claimReady(workerId, now, leaseUntil, limit) {
+      return claim.immediate(workerId, now, leaseUntil, Math.max(1, Math.min(limit, 100)));
+    },
+    async recordAttempt(jobId, workerId, attempt) {
+      return record.immediate(jobId, workerId, attempt);
+    },
   };
 }
 

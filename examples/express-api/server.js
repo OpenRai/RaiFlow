@@ -1,281 +1,128 @@
 #!/usr/bin/env node
-// =============================================================================
-// RaiFlow Express API Example
-// =============================================================================
-//
-// Demonstrates @openrai/raiflow-sdk.
-//
-// All RaiFlow interaction goes through the SDK — no raw HTTP to the runtime.
 
 import express from 'express';
-import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
+import { dirname, join } from 'node:path';
 import { RaiFlowClient } from '@openrai/raiflow-sdk';
-import { xnoToRaw, xnoDisplay, truncateAddress, RAW_PER_XNO } from '../shared/nano-utils.mjs';
 
-// =============================================================================
-// Configuration
-// =============================================================================
+const directory = dirname(fileURLToPath(import.meta.url));
+const PORT = Number.parseInt(process.env.PORT ?? '3002', 10);
 
-const PORT = parseInt(process.env.PORT ?? '3002', 10);
-const RAIFLOW_URL = process.env.RAIFLOW_URL ?? 'http://localhost:3100';
-const DEFAULT_RECIPIENT_ACCOUNT =
-  process.env.RAIFLOW_RECIPIENT_ACCOUNT ??
-  'nano_3strnmn7h9b7oghxa6h9ckrpf5r454fsobpicixps6xwiwc5q4hat7wjbpqz';
-
-// =============================================================================
-// SDK client
-// =============================================================================
-
-const raiflow = RaiFlowClient.initialize({ baseUrl: RAIFLOW_URL });
-
-// =============================================================================
-// XNO → raw conversion (simple, no external deps)
-// =============================================================================
-//
-// 1 XNO = 10^30 raw. Accepts strings like "1.5" or "0.001".
-
-function truncateId(id) {
-  return id.length > 8 ? id.slice(0, 8) + '…' : id;
-}
-
-// =============================================================================
-// SSE client — polls runtime and pushes new events to browser
-// =============================================================================
-
-const activeSSEStreams = new Map(); // invoiceId → Set<{ res }>
-
-async function pollEvents(invoiceId, afterEventId) {
-  try {
-    const { data: events } = await raiflow.invoices.listEvents(invoiceId, {
-      after: afterEventId,
-    });
-    return events;
-  } catch {
-    return [];
-  }
-}
-
-async function startSSEProducer(invoiceId) {
-  let lastEventId = undefined;
-
-  while (activeSSEStreams.has(invoiceId)) {
-    const events = await pollEvents(invoiceId, lastEventId);
-    if (events.length > 0) {
-      lastEventId = events[events.length - 1].id;
-      for (const res of activeSSEStreams.get(invoiceId) ?? []) {
-        for (const event of events) {
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        }
-      }
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
-
-function addSSEClient(invoiceId, res) {
-  if (!activeSSEStreams.has(invoiceId)) {
-    activeSSEStreams.set(invoiceId, new Set());
-    startSSEProducer(invoiceId).catch(() => {
-      activeSSEStreams.delete(invoiceId);
-    });
-  }
-  activeSSEStreams.get(invoiceId)?.add(res);
-  res.on('close', () => {
-    activeSSEStreams.get(invoiceId)?.delete(res);
+function getClient() {
+  const apiKey = process.env.RAIFLOW_API_KEY;
+  if (!apiKey) throw new Error('Set RAIFLOW_API_KEY before starting this example.');
+  return RaiFlowClient.initialize({
+    baseUrl: process.env.RAIFLOW_URL ?? 'http://localhost:3100',
+    apiKey,
   });
 }
 
-// =============================================================================
-// Express app
-// =============================================================================
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
+
+function renderAccount(account, deposits) {
+  const addressJson = JSON.stringify(account.address).replace(/</g, '\\u003c');
+  const accountId = escapeHtml(account.id);
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Watched Nano address</title>
+<style>body{font:16px system-ui;max-width:760px;margin:3rem auto;padding:0 1rem;color:#222}code{overflow-wrap:anywhere}.deposit{padding:.7rem 0;border-bottom:1px solid #ddd}</style></head>
+<body><h1>Watched address</h1><p>RaiFlow observes this address and records confirmed deposits. It cannot sign or spend from it.</p>
+<p>Address: <code>${escapeHtml(account.address)}</code></p><p>Account ID: <code>${accountId}</code></p>
+<h2>Confirmed deposits</h2><div id="deposits">${deposits.length
+    ? deposits.map((deposit) => `<div class="deposit">${escapeHtml(deposit.amountRaw)} raw · ${escapeHtml(deposit.disposition)} · ${escapeHtml(deposit.blockHash)}</div>`).join('')
+    : '<p>No confirmed deposits recorded yet.</p>'}</div>
+<h2>Durable account events</h2><ol id="events"><li>Loading events…</li></ol>
+<script>
+  const accountId = ${JSON.stringify(account.id)};
+  const address = ${addressJson};
+  const cursorKey = 'raiflow-watched-cursor:' + accountId;
+  const list = document.getElementById('events');
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(cursorKey) || '{}');
+    for (const event of (Array.isArray(saved.events) ? saved.events : [])) {
+      const row = document.createElement('li');
+      row.textContent = new Date(event.timestamp).toLocaleString() + ' — ' + event.type;
+      list.append(row);
+    }
+  } catch { localStorage.removeItem(cursorKey); }
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    const params = new URLSearchParams({ address });
+    const after = saved.cursor;
+    if (after) params.set('after', after);
+    try {
+      const response = await fetch('/api/accounts/' + encodeURIComponent(accountId) + '/events?' + params);
+      if (!response.ok) return;
+      const page = await response.json();
+      const known = new Set((saved.events || []).map((event) => event.id));
+      const events = [...(saved.events || []), ...page.data.filter((event) => !known.has(event.id))].slice(-100);
+      for (const event of page.data) {
+        if (known.has(event.id)) continue;
+        const row = document.createElement('li');
+        row.textContent = new Date(event.timestamp).toLocaleString() + ' — ' + event.type;
+        list.append(row);
+        while (list.children.length > 100) list.firstElementChild.remove();
+      }
+      if (page.nextCursor) {
+        saved = { cursor: page.nextCursor, events };
+        localStorage.setItem(cursorKey, JSON.stringify(saved));
+      }
+      if (list.children.length === 1 && list.firstElementChild.textContent === 'Loading events…') list.replaceChildren();
+    } catch { /* Retry from the last saved sequence on the next poll. */ }
+    finally { polling = false; }
+  }
+  void poll();
+  setInterval(poll, 2000);
+</script></body></html>`;
+}
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(join(dirname(fileURLToPath(import.meta.url)), 'public')));
+app.use(express.urlencoded({ extended: false }));
+app.use(express.static(join(directory, 'public')));
 
-// POST /invoices — create invoice and redirect to status page
-app.post('/invoices', async (req, res) => {
-  const { amount, policy, order_id, recipient_account } = req.body;
-
-  if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-    res.status(400).send('Invalid amount');
-    return;
-  }
-
-  const raw = xnoToRaw(amount);
-  const completionPolicy = policy === 'exact'
-    ? { type: 'exact' }
-    : { type: 'at_least' };
-
-  const metadata = order_id ? { orderId: order_id } : undefined;
-  const recipientAccount = String(recipient_account || DEFAULT_RECIPIENT_ACCOUNT).trim();
-
+app.post('/watch', async (req, res) => {
+  const address = String(req.body.address ?? '').trim();
   try {
-    const invoice = await raiflow.invoices.create({
-      recipientAccount,
-      expectedAmountRaw: raw,
-      completionPolicy,
-      metadata,
+    const client = getClient();
+    const account = await client.accounts.createWatched({
+      address,
+      idempotencyKey: `watch-address:${address}`,
     });
-
-    // Register webhook as well (backup event channel)
-    try {
-      await raiflow.webhooks.create({
-        url: `http://localhost:${PORT}/webhooks`,
-        eventTypes: [
-          'invoice.created',
-          'payment.confirmed',
-          'invoice.completed',
-          'invoice.expired',
-          'invoice.canceled',
-        ],
-      });
-    } catch {
-      // Webhook registration may fail if already registered — that's fine
-    }
-
-    res.redirect(`/invoices/${invoice.id}`);
-  } catch (err) {
-    res.status(500).send(`Failed to create invoice: ${err instanceof Error ? err.message : String(err)}`);
+    const { data: deposits } = await client.accounts.listDeposits(account.id);
+    res.status(200).send(renderAccount(account, deposits));
+  } catch (error) {
+    res.status(400).send(`<!doctype html><html><body><h1>Could not watch address</h1><p>${escapeHtml(error instanceof Error ? error.message : String(error))}</p><a href="/">Try again</a></body></html>`);
   }
 });
 
-// GET /invoices/:id — invoice status page with SSE stream
-app.get('/invoices/:id', async (req, res) => {
-  const { id } = req.params;
-
-  let invoice;
+app.get('/api/accounts/:id/events', async (req, res) => {
   try {
-    invoice = await raiflow.invoices.get(id);
-  } catch {
-    res.status(404).send(`Invoice not found: ${id}`);
-    return;
+    const client = getClient();
+    const account = await client.accounts.get(req.params.id);
+    const after = typeof req.query.after === 'string' ? req.query.after : undefined;
+    const page = await client.events.list({ ...(after ? { after } : {}), limit: 100 });
+    const address = account.address;
+    const data = page.data.filter((event) => {
+      const eventData = event.data ?? {};
+      return event.resourceId === account.id
+        || eventData.account?.id === account.id
+        || eventData.account?.address === address
+        || eventData.deposit?.recipientAccount === address;
+    });
+    const sequence = page.data[page.data.length - 1]?.sequence;
+    res.status(200).json({
+      data,
+      nextCursor: page.nextCursor ?? (sequence === undefined ? after ?? null : String(sequence)),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
   }
-
-  const amountDisplay = xnoDisplay(invoice.expectedAmountRaw);
-
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Invoice ${truncateId(invoice.id)}</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1rem; background: #0f0f0f; color: #e0e0e0; }
-    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
-    .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: #888; margin-bottom: 0.25rem; }
-    .value { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; font-family: monospace; }
-    .value.address { font-size: 1rem; word-break: break-all; }
-    .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.875rem; font-weight: 600; }
-    .badge-open { background: #1e3a5f; color: #60a5fa; }
-    .badge-completed { background: #14532d; color: #4ade80; }
-    .badge-expired { background: #7c2d12; color: #fb923c; }
-    .badge-canceled { background: #3f3f46; color: #a1a1aa; }
-    #event-log { list-style: none; padding: 0; margin: 0; }
-    #event-log li { padding: 0.75rem 1rem; border-bottom: 1px solid #2a2a2a; font-size: 0.875rem; }
-    #event-log li:last-child { border-bottom: none; }
-    .event-type { font-weight: 600; color: #60a5fa; }
-    .event-time { color: #666; font-size: 0.75rem; margin-left: 0.5rem; }
-    .empty { color: #666; font-style: italic; }
-    .nano-uri { font-size: 0.875rem; color: #60a5fa; word-break: break-all; }
-    h1 { font-size: 1.25rem; margin-bottom: 1.5rem; }
-    a { color: #60a5fa; }
-    .hint { font-size: 0.875rem; color: #888; margin-top: 0.5rem; }
-  </style>
-</head>
-<body>
-  <h1>Invoice <a href="/">← Back</a></h1>
-
-  <div class="card">
-    <div class="label">Status</div>
-    <div class="value"><span class="badge badge-${invoice.status}">${invoice.status}</span></div>
-
-    <div class="label">Send to this address</div>
-    <div class="value address">${invoice.recipientAccount}</div>
-    <div class="nano-uri">nano:${invoice.recipientAccount.replace('nano_', 'nano_')}</div>
-
-    <div class="label">Amount</div>
-    <div class="value">${amountDisplay} XNO</div>
-
-    <div class="label">Policy</div>
-    <div class="value" style="font-size:1rem; font-family:system-ui;">${invoice.completionPolicy?.type ?? 'at_least'}</div>
-
-    <div class="label">Confirmed</div>
-    <div class="value">${xnoDisplay(invoice.confirmedAmountRaw)} / ${amountDisplay} XNO</div>
-
-    ${invoice.metadata?.orderId ? `<div class="label">Order ID</div><div class="value" style="font-size:1rem;">${invoice.metadata.orderId}</div>` : ''}
-  </div>
-
-  <div class="card">
-    <div class="label">Live Events</div>
-    <ul id="event-log">
-      <li class="empty">Connecting…</li>
-    </ul>
-  </div>
-
-  <script>
-    const events = [];
-    const log = document.getElementById('event-log');
-
-    function formatEvent(event) {
-      const time = new Date(event.createdAt).toLocaleTimeString();
-      const type = event.type;
-      let extra = '';
-      if (type === 'invoice.created') extra = 'Invoice created';
-      if (type === 'payment.confirmed') extra = \`Payment: \${event.data.payment.amountRaw} raw\`;
-      if (type === 'invoice.completed') extra = 'Invoice completed!';
-      if (type === 'invoice.expired') extra = 'Invoice expired';
-      if (type === 'invoice.canceled') extra = 'Invoice canceled';
-      return \`<span class="event-type">\${type}</span><span class="event-time">\${time}</span> — \${extra}\`;
-    }
-
-    function render() {
-      if (events.length === 0) {
-        log.innerHTML = '<li class="empty">No events yet. Send XNO to the address above.</li>';
-        return;
-      }
-      log.innerHTML = events.map(e => \`<li>\${formatEvent(e)}</li>\`).join('');
-    }
-
-    // SSE connection for live events
-    const es = new EventSource('/invoices/${invoice.id}/events');
-    es.onmessage = (e) => {
-      const event = JSON.parse(e.data);
-      events.push(event);
-      render();
-    };
-    es.onerror = () => {
-      log.innerHTML = '<li class="empty">Connection lost. Refreshing…</li>';
-      setTimeout(() => location.reload(), 3000);
-    };
-  </script>
-</body>
-</html>`);
 });
 
-// GET /invoices/:id/events — SSE stream of invoice events
-app.get('/invoices/:id/events', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-
-  addSSEClient(req.params.id, res);
-});
-
-// POST /webhooks — receive events from runtime (backup channel)
-app.post('/webhooks', express.json(), async (req, res) => {
-  res.status(204).end();
-});
-
-// GET /webhooks — health check
-app.get('/webhooks', (_req, res) => {
-  res.json({ ok: true });
-});
-
-app.listen(PORT, () => {
-  console.log(`[express-demo] http://localhost:${PORT}`);
-  console.log(`[raiflow] pointing to ${RAIFLOW_URL}`);
-});
+app.listen(PORT, () => console.log(`[watched-payment-demo] http://localhost:${PORT}`));

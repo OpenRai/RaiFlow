@@ -13,6 +13,7 @@
  */
 
 import { NanoClient } from '@openrai/nano-core';
+import { randomUUID } from 'node:crypto';
 import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
 import type { ConfirmedBlock, WatcherSink } from '@openrai/model';
 
@@ -27,6 +28,8 @@ export interface NanoWebSocketConfig {
   reconnectIntervalMs?: number;
   /** Maximum number of reconnection attempts. Default: Infinity */
   maxReconnectAttempts?: number;
+  /** Called after the node acknowledges the current confirmation subscription. */
+  onSubscriptionAck?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,9 +51,11 @@ interface WsConfirmationMessage {
 }
 
 interface WsMessage {
-  topic: string;
+  topic?: string;
   time?: string;
-  message: WsConfirmationMessage;
+  message?: WsConfirmationMessage;
+  ack?: string;
+  id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +66,7 @@ export class NanoWebSocketClient {
   private readonly client: NanoClient;
   private readonly baseReconnectIntervalMs: number;
   private readonly maxReconnectAttempts: number;
+  private readonly subscriptionAckCallback?: () => void;
 
   private ws: WebSocket | null = null;
   private sink: WatcherSink | null = null;
@@ -68,6 +74,8 @@ export class NanoWebSocketClient {
   private reconnectAttempts = 0;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSubscriptionId: string | null = null;
+  private subscriptionAcknowledged = false;
 
   constructor(config: NanoWebSocketConfig) {
     this.client = NanoClient.initialize({
@@ -75,6 +83,7 @@ export class NanoWebSocketClient {
     });
     this.baseReconnectIntervalMs = config.reconnectIntervalMs ?? 5_000;
     this.maxReconnectAttempts = config.maxReconnectAttempts ?? Infinity;
+    this.subscriptionAckCallback = config.onSubscriptionAck;
   }
 
   getAuditReport(): EndpointAuditRecord[] {
@@ -156,20 +165,22 @@ export class NanoWebSocketClient {
     }
 
     this.reconnectAttempts = 0;
-    this.sendSubscription();
-
-    this.ws.addEventListener('message', (event: MessageEvent) => {
+    const socket = this.ws;
+    socket.addEventListener('message', (event: MessageEvent) => {
       this.handleMessage(event.data as string);
     });
 
-    this.ws.addEventListener('close', () => {
+    socket.addEventListener('close', () => {
       this.ws = null;
+      this.subscriptionAcknowledged = false;
+      this.pendingSubscriptionId = null;
       if (!this.stopped) this.scheduleReconnect();
     });
 
-    this.ws.addEventListener('error', () => {
+    socket.addEventListener('error', () => {
       // 'error' is always followed by 'close'; reconnection handled there.
     });
+    this.sendSubscription();
   }
 
   private scheduleReconnect(): void {
@@ -192,23 +203,20 @@ export class NanoWebSocketClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const accounts = Array.from(this.watchedAccounts);
+    const id = randomUUID();
+    this.pendingSubscriptionId = id;
+    this.subscriptionAcknowledged = false;
     const subscribeMsg =
-      accounts.length > 0
-        ? {
-            action: 'subscribe',
-            topic: 'confirmation',
-            options: {
-              // Subscribe to all confirmations; we'll client-side filter for
-              // sends to our watched accounts (observe mode, no private keys).
-              // Some nodes support accounts_filter which fires for blocks ON
-              // those accounts but we need the broader stream for inbound sends.
-              all_local_accounts: false,
-            },
-          }
-        : {
-            action: 'subscribe',
-            topic: 'confirmation',
-          };
+      {
+        action: 'subscribe',
+        topic: 'confirmation',
+        ack: true,
+        id,
+        options: {
+          all_local_accounts: false,
+          accounts,
+        },
+      };
 
     this.ws.send(JSON.stringify(subscribeMsg));
   }
@@ -231,7 +239,15 @@ export class NanoWebSocketClient {
       return; // ignore malformed frames
     }
 
-    if (parsed.topic !== 'confirmation') return;
+    if (parsed.ack === 'subscribe') {
+      if (parsed.id && parsed.id === this.pendingSubscriptionId) {
+        this.subscriptionAcknowledged = true;
+        this.pendingSubscriptionId = null;
+        this.onSubscriptionAck();
+      }
+      return;
+    }
+    if (!this.subscriptionAcknowledged || parsed.topic !== 'confirmation') return;
 
     const msg = parsed.message;
     const block = msg?.block;
@@ -244,8 +260,9 @@ export class NanoWebSocketClient {
     const recipient = block.link_as_account;
     if (!recipient) return;
 
-    // Filter to only the accounts we're watching (incoming or outgoing).
-    if (!this.watchedAccounts.has(recipient) && !this.watchedAccounts.has(msg.account)) return;
+    // Deposit ingestion observes sends into watched addresses. Outgoing sends
+    // from a watched account are tracked by the send service, not as deposits.
+    if (!this.watchedAccounts.has(recipient)) return;
 
     const confirmedBlock: ConfirmedBlock = {
       blockHash: msg.hash,
@@ -259,5 +276,9 @@ export class NanoWebSocketClient {
       // Sink errors should not crash the watcher; callers are responsible
       // for error handling inside their sink implementation.
     });
+  }
+
+  private onSubscriptionAck(): void {
+    this.subscriptionAckCallback?.();
   }
 }

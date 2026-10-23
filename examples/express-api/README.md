@@ -1,16 +1,10 @@
-# Express API Example
+# Watched Payment Example
 
-> **Status:** This example uses the prototype v1 API. It will be rebuilt against the v2 runtime.
+This Express example watches an external Nano address. RaiFlow stores confirmed
+deposit records and account events; the application never handles private keys,
+proof of work, frontiers, receive blocks, or watcher configuration.
 
-A reference Express.js integration showing how to create RaiFlow invoices and stream live payment events using the `@openrai/raiflow-sdk`.
-
-## Prerequisites
-
-- Node.js 20+
-- pnpm
-- RaiFlow runtime v2 running
-
-## Running
+Set `RAIFLOW_URL` and `RAIFLOW_API_KEY`, then run:
 
 ```bash
 cd examples/express-api
@@ -18,20 +12,10 @@ pnpm install
 pnpm start
 ```
 
-Then open `http://localhost:3002` in your browser.
-
-## What it demonstrates (prototype API)
-
-- **Creating invoices** via `RaiFlowClient.invoices.create()` with XNO amounts
-- **Polling invoice state** via `RaiFlowClient.invoices.get()`
-- **Streaming live events** via SSE with cursor-based polling
-- **Registering webhooks** via `RaiFlowClient.webhooks.create()`
-- **Completion policies** — `at_least` (default) and `exact` policy
-
-## v2 API migration
-
-When the v2 runtime is complete, this example will be rebuilt to demonstrate:
-- Wallet account creation and management
-- Invoice creation with derived pay addresses
-- Idempotent sends from managed accounts
-- Pre-signed block publishing
+Open `http://localhost:3002` and submit an address. Creating the watched
+account uses `watch-address:<address>` as its idempotency key, so retrying the
+same request resolves the same runtime account. The event panel reads the
+persisted global sequence and saves the last handled sequence in browser storage;
+after a refresh or connection loss it resumes with the `after` cursor. Deposit
+history includes the runtime's matching disposition when an incoming transfer
+also matched an invoice.

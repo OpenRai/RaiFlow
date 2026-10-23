@@ -80,7 +80,7 @@ Use `@openrai/raiflow-sdk` when your application talks to RaiFlow over HTTP:
 pnpm add @openrai/raiflow-sdk
 ```
 
-The SDK provides a typed `RaiFlowClient` with resource classes for accounts, sends, invoices, webhooks, blocks, and work, plus re-exports of all canonical types from `@openrai/model`.
+The SDK provides a typed `RaiFlowClient` with resource classes for accounts, deposits and refunds, sends, invoices, webhooks, blocks, and work, plus re-exports of all canonical types from `@openrai/model`.
 
 See [`packages/raiflow-sdk/README.md`](packages/raiflow-sdk/README.md) for the full API reference.
 
@@ -131,7 +131,7 @@ RaiFlow operates in one of two modes, set at startup via `RAIFLOW_MODE`:
 
 **Custodial mode** — RaiFlow asks an OWS wallet to derive accounts and sign canonical state blocks, while RaiFlow manages orchestration and PoW. RaiFlow never receives raw seed material. Configure `custody.wallet`, `custody.credential`, `custody.vaultPath`, and `custody.representative` in `raiflow.yml`.
 
-Custodial startup fails closed unless the installed OWS binding exposes indexed wallet derivation and the installed `@openrai/nano-core` exposes canonical state-block encoding. Until those coordinated package releases are published, link the sibling `ows-core` and `nano-core` source packages when testing custodial mode from this workspace.
+Custodial mode uses `@open-wallet-standard/core` 1.3.2 from the pinned OpenRai OWS revision `56184be`, `@openrai/nano-core` 3.6.0, and `nano-rspow-node` 0.17.2. The OWS dependency builds its Node native binding during installation. Building from source requires Rust stable, a C/C++ toolchain, `pkg-config`, OpenSSL development headers, and a supported target: macOS x64/arm64 or Linux x64/arm64 with GNU libc. The Docker builder installs these tools and compiles the binding. Custodial startup checks indexed derivation and signs a canonical state-block probe through OWS before serving requests; RaiFlow does not load wallet key material.
 
 **Non-custodial mode** — RaiFlow acts as a relay and monitor. All signing happens client-side. Watched accounts, block publishing, and work generation are available. Managed accounts, sends, and invoices are not — those require custody.
 
@@ -153,6 +153,59 @@ services:
     volumes:
       - ./my-raiflow.yml:/app/raiflow.yml:ro
 ```
+
+## Minimum Inbound Amount
+
+RaiFlow admits inbound transfers of at least **0.000001 XNO** by default.
+Configure the inclusive minimum per transfer in `raiflow.yml`:
+
+```yaml
+receiving:
+  minimumAmountXno: "0.001"
+```
+
+`RAIFLOW_MINIMUM_RECEIVE_AMOUNT_XNO=0.001` overrides the YAML value at startup.
+The YAML setting also accepts an `env:YOUR_VARIABLE` reference. Use a quoted,
+positive decimal XNO string with up to 30 decimal places. To explicitly admit
+every positive transfer, set `"0.000000000000000000000000000001"` (1 raw).
+Embedded runtimes accept `new Runtime({ minimumReceiveAmountXno: "0.001" })`;
+HTTP SDK clients use the policy configured on their runtime instance.
+
+Transfers below the minimum create no deposit, payment, observation event, or
+receive job. They do not contribute to invoice totals, even if many small
+transfers would add up to the invoice amount. Unreceived transfers remain on
+the Nano node as receivables. New invoices below the minimum are rejected.
+Outgoing sends have no minimum imposed by this setting.
+
+Restart to apply a changed minimum. Existing records remain, and recovery of
+already signed or published operations continues. Raising the minimum also
+affects payments to existing invoices; lowering it does not rebuild previously
+skipped historical payments. Choose the minimum before issuing invoices.
+This setting reduces dust processing; sustained transfers above the minimum
+still need the storage budgets below.
+
+## Inbound Storage Budgets
+
+RaiFlow keeps confirmed deposit, payment, event, webhook, and recovery evidence.
+It does not expire old records. New inbound transfers pause before persistence
+when either storage limit is reached; their receivables remain on the Nano node
+for recovery after capacity is raised. Existing deposits and operation recovery
+continue to work. Check `GET /health/storage` to see current usage and pause
+status. Raising limits requires a runtime restart.
+
+```yaml
+storage:
+  driver: "sqlite"
+  path: "./raiflow.db"
+  maxDatabaseBytes: 1073741824       # default: 1 GiB
+  maxDepositsPerAccount: 100000      # default: 100,000 per destination address
+```
+
+`RAIFLOW_STORAGE_MAX_DATABASE_BYTES` and
+`RAIFLOW_STORAGE_MAX_DEPOSITS_PER_ACCOUNT` override the YAML values. The
+database byte limit caps SQLite pages and the inbound pause begins before the
+limit to leave room for WAL activity and recovery writes. The per-account limit
+counts retained confirmed deposit records; it never deletes existing history.
 
 ## Running The Current Code
 
@@ -221,17 +274,18 @@ RaiFlow is actively developed. The v2 foundation is solid and the wallet domain 
 | Operator dashboard (SSR) | Shipped |
 | Block publish escape hatch | Shipped |
 | Work generation escape hatch | Shipped |
-| Pre-signed block flows | In progress |
-| Restart recovery & hardening | In progress |
+| Pre-signed block publishing | Shipped |
+| Durable webhook outbox and retry history | Shipped |
+| Send and receive restart recovery | Shipped |
+| Explicit deposit refunds through the send pipeline | Shipped |
+| Minimum inbound amount policy | Shipped |
+| Keep-all inbound storage budgets and pause status | Shipped |
 
-What is not fully wired yet:
-
-- The invoice domain is operational but still runs partially on the legacy storage adapter while being migrated to the new event-native stack.
-- Some hardening (auth edge cases, deep restart recovery, full integration coverage) is still ahead.
+Storage budgets preserve existing history and pause inbound persistence before database or per-destination deposit limits. The minimum inbound amount rejects dust before persistence; the budgets bound sustained above-minimum traffic. See [progress](docs/progress.md) and [the roadmap](ROADMAP.md) for implementation status.
 
 If you are evaluating the repository today, the safest reading is:
 
-> The runtime direction is set, the core packages are real, and the public API surface now covers accounts, sends, invoices, and webhooks.
+> The runtime handles accounts, deposits, refunds, sends, invoices, durable events, and webhooks. Configured inbound minima and storage budgets control which transfers are persisted; history is retained and ingestion pauses at a limit.
 
 ## Current Runtime Surface
 
@@ -244,6 +298,7 @@ The runtime exposes the following HTTP surface:
 **System**
 - `GET /health/live`
 - `GET /health/ready`
+- `GET /health/storage` — storage budget and inbound pause status
 - `GET /v1/version`
 
 **Accounts**
@@ -258,6 +313,11 @@ The runtime exposes the following HTTP surface:
 
 **Sends**
 - `GET /v1/sends/:id` — global send lookup
+
+**Deposits and refunds**
+- `GET /v1/accounts/:id/deposits` — confirmed inbound deposit history
+- `GET /v1/deposits/:depositId/refunds`
+- `POST /v1/deposits/:depositId/refunds` — requires explicit destination and idempotency key
 
 **Blocks** (escape hatch for pre-signed flows)
 - `POST /v1/blocks` — publish a pre-signed block JSON string

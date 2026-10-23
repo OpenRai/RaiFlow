@@ -169,8 +169,6 @@ export class NanoPoller {
         const recipient = blockInfo.contents.linkAsAccount;
         if (!recipient || !this.watchedAccounts.has(recipient)) continue;
 
-        this.seenHashes.add(hash);
-
         const confirmedBlock: ConfirmedBlock = {
           blockHash: hash,
           senderAccount: blockInfo.blockAccount,
@@ -181,9 +179,12 @@ export class NanoPoller {
             : new Date().toISOString(),
         };
 
-        this.sink?.handleConfirmedBlock(confirmedBlock).catch(() => {
-          // Sink errors must not crash the poller.
-        });
+        try {
+          await this.sink?.handleConfirmedBlock(confirmedBlock);
+          this.seenHashes.add(hash);
+        } catch {
+          // Keep the hash eligible so the next poll retries failed ingestion.
+        }
       }
     }
   }

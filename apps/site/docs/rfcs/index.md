@@ -11,6 +11,7 @@ RFCs describe the intended v2 system design. The codebase is still catching up t
 - [`0001`](./0001-project-framing) — project framing and scope fence
 - [`0002`](./0002-observe-mode) — unified runtime architecture
 - [`0003`](./0003-event-model) — resource and event model
+- [`0004`](./0004-custodial-modes) — custodial modes and SDK philosophy
 
 ## What RFCs Are For
 

@@ -5,7 +5,7 @@ import { Runtime } from '../runtime.js';
 import { createHandler } from '../handler.js';
 import { AccountStateSync } from '../account-state-sync.js';
 import { SubscriptionManager } from '../subscription-manager.js';
-import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT, createTestInvoice, createHandlerWithRuntime, createHandlerWithInvoice, createMockRpcClient } from './helpers.js';
+import { createTestConfig, createTestRuntime, req, parseJson, ONE_XNO, TEST_ACCOUNT, createTestInvoice, createHandlerWithRuntime, createHandlerWithInvoice, createMockRpcClient, makeBlock } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -176,6 +176,32 @@ describe('GET /api/health', () => {
 });
 
 describe('v3 routing and diagnostics', () => {
+  it('reports storage pause status from an unauthenticated health endpoint', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(
+      runtime,
+      createTestConfig(),
+      undefined,
+      undefined,
+      undefined,
+      () => ({
+        databaseBytes: 1024,
+        maxDatabaseBytes: 1024,
+        remainingBytes: 0,
+        globallyPaused: false,
+        pausedAccountCount: 1,
+      }),
+    );
+
+    const response = await handler(new Request('http://localhost/health/storage'));
+    expect(response.status).toBe(503);
+    expect(await parseJson(response)).toMatchObject({
+      status: 'paused',
+      inboundProcessing: 'paused',
+      pausedAccountCount: 1,
+    });
+  });
+
   it('reports readiness from a live RPC probe, not configured URLs alone', async () => {
     const healthCheck = vi.fn().mockResolvedValue(undefined);
     const runtime = new Runtime({
@@ -287,6 +313,43 @@ describe('POST /api/invoices', () => {
     expect(res.status).toBe(400);
     const body = await parseJson(res) as { error: { code: string } };
     expect(body.error.code).toBe('bad_request');
+  });
+
+  it('accepts an exact XNO decimal string and stores the corresponding raw amount', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+
+    const res = await handler(req('POST', '/api/invoices', {
+      body: { accountKey: 'acct-1', expectedAmount: '0.001' },
+    }));
+
+    expect(res.status).toBe(201);
+    expect((await parseJson(res) as { expectedAmountRaw: string }).expectedAmountRaw)
+      .toBe('1000000000000000000000000000');
+  });
+
+  it.each([
+    ['numeric raw', { expectedAmountRaw: 1 }],
+    ['fractional JSON number XNO', { expectedAmount: 0.5 }],
+    ['negative XNO string', { expectedAmount: '-0.5' }],
+    ['zero amount', { expectedAmountRaw: '0' }],
+    ['negative raw', { expectedAmountRaw: '-1' }],
+    ['malformed raw', { expectedAmountRaw: '1.0' }],
+    ['raw overflow', { expectedAmountRaw: '340282366920938463463374607431768211456' }],
+    ['XNO overflow', { expectedAmount: '340282366920938463463374607431.768211456' }],
+    ['XNO precision overflow', { expectedAmount: '0.0000000000000000000000000000001' }],
+    ['both amount units', { expectedAmountRaw: '1', expectedAmount: '0.000000000000000000000000000001' }],
+    ['invalid completion policy', { expectedAmountRaw: '1', completionPolicy: { type: 'sometimes' } }],
+    ['non-string metadata', { expectedAmountRaw: '1', metadata: { orderId: 123 } }],
+  ])('rejects %s with a structured bad-request response', async (_label, fields) => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandler(runtime, createTestConfig());
+    const res = await handler(req('POST', '/api/invoices', {
+      body: { accountKey: 'acct-1', ...fields },
+    }));
+
+    expect(res.status).toBe(400);
+    expect((await parseJson(res) as { error: { code: string } }).error.code).toBe('bad_request');
   });
 
   it('rejects deprecated recipientAccount field', async () => {
@@ -429,6 +492,20 @@ describe('GET /api/invoice-accounts/*', () => {
     expect(body.data[0]!.accountKey).toBe('acct-a');
   });
 
+  it('returns confirmed deposits for the account key across owned invoice addresses', async () => {
+    const { runtime } = createTestRuntime();
+    const handler = createHandlerWithRuntime(runtime, createTestConfig());
+    const invoice = await runtime.createInvoice({ accountKey: 'acct-a', expectedAmountRaw: ONE_XNO });
+    await runtime.handleConfirmedBlock(makeBlock({ recipientAccount: invoice.payAddress }));
+
+    const res = await handler(req('GET', '/api/invoice-accounts/acct-a/deposits'));
+    const body = await parseJson(res) as { data: Array<{ recipientAccount: string; invoiceId: string | null }> };
+
+    expect(res.status).toBe(200);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toMatchObject({ recipientAccount: invoice.payAddress, invoiceId: invoice.id });
+  });
+
   it('returns invoice account balance', async () => {
     const { runtime } = createTestRuntime();
     const handler = createHandlerWithRuntime(runtime, createTestConfig());
@@ -467,7 +544,7 @@ describe('GET /api/events types filtering', () => {
     ];
 
     const runtime = new Runtime({
-      v2EventStore: {
+      eventStore: {
         append: vi.fn(),
         list: vi.fn().mockResolvedValue(events),
       },
@@ -603,10 +680,10 @@ describe('GET /api/invoices/:id/events', () => {
     const invoice = await createTestInvoice(runtime);
 
     const eventsRes = await handler(req('GET', `/api/invoices/${invoice.id}/events`));
-    const eventsBody = await parseJson(eventsRes) as { data: { id: string }[] };
-    const firstEventId = eventsBody.data[0]!.id;
+    const eventsBody = await parseJson(eventsRes) as { data: { sequence: number }[] };
+    const firstEventSequence = eventsBody.data[0]!.sequence;
 
-    const res = await handler(req('GET', `/api/invoices/${invoice.id}/events?after=${firstEventId}`));
+    const res = await handler(req('GET', `/api/invoices/${invoice.id}/events?after=${firstEventSequence}`));
 
     expect(res.status).toBe(200);
     const body = await parseJson(res) as { data: unknown[] };

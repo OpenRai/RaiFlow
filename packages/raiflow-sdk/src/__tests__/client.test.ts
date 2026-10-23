@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RaiFlowApiError, RaiFlowClient } from '../client.js';
-import type { Invoice, Payment, RaiFlowEvent, WebhookEndpoint } from '@openrai/model';
+import type { Invoice, Payment, WebhookEndpoint } from '@openrai/model';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -48,15 +48,6 @@ const TEST_PAYMENT: Payment = {
   confirmedAt: '2026-03-31T00:01:00.000Z',
 };
 
-const TEST_EVENT: RaiFlowEvent = {
-  id: 'evt-1',
-  type: 'invoice.created',
-  timestamp: '2026-03-31T00:00:00.000Z',
-  data: { invoice: TEST_INVOICE },
-  resourceId: 'inv-1',
-  resourceType: 'invoice',
-};
-
 const TEST_ENDPOINT: WebhookEndpoint = {
   id: 'wh-1',
   url: 'https://example.com/hook',
@@ -88,6 +79,7 @@ describe('RaiFlowClient', () => {
       expect(client).toBeDefined();
       expect(client.invoices).toBeDefined();
       expect(client.webhooks).toBeDefined();
+      expect(client.deposits).toBeDefined();
     });
 
     it('strips trailing slashes from baseUrl', () => {
@@ -101,6 +93,15 @@ describe('RaiFlowClient', () => {
       apiKey: 'my-key',
     });
     expect(client).toBeDefined();
+  });
+
+  it('exposes one durable event resource for replay and streaming', () => {
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000', apiKey: 'key' });
+    expect(client.events).toBeDefined();
+    expect(client).not.toHaveProperty('invoiceAccounts');
+    expect(client.accounts).not.toHaveProperty('watch');
+    expect(client.accounts).not.toHaveProperty('receivable');
+    expect(client.invoices).not.toHaveProperty('listEvents');
   });
 
   it('uses custom basePath when provided', async () => {
@@ -171,6 +172,19 @@ describe('InvoicesResource', () => {
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     expect((call[1]?.headers as Record<string, string>)['Idempotency-Key']).toBe('idem-key-123');
+  });
+
+  it('serializes an explicit XNO decimal as a string without floating-point conversion', async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse(TEST_INVOICE, { status: 201 }));
+
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
+    await client.invoices.create({ accountKey: 'customer-1', expectedAmount: '0.001' }, 'decimal-invoice');
+
+    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
+    expect(JSON.parse(call[1]?.body as string)).toEqual({
+      accountKey: 'customer-1',
+      expectedAmount: '0.001',
+    });
   });
 
   it('create passes completionPolicy in body', async () => {
@@ -248,28 +262,6 @@ describe('InvoicesResource', () => {
     expect(result.data).toHaveLength(1);
   });
 
-  it('listEvents sends GET to /api/invoices/:id/events', async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ data: [TEST_EVENT] }));
-
-    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
-    const result = await client.invoices.listEvents('inv-1');
-
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/events');
-    expect(result.data).toHaveLength(1);
-  });
-
-  it('listEvents sends GET to /api/invoices/:id/events?after=evt-1', async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ data: [] }));
-
-    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
-    await client.invoices.listEvents('inv-1', { after: 'evt-1' });
-
-    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
-    expect(call[0]).toBe('http://localhost:3000/v1/invoices/inv-1/events?after=evt-1');
-  });
-
   it('throws on non-ok response', async () => {
     mockFetch.mockResolvedValueOnce(new Response('Not found', { status: 404 }));
 
@@ -290,6 +282,19 @@ describe('InvoicesResource', () => {
 
     const call = mockFetch.mock.calls[0] as [string, RequestInit?];
     expect((call[1]?.headers as Record<string, string>)['Authorization']).toBe('Bearer secret-key');
+  });
+});
+
+describe('deposit history resources', () => {
+  it('lists deposits for a managed or watched account', async () => {
+    const mockFetch = createMockFetch();
+    vi.stubGlobal('fetch', mockFetch);
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000' });
+
+    await client.accounts.listDeposits('account-1');
+
+    const call = mockFetch.mock.calls[0] as [string, RequestInit?];
+    expect(call[0]).toBe('http://localhost:3000/v1/accounts/account-1/deposits');
   });
 });
 
@@ -400,6 +405,36 @@ describe('SystemResource', () => {
   });
 });
 
+describe('DepositsResource', () => {
+  it('queues an explicit refund with an idempotency key and lists its outcome', async () => {
+    const refund = {
+      id: 'refund-1', depositId: 'deposit/1', invoiceId: 'inv-1', sendId: 'send-1',
+      destination: 'nano_verified', amountRaw: '5', status: 'queued', idempotencyKey: 'refund-1',
+      createdAt: '2026-10-22T00:00:00.000Z', publishedAt: null, confirmedAt: null,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockResponse(refund, { status: 201 }))
+      .mockResolvedValueOnce(mockResponse({ data: [refund] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000', apiKey: 'key' });
+
+    await client.deposits.refund('deposit/1', {
+      destination: refund.destination,
+      amountRaw: refund.amountRaw,
+      idempotencyKey: refund.idempotencyKey,
+    });
+    await client.deposits.listRefunds('deposit/1');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/v1/deposits/deposit%2F1/refunds');
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual({
+      destination: refund.destination, amountRaw: refund.amountRaw,
+    });
+    expect(new Headers((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).get('Idempotency-Key'))
+      .toBe(refund.idempotencyKey);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:3000/v1/deposits/deposit%2F1/refunds');
+  });
+});
+
 describe('EventsResource', () => {
   it('polls the global sequence cursor endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue(mockResponse({ data: [], nextCursor: null }));
@@ -411,5 +446,31 @@ describe('EventsResource', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'http://localhost:3000/v1/events?after=41&type=send.confirmed&limit=50',
     );
+  });
+
+  it('streams persisted events from a replay cursor', async () => {
+    const event = {
+      id: 'evt-42',
+      type: 'invoice.payment_confirmed',
+      timestamp: '2026-10-22T00:00:00.000Z',
+      data: {},
+      resourceId: 'inv-1',
+      resourceType: 'invoice',
+      sequence: 42,
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = RaiFlowClient.initialize({ baseUrl: 'http://localhost:3000', apiKey: 'key' });
+
+    const iterator = client.events.stream({ after: '41' })[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toEqual({ value: event, done: false });
+    await expect(iterator.next()).resolves.toEqual({ value: undefined, done: true });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/v1/events/stream?after=41');
   });
 });

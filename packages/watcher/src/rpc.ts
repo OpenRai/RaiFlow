@@ -1,7 +1,10 @@
 import { NanoClient } from '@openrai/nano-core';
 import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
+import type { RpcClient } from '@openrai/rpc';
 
 export interface NanoRpcConfig {
+  /** Shared RaiFlow transport client; when supplied all calls use its pool. */
+  rpcClient?: RpcClient;
   /** RPC URLs to use as a failover pool. */
   urls?: string[];
   url?: string;
@@ -44,6 +47,7 @@ interface RpcHistoryBlock {
   subtype?: string;
   local_timestamp?: string;
   link_as_account?: string;
+  link?: string;
 }
 
 interface RpcAccountHistoryResponse {
@@ -59,6 +63,7 @@ export interface HistoryBlock {
   linkAsAccount?: string;
   amount: string;
   hash: string;
+  link?: string;
   confirmed: boolean;
   localTimestamp?: string;
 }
@@ -113,15 +118,17 @@ export interface BlockInfo {
 }
 
 export class NanoRpcClient {
-  private readonly client: NanoClient;
+  private readonly client: NanoClient | undefined;
   private readonly clients: NanoClient[];
   private readonly timeoutMs: number;
+  private readonly rpcClient: RpcClient | undefined;
 
   constructor(config: NanoRpcConfig) {
     this.timeoutMs = config.timeoutMs ?? 15_000;
+    this.rpcClient = config.rpcClient;
     const urls = config.urls?.length ? config.urls : config.url ? [config.url] : undefined;
-    this.clients = (urls ?? [undefined]).map((url) => NanoClient.initialize(url ? { rpc: [url] } : {}));
-    this.client = this.clients[0]!;
+    this.clients = this.rpcClient ? [] : (urls ?? [undefined]).map((url) => NanoClient.initialize(url ? { rpc: [url] } : {}));
+    this.client = this.clients[0];
   }
 
   private async post<T>(body: Record<string, unknown>): Promise<T> {
@@ -158,6 +165,7 @@ export class NanoRpcClient {
   }
 
   getAuditReport(): EndpointAuditRecord[] {
+    if (this.rpcClient) return this.rpcClient.getAuditReport();
     return this.clients.flatMap((client) => client.rpcPool.getAuditReport());
   }
 
@@ -178,12 +186,19 @@ export class NanoRpcClient {
     };
   }
 
-  async accountHistory(account: string, count: number): Promise<HistoryBlock[]> {
+  async accountHistory(
+    account: string,
+    count: number,
+    options?: { head?: string; reverse?: boolean },
+  ): Promise<HistoryBlock[]> {
+    if (this.rpcClient) return this.rpcClient.accountHistory(account, count, options);
     const raw = await this.post<RpcAccountHistoryResponse>({
       action: 'account_history',
       account,
       count: String(count),
       raw: true,
+      ...(options?.head ? { head: options.head } : {}),
+      ...(options?.reverse ? { reverse: true } : {}),
     });
 
     if (raw.error) throw new NanoRpcError(`account_history error: ${raw.error}`, 'RPC_ERROR');
@@ -195,12 +210,14 @@ export class NanoRpcClient {
       linkAsAccount: block.link_as_account,
       amount: block.amount,
       hash: block.hash,
+      link: block.link,
       confirmed: block.confirmed === 'true' || block.confirmed === '1',
       localTimestamp: block.local_timestamp,
     }));
   }
 
   async accountsReceivable(accounts: string[], count: number): Promise<AccountsReceivable> {
+    if (this.rpcClient) return this.rpcClient.accountsReceivableBatch(accounts, count);
     let raw: RpcAccountsReceivableResponse;
     try {
       raw = await this.post<RpcAccountsReceivableResponse>({
@@ -244,6 +261,23 @@ export class NanoRpcClient {
   }
 
   async blockInfo(hash: string): Promise<BlockInfo> {
+    if (this.rpcClient) {
+      const raw = await this.rpcClient.blockInfo(hash);
+      if (!raw) throw new NanoRpcError(`block_info returned no block for ${hash}`, 'RPC_ERROR');
+      return {
+        blockAccount: raw.blockAccount ?? '',
+        amount: raw.amount ?? '0',
+        confirmed: raw.confirmed,
+        subtype: raw.subtype ?? '',
+        localTimestamp: raw.localTimestamp ?? '',
+        contents: {
+          type: raw.subtype ?? '',
+          account: raw.blockAccount ?? '',
+          linkAsAccount: raw.recipientAccount ?? '',
+          ...(raw.subtype ? { subtype: raw.subtype } : {}),
+        },
+      };
+    }
     const raw = await this.post<RpcBlockInfoResponse>({
       action: 'block_info',
       json_block: 'true',

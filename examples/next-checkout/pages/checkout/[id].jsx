@@ -1,166 +1,112 @@
-// Checkout page — shows invoice status and polls for payment completion
-// force-dynamic: this page always renders on-demand, never statically
-const dynamic = 'force-dynamic';
+import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/router';
+import { xnoDisplay } from '../../../shared/nano-utils.mjs';
 
-import { useEffect, useState } from 'react';
-import { xnoDisplay, truncateAddress, RAW_PER_XNO } from '../../../shared/nano-utils.mjs';
-
-const RAIFLOW_URL = process.env.NEXT_PUBLIC_RAIFLOW_URL ?? 'http://localhost:3100';
-
-export default function CheckoutPage({ params }) {
-  const id = params?.id;
-  if (!id) return null;
+export default function CheckoutPage() {
+  const router = useRouter();
+  const invoiceId = typeof router.query.id === 'string' ? router.query.id : undefined;
   const [invoice, setInvoice] = useState(null);
   const [events, setEvents] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [completed, setCompleted] = useState(false);
+  const eventsRef = useRef([]);
+  const [error, setError] = useState('');
 
-  // Fetch invoice state
-  async function fetchInvoice() {
-    try {
-      const res = await fetch(`/api/invoice/${id}`);
-      if (!res.ok) throw new Error('Invoice not found');
-      const data = await res.json();
-      setInvoice(data);
-      if (data.status === 'completed') setCompleted(true);
-      setLoading(false);
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
-  }
+  useEffect(() => {
+    if (!invoiceId) return undefined;
+    let stopped = false;
+    let pollingEvents = false;
+    const cursorKey = `raiflow-checkout-cursor:${invoiceId}`;
 
-  // Poll events
-  async function pollEvents() {
     try {
-      const res = await fetch(`/api/invoice/${id}/events`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.events.length > events.length) {
-        setEvents(data.events);
-        // Check for completion
-        const latestCompleted = data.events.find(
-          (e) => e.type === 'invoice.completed',
-        );
-        if (latestCompleted) setCompleted(true);
+      const saved = JSON.parse(window.localStorage.getItem(cursorKey) ?? 'null');
+      if (Array.isArray(saved?.events)) {
+        eventsRef.current = saved.events.slice(-100);
+        setEvents(eventsRef.current);
       }
     } catch {
-      // Ignore polling errors
+      window.localStorage.removeItem(cursorKey);
     }
-  }
 
-  useEffect(() => {
-    fetchInvoice();
-  }, [id]);
+    async function refreshInvoice() {
+      try {
+        const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`);
+        if (!response.ok) throw new Error('Could not load this payment request');
+        setInvoice(await response.json());
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }
 
-  useEffect(() => {
-    if (loading) return;
-    const timer = setInterval(pollEvents, 2000);
-    return () => clearInterval(timer);
-  }, [loading, events.length]);
+    async function refreshEvents() {
+      if (pollingEvents) return;
+      pollingEvents = true;
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(cursorKey) ?? 'null');
+        const after = typeof saved?.cursor === 'string' ? saved.cursor : undefined;
+        const query = new URLSearchParams();
+        if (after) query.set('after', after);
+        const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}/events?${query}`);
+        if (!response.ok) return;
+        const page = await response.json();
+        if (stopped) return;
+        const seen = new Set(eventsRef.current.map((event) => event.id));
+        const nextEvents = [...eventsRef.current, ...page.data.filter((event) => !seen.has(event.id))].slice(-100);
+        eventsRef.current = nextEvents;
+        setEvents(nextEvents);
+        if (page.nextCursor) {
+          window.localStorage.setItem(cursorKey, JSON.stringify({ cursor: page.nextCursor, events: nextEvents }));
+        }
+      } catch {
+        // The next poll resumes from the last stored sequence.
+      } finally {
+        pollingEvents = false;
+      }
+    }
 
-  if (loading) {
-    return (
-      <div style={{ fontFamily: 'system-ui', maxWidth: '540px', margin: '5rem auto', padding: '0 1rem', color: '#888' }}>
-        Loading invoice…
-      </div>
-    );
-  }
+    void refreshInvoice();
+    void refreshEvents();
+    const invoiceTimer = setInterval(refreshInvoice, 10_000);
+    const eventTimer = setInterval(refreshEvents, 2_000);
+    return () => {
+      stopped = true;
+      clearInterval(invoiceTimer);
+      clearInterval(eventTimer);
+    };
+  }, [invoiceId]);
 
-  if (error) {
-    return (
-      <div style={{ fontFamily: 'system-ui', maxWidth: '540px', margin: '5rem auto', padding: '0 1rem', color: '#f87171' }}>
-        Error: {error}
-      </div>
-    );
-  }
+  if (error) return <main style={{ fontFamily: 'system-ui', maxWidth: 640, margin: '4rem auto' }}>{error}</main>;
+  if (!invoice) return <main style={{ fontFamily: 'system-ui', maxWidth: 640, margin: '4rem auto' }}>Loading payment request…</main>;
 
-  const expectedXno = xnoDisplay(invoice.expectedAmountRaw);
-  const confirmedXno = xnoDisplay(invoice.confirmedAmountRaw);
+  const notices = events.flatMap((event) => {
+    if (event.type !== 'deposit.observed') return [];
+    const deposit = event.data.deposit;
+    if (deposit?.disposition === 'partial') return ['A partial payment was received. The remaining amount is still due.'];
+    if (deposit?.disposition === 'excess') return ['An excess payment was received. Review the extra amount before fulfilling the order.'];
+    if (deposit?.disposition === 'late') return ['A late payment was received after this invoice closed. It does not reopen the invoice.'];
+    return [];
+  });
 
   return (
-    <div style={{
-      fontFamily: 'system-ui, sans-serif',
-      maxWidth: '540px',
-      margin: '3rem auto',
-      padding: '0 1rem',
-      background: '#0f0f0f',
-      color: '#e0e0e0',
-      minHeight: '100vh',
-    }}>
-      <h1 style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>
-        <a href="/" style={{ color: '#60a5fa', textDecoration: 'none' }}>←</a> Payment Checkout
-      </h1>
-      {invoice.metadata?.orderId && (
-        <p style={{ color: '#666', fontSize: '0.875rem', marginBottom: '2rem' }}>
-          Order: {invoice.metadata.orderId}
-        </p>
+    <main style={{ fontFamily: 'system-ui', maxWidth: 640, margin: '3rem auto', padding: '0 1rem' }}>
+      <h1>Payment request</h1>
+      <p>Order: {invoice.metadata?.orderId ?? invoice.id}</p>
+      <p>Status: <strong>{invoice.status}</strong></p>
+      <p>Amount: <strong>{xnoDisplay(invoice.expectedAmountRaw)} XNO</strong></p>
+      <p>Confirmed: {xnoDisplay(invoice.receivedAmountRaw)} XNO</p>
+      <p>Send XNO from any wallet to:</p>
+      <p style={{ fontFamily: 'monospace', overflowWrap: 'anywhere' }}>{invoice.payAddress}</p>
+      <p>Invoice status and payment events are fetched by the server. The runtime API key is never sent to this page.</p>
+
+      <h2>Payment updates</h2>
+      {notices.map((notice, index) => <p key={`${notice}-${index}`} role="status">{notice}</p>)}
+      {events.length === 0 ? <p>Waiting for the first event…</p> : (
+        <ol>
+          {events.map((event) => (
+            <li key={event.id}>
+              <time>{new Date(event.timestamp).toLocaleString()}</time> — {event.type}
+            </li>
+          ))}
+        </ol>
       )}
-
-      {/* Status card */}
-      <div style={{ background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '8px', padding: '1.5rem', marginBottom: '1.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
-          <span style={{
-            display: 'inline-block',
-            width: '10px',
-            height: '10px',
-            borderRadius: '50%',
-            background: completed ? '#4ade80' : invoice.status === 'expired' ? '#fb923c' : invoice.status === 'canceled' ? '#a1a1aa' : '#60a5fa',
-          }} />
-          <span style={{ fontWeight: '600', textTransform: 'capitalize' }}>
-            {completed ? 'Payment Complete!' : invoice.status}
-          </span>
-        </div>
-
-        <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#888', marginBottom: '0.25rem' }}>
-          Amount Due
-        </div>
-        <div style={{ fontSize: '1.5rem', fontWeight: '700', fontFamily: 'monospace', marginBottom: '1.5rem' }}>
-          {expectedXno} <span style={{ fontSize: '1rem', color: '#888', fontWeight: '400' }}>XNO</span>
-        </div>
-
-        <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#888', marginBottom: '0.25rem' }}>
-          Send to Nano address
-        </div>
-        <div style={{ fontFamily: 'monospace', fontSize: '0.9rem', wordBreak: 'break-all', color: '#60a5fa', marginBottom: '1.5rem' }}>
-          {invoice.recipientAccount}
-        </div>
-
-        {invoice.status !== 'completed' && invoice.status !== 'expired' && invoice.status !== 'canceled' && (
-          <div style={{ marginTop: '1rem', padding: '1rem', background: '#111', borderRadius: '6px', fontSize: '0.875rem' }}>
-            <div style={{ color: '#888', marginBottom: '0.5rem' }}>Confirmed so far</div>
-            <div style={{ fontFamily: 'monospace', color: '#4ade80' }}>
-              {confirmedXno} / {expectedXno} XNO
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Event log */}
-      <div style={{ background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '8px', padding: '1.5rem' }}>
-        <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#888', marginBottom: '1rem' }}>
-          Live Status
-        </div>
-        {events.length === 0 && !completed && (
-          <div style={{ color: '#666', fontSize: '0.875rem', fontStyle: 'italic' }}>
-            Waiting for payment… Send XNO to the address above.
-          </div>
-        )}
-        {events.map((event) => (
-          <div key={event.id} style={{ fontSize: '0.875rem', padding: '0.5rem 0', borderBottom: '1px solid #2a2a2a' }}>
-            <span style={{ color: '#60a5fa', fontWeight: '600' }}>{event.type}</span>
-            <span style={{ color: '#666', marginLeft: '0.5rem' }}>
-              {new Date(event.createdAt).toLocaleTimeString()}
-            </span>
-          </div>
-        ))}
-        {completed && (
-          <div style={{ color: '#4ade80', fontSize: '0.875rem', fontWeight: '600', paddingTop: '0.5rem' }}>
-            ✓ Payment received and verified. Thank you!
-          </div>
-        )}
-      </div>
-    </div>
+    </main>
   );
 }

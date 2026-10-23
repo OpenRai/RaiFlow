@@ -1,199 +1,131 @@
 #!/usr/bin/env node
 
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { RaiFlowClient } from '@openrai/raiflow-sdk';
+import { startDurableEventConsumer } from '../shared/durable-event-consumer.mjs';
+import { xnoDisplay, xnoToRaw } from '../shared/nano-utils.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const directory = dirname(fileURLToPath(import.meta.url));
+const PORT = Number.parseInt(process.env.PORT ?? '3000', 10);
+const recentEvents = [];
+let eventConsumer;
 
-const PORT = parseInt(process.env.PORT ?? '3000', 10);
-const RAIFLOW_URL = process.env.RAIFLOW_URL ?? 'http://localhost:3100';
-
-const raiflow = RaiFlowClient.initialize({ baseUrl: RAIFLOW_URL });
-
-let runtimeOnline = false;
-let lastHealthAt = null;
-
-function formatRelativeTime(iso) {
-  if (!iso) return 'never';
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
+function getClient() {
+  const apiKey = process.env.RAIFLOW_API_KEY;
+  if (!apiKey) throw new Error('Set RAIFLOW_API_KEY before starting this example.');
+  return RaiFlowClient.initialize({
+    baseUrl: process.env.RAIFLOW_URL ?? 'http://localhost:3100',
+    apiKey,
+  });
 }
 
-function classifyInvoiceEvent(type) {
-  if (type === 'invoice.completed') return 'spendable';
-  if (type === 'invoice.canceled' || type === 'invoice.expired') return 'refunded';
-  return 'receivable';
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
 }
 
-async function fetchRuntimeSnapshot() {
-  const health = await raiflow.system.health();
-  const [{ data: invoices }, { data: webhooks }] = await Promise.all([
-    raiflow.invoices.list(),
-    raiflow.webhooks.list(),
+function accountEvents(account, source = recentEvents) {
+  return source.filter((event) => {
+    const data = event.data ?? {};
+    return event.resourceId === account.id
+      || data.account?.id === account.id
+      || data.deposit?.recipientAccount === account.address
+      || data.send?.source?.accountId === account.id;
+  }).slice(-10).reverse();
+}
+
+async function renderAccountState(account, message = '') {
+  const client = getClient();
+  const [{ data: deposits }, { data: sends }] = await Promise.all([
+    client.accounts.listDeposits(account.id),
+    client.sends.listByAccount(account.id),
   ]);
-
-  const sortedInvoices = [...invoices].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const recentInvoices = sortedInvoices.slice(0, 8);
-
-  const invoiceEvents = [];
-  for (const invoice of recentInvoices) {
-    const { data } = await raiflow.invoices.listEvents(invoice.id);
-    for (const event of data) {
-      invoiceEvents.push({
-        ...event,
-        invoiceId: invoice.id,
-        orderLabel: invoice.metadata?.orderId ?? invoice.id.slice(0, 8),
-      });
-    }
-  }
-
-  invoiceEvents.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-  return {
-    health,
-    invoices: sortedInvoices,
-    webhooks,
-    events: invoiceEvents.slice(0, 20),
-  };
+  const persistedEvents = await eventConsumer?.getRecentEvents().catch(() => []);
+  const events = accountEvents(account, persistedEvents?.length ? persistedEvents : recentEvents);
+  return `<section id="account-state">
+    <h2>Customer deposit account</h2>
+    <p>Stable customer reference: <code>${escapeHtml(account.accountKey)}</code></p>
+    <p>Address: <code>${escapeHtml(account.address)}</code></p>
+    <p>Latest runtime balance: ${escapeHtml(xnoDisplay(account.balanceRaw))} XNO</p>
+    ${message ? `<p role="status">${escapeHtml(message)}</p>` : ''}
+    <h3>Withdraw</h3>
+    <form hx-post="/customers/${encodeURIComponent(account.accountKey)}/withdrawals" hx-target="#account-state" hx-swap="outerHTML">
+      <label>Destination Nano address <input name="destination" required autocomplete="off"></label>
+      <label>Amount (XNO) <input name="amount" required inputmode="decimal" pattern="[0-9]+(\\.[0-9]{1,30})?"></label>
+      <label>Request reference <input name="requestId" required value="${randomUUID()}"></label>
+      <button type="submit">Queue withdrawal</button>
+    </form>
+    <h3>Confirmed deposits</h3>
+    ${deposits.length ? `<ul>${deposits.map((deposit) => `<li>${escapeHtml(xnoDisplay(deposit.amountRaw))} XNO · ${escapeHtml(deposit.disposition)} · ${escapeHtml(deposit.blockHash)}</li>`).join('')}</ul>` : '<p>No confirmed deposits yet.</p>'}
+    <h3>Withdrawals</h3>
+    ${sends.length ? `<ul>${sends.map((send) => `<li>${escapeHtml(xnoDisplay(send.amountRaw))} XNO · ${escapeHtml(send.status)} · ${escapeHtml(send.id)}</li>`).join('')}</ul>` : '<p>No withdrawals yet.</p>'}
+    <h3>Durable runtime events</h3>
+    ${events.length ? `<ul>${events.map((event) => `<li>${escapeHtml(event.type)} · ${escapeHtml(event.timestamp)}</li>`).join('')}</ul>` : '<p>Waiting for account events.</p>'}
+  </section>`;
 }
-
-async function refreshHealth() {
-  try {
-    await raiflow.system.health();
-    runtimeOnline = true;
-    lastHealthAt = new Date().toISOString();
-  } catch {
-    runtimeOnline = false;
-  }
-}
-
-setInterval(refreshHealth, 5000);
 
 const app = express();
-app.use(express.static(join(__dirname, 'public')));
+app.use(express.urlencoded({ extended: false }));
+app.use(express.static(join(directory, 'public')));
 
-app.get('/api/status', async (_req, res) => {
-  await refreshHealth();
-  res.send(
-    runtimeOnline
-      ? `<div class="status online">Upstream Online · checked ${formatRelativeTime(lastHealthAt)}</div>`
-      : '<div class="status offline">Upstream Offline</div>',
-  );
-});
-
-app.get('/api/summary', async (_req, res) => {
+app.post('/customers', async (req, res) => {
+  const accountKey = String(req.body.accountKey ?? '').trim();
+  if (!accountKey || accountKey.length > 120) {
+    res.status(400).send('<p role="alert">Enter a customer reference between 1 and 120 characters.</p>');
+    return;
+  }
   try {
-    const snapshot = await fetchRuntimeSnapshot();
-    const open = snapshot.invoices.filter((invoice) => invoice.status === 'open').length;
-    const completed = snapshot.invoices.filter((invoice) => invoice.status === 'completed').length;
-    const canceled = snapshot.invoices.filter((invoice) => invoice.status === 'canceled').length;
-
-    res.send(`
-      <div class="balance-card">
-        <h3>Invoice States</h3>
-        <div class="balance-amount">${open}<span class="currency"> open</span></div>
-        <div class="address-pill">${completed} completed · ${canceled} canceled/expired</div>
-      </div>
-      <div class="qr-card">
-        <h3>Runtime Overview</h3>
-        <div class="address-pill">${snapshot.webhooks.length} webhook endpoints configured</div>
-        <div class="address-pill">${snapshot.events.length} recent invoice events cached</div>
-        <div class="address-pill">${snapshot.invoices.length} invoices visible through current runtime surface</div>
-      </div>
-    `);
-  } catch (err) {
-    res.status(500).send(`<div class="empty-state">${err instanceof Error ? err.message : String(err)}</div>`);
+    const account = await getClient().accounts.createManaged({
+      accountKey,
+      idempotencyKey: `customer-deposit:${accountKey}`,
+    });
+    res.status(200).send(await renderAccountState(account));
+  } catch (error) {
+    res.status(502).send(`<p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`);
   }
 });
 
-app.get('/api/connectivity', async (_req, res) => {
+app.post('/customers/:accountKey/withdrawals', async (req, res) => {
+  const accountKey = String(req.params.accountKey);
+  const destination = String(req.body.destination ?? '').trim();
+  const amount = String(req.body.amount ?? '').trim();
+  const requestId = String(req.body.requestId ?? '').trim();
   try {
-    const snapshot = await fetchRuntimeSnapshot();
-    const rows = [
-      {
-        name: 'Runtime health',
-        state: snapshot.health.status === 'ok' ? 'online' : 'offline',
-        detail: `GET /health · checked ${formatRelativeTime(lastHealthAt ?? new Date().toISOString())}`,
-      },
-      {
-        name: 'Webhook endpoints',
-        state: snapshot.webhooks.length > 0 ? 'connecting' : 'offline',
-        detail: `${snapshot.webhooks.length} endpoint(s) registered`,
-      },
-      {
-        name: 'Invoice event stream',
-        state: snapshot.events.length > 0 ? 'online' : 'connecting',
-        detail: `${snapshot.events.length} recent events visible via invoice polling`,
-      },
-    ];
-
-    res.send(rows.map((row) => `
-      <tr>
-        <td>${row.name}</td>
-        <td><span class="tag ${row.state === 'online' ? 'spendable' : row.state === 'connecting' ? 'receivable' : 'refunded'}">${row.state}</span></td>
-        <td>${row.detail}</td>
-        <td>${new Date().toLocaleTimeString()}</td>
-      </tr>
-    `).join(''));
-  } catch (err) {
-    res.status(500).send(`<tr><td colspan="4" class="empty-state">${err instanceof Error ? err.message : String(err)}</td></tr>`);
+    const client = getClient();
+    const account = await client.accounts.createManaged({ accountKey, idempotencyKey: `customer-deposit:${accountKey}` });
+    if (!requestId || requestId.length > 120) throw new Error('A withdrawal request reference is required.');
+    const send = await client.sends.queue(account.id, {
+      destination,
+      amountRaw: xnoToRaw(amount),
+      idempotencyKey: `withdrawal:${accountKey}:${requestId}`,
+    });
+    res.status(200).send(await renderAccountState(account, `Withdrawal ${send.id} is ${send.status}.`));
+  } catch (error) {
+    res.status(400).send(`<section id="account-state"><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p><a href="/">Return to customer lookup</a></section>`);
   }
 });
 
-app.get('/api/events', async (_req, res) => {
-  try {
-    const snapshot = await fetchRuntimeSnapshot();
+const server = app.listen(PORT, () => console.log(`[customer-deposit-demo] http://localhost:${PORT}`));
+try {
+  eventConsumer = startDurableEventConsumer({
+    client: getClient(),
+    cursorFile: resolve(directory, '.raiflow/event-cursors.json'),
+    consumerKey: 'customer-deposit-demo',
+    onEvent(event) {
+      recentEvents.push(event);
+      if (recentEvents.length > 500) recentEvents.splice(0, recentEvents.length - 500);
+    },
+    onError(error) { console.error('[event-consumer]', error); },
+  });
+} catch (error) {
+  console.error('[event-consumer]', error instanceof Error ? error.message : String(error));
+}
 
-    if (snapshot.events.length === 0) {
-      res.send('<tr><td colspan="4" class="empty-state">No events yet.</td></tr>');
-      return;
-    }
-
-    res.send(snapshot.events.map((event) => `
-      <tr>
-        <td><span class="tag ${classifyInvoiceEvent(event.type)}">${event.type}</span></td>
-        <td><span class="mono">${event.orderLabel}</span></td>
-        <td>${new Date(event.createdAt).toLocaleTimeString()}</td>
-        <td>${formatRelativeTime(event.createdAt)}</td>
-      </tr>
-    `).join(''));
-  } catch (err) {
-    res.status(500).send(`<tr><td colspan="4" class="empty-state">${err instanceof Error ? err.message : String(err)}</td></tr>`);
-  }
-});
-
-app.get('/api/clients', async (_req, res) => {
-  try {
-    const snapshot = await fetchRuntimeSnapshot();
-
-    if (snapshot.webhooks.length === 0) {
-      res.send('<tr><td colspan="4" class="empty-state">No attached clients or webhook sinks visible yet.</td></tr>');
-      return;
-    }
-
-    res.send(snapshot.webhooks.map((endpoint) => `
-      <tr>
-        <td><span class="mono">${endpoint.id.slice(0, 8)}</span></td>
-        <td>${endpoint.url}</td>
-        <td>${endpoint.eventTypes.join(', ')}</td>
-        <td>${new Date(endpoint.createdAt).toLocaleTimeString()}</td>
-      </tr>
-    `).join(''));
-  } catch (err) {
-    res.status(500).send(`<tr><td colspan="4" class="empty-state">${err instanceof Error ? err.message : String(err)}</td></tr>`);
-  }
-});
-
-app.listen(PORT, async () => {
-  await refreshHealth();
-  console.log(`[dashboard] http://localhost:${PORT}`);
-  console.log(`[raiflow] pointing to ${RAIFLOW_URL}`);
+process.on('SIGTERM', () => {
+  eventConsumer?.stop();
+  server.close();
 });

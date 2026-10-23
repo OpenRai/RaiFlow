@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Runtime, xnoToRaw } from '../runtime.js';
+import { AccountStateSync } from '../account-state-sync.js';
 import { ONE_XNO, HALF_XNO, TEST_ACCOUNT_2, createTestRuntime, createTestInvoice, makeBlock, } from './helpers.js';
 describe('createInvoice', () => {
     it('registers each invoice pay address with the watcher', async () => {
@@ -117,6 +118,84 @@ describe('handleConfirmedBlock', () => {
         expect(updated.status).toBe('completed');
         expect(updated.receivedAmountRaw).toBe(ONE_XNO);
     });
+    it('uses the default watcher forwarding path without crediting the incoming send as recipient state', async () => {
+        const { runtime } = createTestRuntime();
+        const invoice = await createTestInvoice(runtime);
+        let currentAccount = {
+            id: 'managed-recipient',
+            accountKey: 'managed-recipient',
+            type: 'managed',
+            address: invoice.payAddress,
+            label: null,
+            balanceRaw: '0',
+            pendingRaw: '0',
+            frontier: null,
+            representative: null,
+            derivationIndex: 2 ** 31,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        };
+        const accountStore = {
+            create: async (account) => account,
+            get: async (id) => id === currentAccount.id ? currentAccount : undefined,
+            getByAddress: async (address) => address === currentAccount.address ? currentAccount : undefined,
+            list: async () => [currentAccount],
+            update: vi.fn(async (_id, patch) => {
+                currentAccount = { ...currentAccount, ...patch };
+                return currentAccount;
+            }),
+            delete: async () => true,
+        };
+        runtime.accountStore = accountStore;
+        const accountInfo = vi.fn()
+            .mockResolvedValueOnce(null)
+            .mockResolvedValue({
+            frontier: 'receive-frontier',
+            balance: ONE_XNO,
+            representative: 'nano_1representative',
+            blockCount: 2,
+        });
+        const sync = new AccountStateSync({ getClient: () => ({ accountInfo }) }, accountStore, { addAccount: vi.fn(), removeAccount: vi.fn() }, undefined, (block) => runtime.handleConfirmedBlock(block), { reconcileIntervalMs: 10, initialSyncDelayMs: 0 });
+        let recoveredSync;
+        try {
+            await sync.addAccount(currentAccount.address);
+            const block = makeBlock({
+                blockHash: 'confirmed-incoming-send',
+                recipientAccount: currentAccount.address,
+                amountRaw: ONE_XNO,
+            });
+            await sync.handleConfirmedBlock(block);
+            await sync.handleConfirmedBlock(block);
+            expect(currentAccount).toMatchObject({ balanceRaw: '0', frontier: null });
+            expect(accountStore.update).not.toHaveBeenCalled();
+            expect(await runtime.getPaymentsByInvoice(invoice.id)).toHaveLength(1);
+            vi.useFakeTimers();
+            sync.start();
+            await vi.advanceTimersByTimeAsync(10);
+            expect(accountStore.update).toHaveBeenCalledTimes(1);
+            expect(accountStore.update).toHaveBeenCalledWith('managed-recipient', {
+                balanceRaw: ONE_XNO,
+                frontier: 'receive-frontier',
+            });
+            expect(currentAccount).toMatchObject({ balanceRaw: ONE_XNO, frontier: 'receive-frontier' });
+            const recoveredRuntime = new Runtime({
+                accountStore,
+                invoiceStore: runtime.invoiceStore,
+                paymentStore: runtime.paymentStore,
+            });
+            recoveredSync = new AccountStateSync({ getClient: () => ({ accountInfo }) }, accountStore, { addAccount: vi.fn(), removeAccount: vi.fn() }, undefined, (replayedBlock) => recoveredRuntime.handleConfirmedBlock(replayedBlock), { reconcileIntervalMs: 10, initialSyncDelayMs: 0 });
+            await recoveredSync.addAccount(currentAccount.address);
+            await recoveredSync.handleConfirmedBlock(block);
+            expect(accountStore.update).toHaveBeenCalledTimes(1);
+            expect(currentAccount).toMatchObject({ balanceRaw: ONE_XNO, frontier: 'receive-frontier' });
+            expect(await recoveredRuntime.getPaymentsByInvoice(invoice.id)).toHaveLength(1);
+        }
+        finally {
+            sync.stop();
+            recoveredSync?.stop();
+            vi.useRealTimers();
+        }
+    });
     it('emits canonical invoice payment events', async () => {
         const { runtime, deliveredEvents } = createTestRuntime();
         const invoice = await createTestInvoice(runtime);
@@ -140,6 +219,46 @@ describe('handleConfirmedBlock', () => {
         const confirmedEvents = deliveredEvents.filter((e) => e.event.type === 'invoice.payment_confirmed');
         expect(payments).toHaveLength(1);
         expect(confirmedEvents).toHaveLength(1);
+    });
+});
+describe('getAccount', () => {
+    it('returns live chain state without writing the account projection', async () => {
+        const { runtime } = createTestRuntime();
+        const account = {
+            id: 'managed-account',
+            accountKey: 'managed-account',
+            type: 'managed',
+            address: TEST_ACCOUNT_2,
+            label: null,
+            balanceRaw: '0',
+            pendingRaw: '0',
+            frontier: null,
+            representative: null,
+            derivationIndex: 2 ** 31,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        };
+        const update = vi.fn(async (_id, patch) => ({ ...account, ...patch }));
+        runtime.accountStore = {
+            get: vi.fn().mockResolvedValue(account),
+            update,
+        };
+        runtime.rpcPool = {
+            getClient: () => ({
+                accountInfo: vi.fn().mockResolvedValue({
+                    frontier: 'receive-frontier',
+                    balance: ONE_XNO,
+                    representative: 'nano_1representative',
+                }),
+            }),
+        };
+        const current = await runtime.getAccount(account.id);
+        expect(current).toMatchObject({
+            balanceRaw: ONE_XNO,
+            frontier: 'receive-frontier',
+            representative: 'nano_1representative',
+        });
+        expect(update).not.toHaveBeenCalled();
     });
 });
 describe('global event polling', () => {

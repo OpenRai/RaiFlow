@@ -2,6 +2,33 @@
 
 This RFC defines the canonical event model for RaiFlow: resource shapes, event taxonomy, delivery semantics, and idempotency invariants.
 
+## Current delivery contract — 2026-10-22
+
+Webhook signatures use `X-RaiFlow-Signature: sha256=<hex>` over the exact JSON
+request body. A successful 2xx response completes delivery. Most 4xx responses
+are terminal; 408 and 429, 5xx, and network failures are retried. Runtime
+delivery attempts and outcomes are persisted in the outbox system described
+below. These details supersede older retry and signature examples later in this
+RFC. The SDK and runtime event endpoints use `/v1/events`; event cursors are
+monotonic sequence values.
+
+## Storage pressure and inbound pause — 2026-10-23
+
+RaiFlow retains deposit, payment, event, webhook, and recovery evidence without
+automatic expiration. `storage.maxDatabaseBytes` (default 1 GiB) caps SQLite
+database pages; inbound ingestion pauses before the byte limit to leave room for
+WAL and recovery writes. `storage.maxDepositsPerAccount` (default 100,000)
+limits retained confirmed deposits per destination Nano address. Both support
+dedicated environment overrides. `GET /health/storage` reports database usage
+and whether inbound processing is paused.
+
+When a limit is reached, new deposit, payment, event, outbox, and receive-task
+records are not written. The source transfer remains receivable on the Nano
+node. Polling retries it, and account-history recovery does not advance its
+cursor beyond an unpersisted transfer. Existing deposit replays and recovery
+for sends or receives already in flight continue. Raise the limit and restart
+to resume. No per-hash ignored-transfer record is created.
+
 ---
 
 ## Summary
@@ -18,6 +45,53 @@ Every state change in RaiFlow emits a persisted, ordered event. Events are the s
 4. **Events are self-contained.** Each event embeds the full relevant resource state, not just an ID.
 5. **Consumers handle duplicates.** RaiFlow targets at-least-once delivery. Use the event `id` for deduplication.
 
+## Confirmed-deposit transaction — 2026-10-22
+
+For an admitted confirmed inbound send, SQLite commits the unique deposit, optional
+invoice payment, invoice amount/status transition, associated business events,
+and owned receive-task intent in one transaction. Runtime listeners and webhook
+delivery run after commit; failures there leave the persisted events available
+for replay. A source-send hash is the deduplication identity, so replay does not
+add a second payment contribution or completion transition.
+
+Inbound admission applies an inclusive per-transfer minimum before this
+transaction: `receiving.minimumAmountXno`, overridden at startup by
+`RAIFLOW_MINIMUM_RECEIVE_AMOUNT_XNO`, defaults to `"0.000001"` XNO. Embedded
+runtimes use `RuntimeConfig.minimumReceiveAmountXno`. Values are positive decimal
+strings converted exactly through nano-core. Live observations, historical
+recovery, and receivable discovery share the policy. Below-minimum sends create
+no deposit, payment, event, receive task, or persistent ignored-hash record;
+they do not accumulate toward invoices. New invoices below the minimum fail.
+Operation confirmation and saved signed-block recovery continue after a minimum
+increase. Existing records are retained; changing the minimum does not rebuild
+skipped history. A minimum is an admission policy, and storage budgets and
+retention remain necessary to bound above-minimum traffic.
+
+Invoice completion, expiry, and cancellation are terminal transitions from
+`open`. SQLite lifecycle updates compare the expected current status under an
+immediate transaction. Confirmed payment ingest uses the same transaction
+boundary, so whichever transition commits first determines the invoice result;
+a later send to an expired or completed destination is recorded as a late
+deposit without reopening or fulfilling another invoice. Configured default
+expiry is applied at creation, and caller-provided expiry values must be valid
+future date-times.
+
+## Transactional webhook outbox — 2026-10-22
+
+Persisting an event also creates one durable outbox job for each webhook
+endpoint that matches the event at commit time. The event and its endpoint
+delivery intents are inserted in the same SQLite transaction. Confirmed-deposit
+ingestion uses that fan-out inside its existing domain transaction. A
+background worker leases due jobs and performs HTTP outside domain transitions;
+expired leases are eligible for recovery after a crash. Delivery attempts are
+recorded separately, and retries keep the original event ID and payload.
+The event row cannot be removed while an outbox job still references it, so
+retention cleanup must preserve payloads for pending delivery.
+
+Endpoint matching accepts `*`, exact event types, and namespace patterns such
+as `invoice.*`. New webhook endpoints receive events created after they are
+registered; creating an endpoint does not enqueue the historical event log.
+
 ---
 
 ## Event Envelope
@@ -26,12 +100,12 @@ Every event shares a common envelope:
 
 ```typescript
 interface RaiFlowEvent {
-  id: string           // UUIDv4
+  id: string           // Stable event identifier; consumers deduplicate by id
   type: string         // Dot-namespaced event type
   timestamp: string    // ISO 8601
   data: Record<string, unknown> // Event-type-specific payload
   resourceId: string  // ID of the primary resource
-  resourceType: string // 'invoice' | 'payment' | 'account' | 'send' | 'block'
+  resourceType: string // includes 'deposit' for inbound transfer observations
 }
 ```
 
@@ -50,6 +124,16 @@ interface RaiFlowEvent {
 | `invoice.expired` | Expiry timer fired while still open |
 | `invoice.canceled` | Developer canceled the invoice |
 | `invoice.swept` | Collected funds swept to treasury |
+
+### Deposit Domain
+
+| Event | Fires when |
+|---|---|
+| `deposit.observed` | A confirmed inbound send is durably recorded with its disposition |
+
+Each deposit records whether it is `matched`, `partial`, `excess`, `late`, or
+`unmatched`. Late deposits link to their original invoice when known and never
+fulfill a different invoice at the same legacy destination.
 
 ### Wallet Domain — Account
 
@@ -192,10 +276,10 @@ interface WebhookEndpoint {
 
 ### Retry Policy
 
-- Up to 5 delivery attempts per event per endpoint
+- Up to 5 retries after the first attempt (6 total attempts)
 - Exponential backoff: 1s, 2s, 4s, 8s, 16s
 - Jitter: ±25% randomization to avoid thundering herd
-- Non-2xx responses trigger retry
+- Non-2xx responses trigger retry, except terminal 4xx responses
 - Network failures trigger retry
 - `4xx` responses do not retry (client error)
 

@@ -1,13 +1,12 @@
 import { AccountsResource } from './resources/Accounts.js';
 import { BlocksResource } from './resources/Blocks.js';
-import { InvoiceAccountsResource } from './resources/InvoiceAccounts.js';
 import { InvoicesResource } from './resources/Invoices.js';
 import { SendsResource } from './resources/Sends.js';
 import { SystemResource } from './resources/System.js';
 import { WebhooksResource } from './resources/Webhooks.js';
 import { WorkResource } from './resources/Work.js';
 import { EventsResource } from './resources/Events.js';
-import { SseConnection } from './sse-connection.js';
+import { DepositsResource } from './resources/Deposits.js';
 
 export interface RaiFlowClientOptions {
   /** Base URL of the RaiFlow runtime (e.g. "http://localhost:3000") */
@@ -35,19 +34,18 @@ export class RaiFlowApiError extends Error {
 export class RaiFlowClient {
   public accounts: AccountsResource;
   public blocks: BlocksResource;
-  public invoiceAccounts: InvoiceAccountsResource;
   public invoices: InvoicesResource;
   public sends: SendsResource;
   public system: SystemResource;
   public webhooks: WebhooksResource;
   public work: WorkResource;
   public events: EventsResource;
+  public deposits: DepositsResource;
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly basePath: string;
   private readonly timeoutMs: number;
-  private _sseConnection?: SseConnection;
 
   private constructor(options: RaiFlowClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -56,25 +54,17 @@ export class RaiFlowClient {
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.accounts = new AccountsResource(this);
     this.blocks = new BlocksResource(this);
-    this.invoiceAccounts = new InvoiceAccountsResource(this);
     this.invoices = new InvoicesResource(this);
     this.sends = new SendsResource(this);
     this.system = new SystemResource(this);
     this.webhooks = new WebhooksResource(this);
     this.work = new WorkResource(this);
     this.events = new EventsResource(this);
+    this.deposits = new DepositsResource(this);
   }
 
   public static initialize(options: RaiFlowClientOptions): RaiFlowClient {
     return new RaiFlowClient(options);
-  }
-
-  /** Internal: lazy-initialized SSE connection */
-  get sseConnection(): SseConnection {
-    if (!this._sseConnection) {
-      this._sseConnection = new SseConnection(this.baseUrl, this.basePath, this.apiKey);
-    }
-    return this._sseConnection;
   }
 
   /** Internal: make an HTTP request to the runtime */

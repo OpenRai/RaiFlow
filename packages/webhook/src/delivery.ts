@@ -46,6 +46,59 @@ function computeBackoff(attempt: number, baseDelayMs: number, maxDelayMs: number
 
 type DeliveryOutcome = 'delivered' | 'retry' | 'terminal';
 
+export interface WebhookAttemptResult {
+  status: DeliveryOutcome;
+  responseCode: number | null;
+  responseBody: string | null;
+  error: string | null;
+}
+
+/** Perform one bounded HTTP attempt; durable retry scheduling belongs to the runtime worker. */
+export async function attemptWebhookDelivery(
+  endpoint: WebhookEndpoint,
+  event: unknown,
+  timeoutMs = 10_000,
+): Promise<WebhookAttemptResult> {
+  const eventData = getEventData(event);
+  const body = JSON.stringify(event);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint.url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-RaiFlow-Signature': signPayload(body, endpoint.secret),
+        'X-RaiFlow-Event': eventData.type,
+        'X-RaiFlow-Event-Id': eventData.id,
+      },
+      body,
+    });
+    const responseBody = (await response.text()).slice(0, 2048);
+    if (response.ok) {
+      return { status: 'delivered', responseCode: response.status, responseBody, error: null };
+    }
+    const terminal = response.status >= 400 && response.status < 500
+      && response.status !== 408 && response.status !== 429;
+    return {
+      status: terminal ? 'terminal' : 'retry',
+      responseCode: response.status,
+      responseBody,
+      error: `HTTP ${response.status}`,
+    };
+  } catch (cause) {
+    return {
+      status: 'retry',
+      responseCode: null,
+      responseBody: null,
+      error: cause instanceof Error ? cause.message : String(cause),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Attempt to POST a webhook payload to a single endpoint. */
 async function postToEndpoint(
   endpoint: WebhookEndpoint,
@@ -158,7 +211,9 @@ export function createWebhookDelivery(config: DeliveryConfig = {}): WebhookDeliv
       // Filter endpoints that subscribe to this event type
       const eventData = getEventData(event);
       const matching = endpoints.filter((ep) =>
-        ep.eventTypes.includes('*') || ep.eventTypes.includes(eventData.type),
+        ep.eventTypes.some((filter) => filter === '*'
+          || filter === eventData.type
+          || (filter.endsWith('.*') && eventData.type.startsWith(filter.slice(0, -1)))),
       );
 
       if (matching.length === 0) return;

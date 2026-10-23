@@ -1,22 +1,10 @@
-import type { Invoice, Payment, RaiFlowEvent, CompletionPolicy } from '@openrai/model';
+import type { CreateInvoiceRequest, Invoice, InvoiceStatus, Payment } from '@openrai/model';
 import type { RaiFlowClient } from '../client.js';
 
-export interface CreateInvoiceOptions {
-  expectedAmountRaw?: string;
-  expectedAmount?: string;
-  accountKey: string;
-  invoiceKey?: string;
-  expiresAt?: string;
-  metadata?: Record<string, unknown>;
-  completionPolicy?: CompletionPolicy;
-}
+export type CreateInvoiceOptions = CreateInvoiceRequest;
 
 export interface ListInvoicesOptions {
-  status?: string;
-}
-
-export interface ListEventsOptions {
-  after?: string;
+  status?: InvoiceStatus;
 }
 
 export class InvoicesResource {
@@ -70,18 +58,5 @@ export class InvoicesResource {
 
   public async listPayments(id: string): Promise<{ data: Payment[] }> {
     return this.client.request<{ data: Payment[] }>('GET', `/invoices/${id}/payments`);
-  }
-
-  public async listEvents(
-    id: string,
-    options?: ListEventsOptions,
-  ): Promise<{ data: RaiFlowEvent[] }> {
-    const params = new URLSearchParams();
-    if (options?.after) params.set('after', options.after);
-    const query = params.toString();
-    const path = query
-      ? `/invoices/${id}/events?${query}`
-      : `/invoices/${id}/events`;
-    return this.client.request<{ data: RaiFlowEvent[] }>('GET', path);
   }
 }

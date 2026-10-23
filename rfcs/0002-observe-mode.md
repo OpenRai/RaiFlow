@@ -4,6 +4,43 @@ Note on naming: the file path still says `0002-observe-mode.md` for continuity, 
 
 This RFC describes the internal architecture of the RaiFlow runtime: package boundaries, how the two domains fit together, and the infrastructure shared between them.
 
+## Current implementation note — 2026-10-22
+
+The route and mode examples below record the architectural proposal and are
+historical where they differ from the shipped API. The runtime and SDK currently
+use `/v1`; current routes and operational behavior are documented in the root
+README and `packages/raiflow-sdk/README.md`. Runtime modes are startup-selected:
+custodial mode delegates key derivation and signing to the configured OWS
+provider, while non-custodial mode supports watched accounts, work generation,
+and publishing pre-signed blocks. Receiving is internal runtime work.
+
+The runtime now persists account-chain recovery cursors, confirmed deposits,
+receive intents, send intents, and webhook outbox jobs. Refunds are explicit
+deposit-linked sends with caller-supplied destinations. See RFC 0003 for inbound
+admission and delivery transaction behavior. The selected storage policy keeps
+evidence and pauses inbound persistence at configured database and per-address
+deposit budgets (`RaiFlow-7w6.28`); implementation is being validated.
+
+## Confirmation recovery — 2026-10-22
+
+The watcher combines account-filtered WebSocket confirmations with RPC
+receivable discovery and bounded `account_history` reconciliation. A
+WebSocket subscription requests an acknowledgement and is treated as active
+only after the matching request ID is acknowledged. The node receives only
+the configured account filter; RaiFlow also filters to sends whose destination
+is watched.
+
+History recovery reads one account at a time. It persists an account-chain
+cursor, follows `account_history` from that hash in forward order, and validates
+each source send with `block_info` before sending it through the shared atomic
+ingest path. It advances the cursor only after the sink succeeds. If the
+process stops between ingest and cursor persistence, the deposit hash makes
+replay idempotent. A first scan establishes a cursor from a bounded recent
+history window; later scans page forward from that cursor. No global ledger
+index is needed. The Nano node's [WebSocket guide](https://docs.nano.org/integration-guides/websockets/)
+and [RPC reference](https://docs.nano.org/commands/rpc-protocol/) define the
+acknowledgement, account filter, and history pagination fields.
+
 ---
 
 ## System Diagram
@@ -55,7 +92,7 @@ This RFC describes the internal architecture of the RaiFlow runtime: package bou
 
 Canonical public types, schemas, and shared contracts only. No application logic.
 
-- Resource types: `Invoice`, `Payment`, `Account`, `Send`, `RaiFlowEvent`, `WebhookEndpoint`
+- Resource types: `Invoice`, `Payment`, `Deposit`, `Account`, `Send`, `RaiFlowEvent`, `WebhookEndpoint`
 - Request/response DTOs
 - Store interfaces
 - Event type enums and discriminated unions
@@ -74,7 +111,7 @@ Loads and validates `raiflow.yml`.
 
 Persistent data access layer.
 
-- Store interfaces (invoice store, payment store, account store, send store, event store, webhook store)
+- Store interfaces (invoice, payment, deposit, account, send, event, webhook, and recovery cursor stores)
 - SQLite driver (default)
 - Forward-only migration runner
 - Transaction helpers
@@ -84,9 +121,9 @@ Persistent data access layer.
 Nano node communication.
 
 - Multi-endpoint HTTP RPC failover across configured `nano.rpc` URLs
-- WebSocket connection manager with reconnect/backoff
+- WebSocket connection manager with reconnect/backoff and acknowledged account filters
+- RPC receivable discovery and bounded account-history recovery
 - Request timeout and retry
-- Confirmation subscription routing
 - Infrastructure events: `rpc.connected`, `rpc.disconnected`, `rpc.failover`
 
 ### `@openrai/events`
@@ -236,9 +273,13 @@ const result = await raiflow.publish({
 
 When an invoice completes with `autoSweep` enabled:
 
-1. RaiFlow auto-receives all pending blocks on the invoice's pay address
-2. RaiFlow constructs a send block from the pay address to the sweep destination
-3. The send is tracked through the same custody engine as wallet domain sends
-4. An `invoice.swept` event fires on success
+1. RaiFlow waits for receive work on the invoice address to settle, verifies the
+   node reports no remaining receivables, and reads the spendable balance.
+2. RaiFlow records one invoice-sourced send with the idempotency key
+   `invoice-sweep:<invoiceId>`; this does not create a reusable managed account.
+3. The shared send orchestrator serializes account operations, persists the
+   exact signed block intent, and recovers ambiguous publish outcomes.
+4. The send's durable status records queued, published, and confirmed progress.
+   RaiFlow emits `invoice.swept` only after the sweep send is confirmed.
 
 Invoice addresses are transient collection points. Funds consolidate into treasury exactly like a cash register being emptied into a safe.

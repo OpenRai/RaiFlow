@@ -1,14 +1,16 @@
 // Shared Nano currency utilities for RaiFlow examples
 
-const RAW_PER_XNO = 1_000_000_000_000_000_000_000_000_000n; // 10^30
+export const RAW_PER_XNO = 10n ** 30n;
 
 export function xnoToRaw(xno) {
   const s = String(xno).trim();
-  const dot = s.indexOf('.');
-  const intPart = dot === -1 ? s : s.slice(0, dot);
-  const fracPart = dot === -1 ? '' : s.slice(dot + 1);
-  const padded = (fracPart + '0'.repeat(30)).slice(0, 30);
-  return (BigInt(intPart) * RAW_PER_XNO + BigInt(padded)).toString();
+  const match = /^(\d+)(?:\.(\d{1,30}))?$/.exec(s);
+  if (!match) throw new Error('Amount must be a decimal XNO value with up to 30 fractional digits');
+  const integer = BigInt(match[1]);
+  const fraction = BigInt((match[2] ?? '').padEnd(30, '0') || '0');
+  const raw = integer * RAW_PER_XNO + fraction;
+  if (raw <= 0n) throw new Error('Amount must be greater than zero');
+  return raw.toString();
 }
 
 export function xnoDisplay(raw) {
@@ -20,7 +22,7 @@ export function xnoDisplay(raw) {
   return `${intPart}.${fracPart}`.replace(/\.$/, '');
 }
 
-function truncateAddress(addr) {
+export function truncateAddress(addr) {
   if (!addr || addr.length < 20) return addr ?? '?';
   return addr.slice(0, 13) + '…' + addr.slice(-6);
 }

@@ -616,20 +616,21 @@ export class Runtime {
         const account = await this.accountStore.get(id);
         if (!account)
             return undefined;
-        // A watched account can be changed by a caller-signed block that bypasses
-        // RaiFlow's custodial send/receive orchestrators. Reconcile on reads so an
-        // application never signs its next block against a stale cached frontier.
+        let current = account;
+        // Return a fresh view for caller-signed flows without persisting chain
+        // projections here. AccountStateSync is the sole owner of those writes.
         if (this.rpcPool) {
             try {
                 const live = await this.rpcPool.getClient().accountInfo(account.address);
                 if (live && (live.frontier !== account.frontier
                     || live.balance !== account.balanceRaw
                     || live.representative !== account.representative)) {
-                    return await this.accountStore.update(account.id, {
+                    current = {
+                        ...account,
                         frontier: live.frontier,
                         balanceRaw: live.balance,
                         representative: live.representative,
-                    });
+                    };
                 }
             }
             catch {
@@ -640,7 +641,7 @@ export class Runtime {
         if (account.derivationIndex != null) {
             this.receiveOrchestrator?.enqueueReceivables(account.address, account.derivationIndex);
         }
-        return account;
+        return current;
     }
     async updateAccount(id, patch, idempotencyKey) {
         if (!this.accountStore) {
@@ -1071,25 +1072,6 @@ export class Runtime {
                     data: { send: confirmed },
                     resourceId: confirmed.id,
                     resourceType: 'send',
-                });
-            }
-        }
-        // --- Account balance update for incoming receives ---
-        if (this.accountStore) {
-            const account = await this.accountStore.getByAddress(block.recipientAccount);
-            if (account) {
-                const newBalanceRaw = (BigInt(account.balanceRaw) + BigInt(block.amountRaw)).toString();
-                const updated = await this.accountStore.update(account.id, {
-                    balanceRaw: newBalanceRaw,
-                    frontier: block.blockHash,
-                });
-                await this.emitV2Event({
-                    id: randomUUID(),
-                    type: 'account.balance_updated',
-                    timestamp: new Date().toISOString(),
-                    data: { account: updated, previousBalanceRaw: account.balanceRaw },
-                    resourceId: updated.id,
-                    resourceType: 'account',
                 });
             }
         }

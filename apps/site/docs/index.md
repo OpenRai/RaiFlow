@@ -6,23 +6,16 @@ It is intended to sit between your app and one or more Nano nodes so your applic
 
 ## Current Status
 
-RaiFlow is in a v2 rebuild.
+RaiFlow has a working commerce runtime with managed and watched accounts,
+deposit tracking, invoices, durable sends and refunds, persisted events, and
+webhook delivery. The SDK and HTTP API use `/v1`. Custodial operations require
+custody configuration; non-custodial mode supports watched accounts, work, and
+pre-signed block publishing.
 
-What exists now:
-
-- config loading from `raiflow.yml`
-- SQLite-backed storage and migrations
-- event persistence primitives
-- RPC and WebSocket client primitives
-- custody primitives for derivation, signing, and work generation
-- a transitional runtime that still carries some prototype-era invoice behavior
-
-What is still being built:
-
-- the rebuilt wallet domain
-- the rebuilt invoice domain on top of the new packages
-- the final runtime API surface
-- auth and recovery hardening
+The configured minimum inbound amount filters transfers before deposit,
+payment, event, or receive-job persistence. Inbound storage budgets retain
+evidence and pause processing at configured global and per-destination limits;
+see the [runtime guide](./runtime/) and [roadmap](./roadmap).
 
 ## What RaiFlow Is Trying To Be
 

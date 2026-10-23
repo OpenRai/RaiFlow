@@ -1,9 +1,11 @@
 // @openrai/rpc — Multi-node RPC, WebSocket, failover, and confirmation tracking
 
 import { NanoClient } from '@openrai/nano-core';
-import type { EndpointAuditRecord } from '@openrai/nano-core/transport';
+import { EndpointPool, normalizeEndpoints } from '@openrai/nano-core/transport';
+import { buildHeaders } from '@openrai/nano-core/transport/http';
+import type { EndpointActivityEvent, EndpointAuditRecord, NormalizedEndpoint } from '@openrai/nano-core/transport';
+import type { WorkProvider } from '@openrai/nano-core';
 import type { ConfirmedBlock } from '@openrai/model';
-import { generateWork as rspowGenerate, WorkType } from 'nano-rspow-node';
 
 export interface RpcNodeConfig {
   rpc: string[];
@@ -14,6 +16,8 @@ export interface RpcClient {
   healthCheck(): Promise<void>;
   accountInfo(account: string): Promise<AccountInfoResponse | undefined>;
   accountsReceivable(account: string): Promise<Receivable[]>;
+  accountsReceivableBatch(accounts: string[], count: number): Promise<Record<string, string[]>>;
+  accountHistory(account: string, count: number, options?: { head?: string; reverse?: boolean }): Promise<AccountHistoryEntry[]>;
   /** Read confirmation state for a published block. */
   blockInfo(hash: string): Promise<BlockInfoResponse | undefined>;
   process(block: string): Promise<ProcessResponse>;
@@ -55,6 +59,18 @@ export interface Receivable {
   sender: string;
 }
 
+export interface AccountHistoryEntry {
+  type: string;
+  subtype?: string;
+  account: string;
+  linkAsAccount?: string;
+  amount: string;
+  hash: string;
+  link?: string;
+  confirmed: boolean;
+  localTimestamp?: string;
+}
+
 export interface ProcessResponse {
   hash: string;
 }
@@ -91,15 +107,15 @@ export interface RpcPoolState {
 }
 
 function nodeFromRpcUrl(nodes: RpcNodeConfig[], rpcUrl: string): RpcNodeConfig | undefined {
-  return nodes.find((node) => node.rpc.includes(rpcUrl));
+  return nodes.find((node) => node.rpc.some((url) => safeEndpointUrl(url) === rpcUrl));
 }
 
 function configuredRpcUrls(nodes: RpcNodeConfig[]): string[] {
   return nodes.flatMap((node) => node.rpc);
 }
 
-function configuredWsUrls(nodes: RpcNodeConfig[]): string[] {
-  return nodes.flatMap((node) => node.ws);
+function safeEndpointUrl(url: string): string | undefined {
+  return normalizeEndpoints({ kind: 'rpc', inputs: [url], defaults: [] })[0]?.url.toString();
 }
 
 function isUnsupportedActionError(error: unknown): boolean {
@@ -137,10 +153,77 @@ class Semaphore {
   }
 }
 
+const DEFAULT_RPC_TIMEOUT_MS = 15_000;
+
+/**
+ * Uses nano-core's supported endpoint normalization, authentication and
+ * failover primitives while preserving JSON-RPC application errors for the
+ * RaiFlow action adapter. nano-core HttpEndpointPool.postJson treats every
+ * JSON `error` as an endpoint failure, which prevents action-level fallbacks.
+ */
+class NanoCoreRpcTransport {
+  private readonly pool: EndpointPool;
+
+  constructor(options: {
+    urls?: string[];
+    defaults: string[];
+    env?: string;
+    onActiveEndpointChange?: (event: EndpointActivityEvent) => void;
+  }) {
+    this.pool = new EndpointPool({
+      kind: 'rpc',
+      defaults: options.defaults,
+      ...(options.urls?.length ? { urls: options.urls } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.onActiveEndpointChange ? { onActiveEndpointChange: options.onActiveEndpointChange } : {}),
+    });
+  }
+
+  getAuditReport(): EndpointAuditRecord[] {
+    return this.pool.getAuditReport();
+  }
+
+  async postJson<T extends Record<string, unknown>>(body: Record<string, unknown>): Promise<T> {
+    return this.pool.execute(async (endpoint: NormalizedEndpoint) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DEFAULT_RPC_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(endpoint.url, {
+          method: 'POST',
+          headers: buildHeaders(endpoint),
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const payload = await response.json().catch(() => undefined) as T | undefined;
+      const rpcError = payload && typeof payload === 'object' ? payload.error : undefined;
+      if (response.status === 429 || isRateLimitError(rpcError)) {
+        throw new Error(`HTTP error 429 rate limited${rpcError === undefined ? '' : `: ${String(rpcError)}`}`);
+      }
+      if (!response.ok && !isUnsupportedActionError(rpcError)) {
+        throw new Error(`HTTP error ${response.status} ${response.statusText}`);
+      }
+      if (!payload || typeof payload !== 'object') {
+        throw new Error(`RPC response from ${endpoint.url.toString()} was not a JSON object`);
+      }
+      return payload;
+    });
+  }
+}
+
+function isRateLimitError(error: unknown): boolean {
+  return error === 429 || /429|rate.?limit|quota/i.test(String(error ?? ''));
+}
+
 class PooledRpcClient implements RpcClient {
   constructor(
-    private readonly client: NanoClient,
+    private readonly transport: NanoCoreRpcTransport,
     private readonly semaphore: Semaphore,
+    private readonly workProvider?: Pick<WorkProvider, 'generate'>,
   ) {}
 
   /**
@@ -161,86 +244,10 @@ class PooledRpcClient implements RpcClient {
   ): Promise<T> {
     await this.semaphore.acquire();
     try {
-      return await this._rpcCallInner<T>(body);
+      return await this.transport.postJson<T>(body);
     } finally {
       this.semaphore.release();
     }
-  }
-
-  private async _rpcCallInner<T extends Record<string, unknown>>(
-    body: Record<string, unknown>,
-  ): Promise<T> {
-    // Access the internal EndpointPool and timeout from the HttpEndpointPool.
-    // These are public fields in nano-core's compiled output.
-    const rpcPool = this.client.rpcPool as unknown as {
-      pool: { execute: <R>(attempt: (endpoint: unknown) => Promise<R>) => Promise<R> };
-      timeoutMs: number | null;
-    };
-    const endpointPool = rpcPool.pool;
-    const timeoutMs = rpcPool.timeoutMs;
-
-    return endpointPool.execute(async (ep: unknown) => {
-      const endpoint = ep as {
-        url: URL;
-        auth: { type: string; value?: string; policy?: string };
-      };
-
-      // Build headers (mirrors nano-core's buildHeaders logic)
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (endpoint.auth.type === 'api-key' && endpoint.auth.value) {
-        if (endpoint.auth.policy === 'basic-header') {
-          headers['Authorization'] = `Basic ${btoa(`${endpoint.auth.value}:`)}`;
-        } else {
-          headers['Authorization'] = `Bearer ${endpoint.auth.value}`;
-        }
-      }
-
-      const controller = timeoutMs !== null ? new AbortController() : null;
-      const timer = controller && timeoutMs !== null
-        ? setTimeout(() => controller.abort(), timeoutMs)
-        : null;
-
-      let response: Response;
-      try {
-        response = await fetch(endpoint.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          ...(controller ? { signal: controller.signal } : {}),
-        });
-      } finally {
-        if (timer !== null) clearTimeout(timer);
-      }
-
-      if (!response.ok) {
-        // Hosted providers sometimes return a Nano application error (for
-        // example, an unsupported action) with HTTP 500. Preserve that JSON
-        // so the operation-level adapter can apply a protocol fallback. A
-        // 429 remains a transport/rate-limit failure for endpoint backoff.
-        if (response.status !== 429) {
-          const payload = await response.json().catch(() => undefined);
-          if (payload && typeof payload === 'object' && 'error' in payload) {
-            return payload as T;
-          }
-        }
-        throw new Error(`HTTP error ${response.status} ${response.statusText}`);
-      }
-
-      const json = (await response.json()) as T;
-      // Providers commonly report rate limiting as an HTTP-200 Nano RPC
-      // payload (`{"error":429}`) rather than an HTTP 429 response. Treat
-      // that as endpoint failure so the pool can fail over instead of leaking
-      // an application error to every caller.
-      if (json && (json as Record<string, unknown>).error === 429) {
-        throw new Error('HTTP error 429 rate limited');
-      }
-      // Return the raw JSON — including any `error` field.
-      // The caller decides how to handle application-level errors.
-      // Transport errors (above) are the only ones that poison the pool.
-      return json;
-    });
   }
 
   async healthCheck(): Promise<void> {
@@ -333,6 +340,75 @@ class PooledRpcClient implements RpcClient {
     });
   }
 
+  async accountsReceivableBatch(accounts: string[], count: number): Promise<Record<string, string[]>> {
+    if (accounts.length === 0) return {};
+    const result = await this.rpcCall<Record<string, unknown>>({
+      action: 'accounts_receivable',
+      accounts,
+      count: String(count),
+      source: true,
+      include_only_confirmed: false,
+    });
+    if (result.error === 'Account not found') return Object.fromEntries(accounts.map((account) => [account, []]));
+    if (result.error && isUnsupportedActionError(result.error)) {
+      const pending: Array<readonly [string, string[]]> = [];
+      for (const [index, account] of accounts.entries()) {
+        if (index > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+        const response = await this.rpcCall<Record<string, unknown>>({
+          action: 'pending', account, count: String(count), threshold: '1', source: true,
+        });
+        if (response.error === 'Account not found') pending.push([account, []]);
+        else {
+          if (response.error) throw new Error(`pending error: ${String(response.error)}`);
+          const blocks = response.blocks as Record<string, unknown> | undefined;
+          pending.push([account, Object.keys(blocks ?? {})]);
+        }
+      }
+      return Object.fromEntries(pending);
+    }
+    if (result.error) throw new Error(`accounts_receivable error: ${String(result.error)}`);
+
+    const rawBlocks = result.blocks as Record<string, unknown> | undefined;
+    return Object.fromEntries(accounts.map((account) => {
+      const scoped = rawBlocks?.[account];
+      const blocks = scoped && typeof scoped === 'object'
+        ? scoped as Record<string, unknown>
+        : rawBlocks ?? {};
+      return [account, Object.keys(blocks)];
+    }));
+  }
+
+  async accountHistory(
+    account: string,
+    count: number,
+    options?: { head?: string; reverse?: boolean },
+  ): Promise<AccountHistoryEntry[]> {
+    const result = await this.rpcCall<Record<string, unknown>>({
+      action: 'account_history',
+      account,
+      count: String(count),
+      raw: true,
+      ...(options?.head ? { head: options.head } : {}),
+      ...(options?.reverse ? { reverse: true } : {}),
+    });
+    if (result.error) throw new Error(`account_history error: ${String(result.error)}`);
+    const history = Array.isArray(result.history) ? result.history as Record<string, unknown>[] : [];
+    return history.flatMap((block) => {
+      if (typeof block.hash !== 'string' || typeof block.amount !== 'string' || typeof block.account !== 'string') return [];
+      return [{
+        type: typeof block.type === 'string' ? block.type : '',
+        ...(typeof block.subtype === 'string' ? { subtype: block.subtype } : {}),
+        account: block.account,
+        ...(typeof block.link_as_account === 'string' ? { linkAsAccount: block.link_as_account } : {}),
+        amount: block.amount,
+        hash: block.hash,
+        ...(typeof block.link === 'string' ? { link: block.link } : {}),
+        confirmed: block.confirmed === true || block.confirmed === 'true' || block.confirmed === '1',
+        ...(typeof block.local_timestamp === 'string' ? { localTimestamp: block.local_timestamp } : {}),
+      }];
+    });
+  }
+
   async process(block: string): Promise<ProcessResponse> {
     const result = await this.rpcCall<Record<string, unknown>>({ action: 'process', block });
     if (result.error) throw new Error(`process error: ${String(result.error)}`);
@@ -371,19 +447,22 @@ class PooledRpcClient implements RpcClient {
   }
 
   async workGenerate(hash: string): Promise<WorkGenerateResponse> {
-    return { work: await rspowGenerate(hash, WorkType.Send) };
+    if (!this.workProvider) throw new Error('WorkProvider is not configured');
+    return { work: await this.workProvider.generate(hash, 'send') };
   }
 
   getAuditReport(): EndpointAuditRecord[] {
-    return this.client.rpcPool.getAuditReport();
+    return this.transport.getAuditReport();
   }
 }
 
-export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
+export function createRpcPool(
+  nodes: RpcNodeConfig[],
+  workProvider?: Pick<WorkProvider, 'generate'>,
+): RpcPool {
   const stateListeners = new Set<(state: RpcPoolState) => void>();
   let currentState: RpcPoolState = { status: 'disconnected' };
-  let detachEndpointListener = () => {};
-  let client = NanoClient.initialize(buildClientOptions(nodes));
+  let transport: NanoCoreRpcTransport;
   const healthCacheTtlMs = 30_000;
   let healthCache: RpcHealthReport | null = null;
   let healthProbe: Promise<RpcHealthReport> | null = null;
@@ -394,59 +473,55 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   // cascading cooldown exhaustion ("All endpoints exhausted").
   let semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
 
-  function buildClientOptions(configuredNodes: RpcNodeConfig[]) {
-    const rpc = configuredRpcUrls(configuredNodes);
-    const ws = configuredWsUrls(configuredNodes);
-    return {
-      ...(rpc.length > 0 ? { rpc } : {}),
-      ...(ws.length > 0 ? { ws } : {}),
-    };
-  }
-
   function refreshClient(): void {
-    detachEndpointListener();
-    client = NanoClient.initialize(buildClientOptions(nodes));
+    const defaults = NanoClient.initialize().getAuditReport().rpc.map((endpoint) => endpoint.url);
+    transport = new NanoCoreRpcTransport({
+      urls: configuredRpcUrls(nodes), defaults, env: process.env['NANO_RPC_URL'],
+      onActiveEndpointChange: (event) => {
+        const activeNode = nodeFromRpcUrl(nodes, event.activeUrl);
+        const previousNode = event.previousUrl ? nodeFromRpcUrl(nodes, event.previousUrl) : undefined;
+        currentState = { status: event.status, ...(activeNode ? { activeNode } : {}), ...(previousNode ? { previousNode } : {}) };
+        for (const listener of stateListeners) listener(currentState);
+      },
+    });
     semaphore = new Semaphore(Math.max(1, configuredRpcUrls(nodes).length));
     healthCache = null;
-    detachEndpointListener = client.onEndpointChange((event) => {
-      if (event.kind !== 'rpc') return;
-
-      const activeNode = nodeFromRpcUrl(nodes, event.activeUrl);
-      const previousNode = event.previousUrl ? nodeFromRpcUrl(nodes, event.previousUrl) : undefined;
-      currentState = {
-        status: event.status,
-        ...(activeNode ? { activeNode } : {}),
-        ...(previousNode ? { previousNode } : {}),
-      };
-      for (const listener of stateListeners) listener(currentState);
-    });
   }
 
   refreshClient();
 
   function buildClient(): RpcClient {
-    return new PooledRpcClient(client, semaphore);
+    return new PooledRpcClient(transport, semaphore, workProvider);
   }
 
   async function probeEndpoint(url: string): Promise<RpcEndpointHealth> {
     const startedAt = Date.now();
     const checkedAt = new Date().toISOString();
-    const probe = NanoClient.initialize({ rpc: [url], warn: () => {} });
+    const probe = new NanoCoreRpcTransport({ urls: [url], defaults: [] });
     try {
       try {
-        await probe.rpcPool.postJson<Record<string, unknown>>({ action: 'version' });
+        const result = await probe.postJson<Record<string, unknown>>({ action: 'version' });
+        if (result.error && isRateLimitError(result.error)) {
+          return { url: safeEndpointUrl(url) ?? url, status: 'healthy', checkedAt, latencyMs: Date.now() - startedAt, probeAction: 'version' };
+        }
+        if (result.error) throw new Error(String(result.error));
         return {
-          url,
+          url: safeEndpointUrl(url) ?? url,
           status: 'healthy',
           checkedAt,
           latencyMs: Date.now() - startedAt,
           probeAction: 'version',
         };
       } catch (error) {
-        if (!isUnsupportedActionError(error)) throw error;
-        await probe.rpcPool.postJson<Record<string, unknown>>({ action: 'block_count' });
+        if (!isUnsupportedActionError(error)) {
+          if (isRateLimitError(error)) {
+            return { url: safeEndpointUrl(url) ?? url, status: 'healthy', checkedAt, latencyMs: Date.now() - startedAt, probeAction: 'version' };
+          }
+          throw error;
+        }
+        await probe.postJson<Record<string, unknown>>({ action: 'block_count' });
         return {
-          url,
+          url: safeEndpointUrl(url) ?? url,
           status: 'healthy',
           checkedAt,
           latencyMs: Date.now() - startedAt,
@@ -455,7 +530,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
       }
     } catch (error) {
       return {
-        url,
+        url: safeEndpointUrl(url) ?? url,
         status: 'unhealthy',
         checkedAt,
         latencyMs: Date.now() - startedAt,
@@ -465,7 +540,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
   }
 
   async function getHealthReport(options?: { force?: boolean }): Promise<RpcHealthReport> {
-    const urls = configuredRpcUrls(nodes);
+    const urls = transport.getAuditReport().map((endpoint) => endpoint.url);
     const now = Date.now();
     if (!options?.force && healthCache && healthCache.checkedAt && now - Date.parse(healthCache.checkedAt) < healthCacheTtlMs) {
       return healthCache;
@@ -522,14 +597,14 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
       if (idx < 0) return;
       nodes.splice(idx, 1);
       refreshClient();
-      if (nodes.length === 0 && client.getAuditReport().rpc.length === 0) {
+      if (nodes.length === 0 && transport.getAuditReport().length === 0) {
         currentState = { status: 'disconnected' };
         for (const listener of stateListeners) listener(currentState);
       }
     },
 
     getActiveNode(): RpcClient | undefined {
-      if (configuredRpcUrls(nodes).length === 0 && client.getAuditReport().rpc.length === 0) return undefined;
+      if (configuredRpcUrls(nodes).length === 0 && transport.getAuditReport().length === 0) return undefined;
       return buildClient();
     },
 
@@ -539,7 +614,7 @@ export function createRpcPool(nodes: RpcNodeConfig[]): RpcPool {
     },
 
     getAuditReport(): EndpointAuditRecord[] {
-      return client.rpcPool.getAuditReport();
+      return transport.getAuditReport();
     },
 
     getHealthReport,

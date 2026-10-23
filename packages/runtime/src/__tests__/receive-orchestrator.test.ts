@@ -3,6 +3,8 @@ import type { ReceiveTask, ReceiveTaskStore } from '@openrai/model';
 import type { CustodyEngine } from '@openrai/custody';
 import type { RpcPool } from '@openrai/rpc';
 import { ReceiveOrchestrator } from '../receive-orchestrator.js';
+import { createInMemoryReceiveBlockIntentStore } from '../receive-block-intents.js';
+import { AccountOperationExecutor, createInMemoryAccountOperationLeaseStore } from '../account-operation-executor.js';
 
 function createDeferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -79,7 +81,7 @@ function createMockCustodyEngine(): CustodyEngine {
     getNextManagedIndex: vi.fn(),
     setRepresentative: vi.fn(),
     signSend: vi.fn(),
-    signReceive: vi.fn().mockResolvedValue({ contents: JSON.stringify({ type: 'state' }) }),
+    signReceive: vi.fn().mockResolvedValue({ contents: JSON.stringify({ type: 'state' }), hash: 'published-hash' }),
     signChange: vi.fn(),
     generateWork: vi.fn(),
     generateReceiveWork: vi.fn().mockResolvedValue('test-work'),
@@ -91,6 +93,7 @@ function createMockRpcClient() {
     accountsReceivable: vi.fn().mockResolvedValue([]),
     accountInfo: vi.fn().mockResolvedValue({ frontier: 'frontier-hash' }),
     process: vi.fn().mockResolvedValue({ hash: 'published-hash' }),
+    blockInfo: vi.fn().mockResolvedValue(undefined),
     workGenerate: vi.fn(),
     getAuditReport: vi.fn().mockReturnValue([]),
   };
@@ -123,7 +126,47 @@ describe('ReceiveOrchestrator', () => {
     mockClient = createMockRpcClient();
     rpcPool = createMockRpcPool(mockClient);
     emitEvent = vi.fn().mockResolvedValue(undefined);
-    orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent);
+    orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent, undefined, undefined, 1n);
+  });
+
+  it('uses the configured minimum during recovery without recording skipped hashes', async () => {
+    orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent, undefined, undefined, 10n);
+    mockClient.accountsReceivable.mockResolvedValue([
+      { hash: 'dust', amount: '1' },
+      { hash: 'below', amount: '9' },
+      { hash: 'boundary', amount: '10' },
+      { hash: 'above', amount: '11' },
+    ]);
+    await orchestrator.enqueueReceivables(accountAddress, 42);
+    await orchestrator.enqueueReceivables(accountAddress, 42);
+    expect([...receiveTaskStore.tasks.values()].map((task) => task.pendingBlockHash)).toEqual(['boundary', 'above']);
+    expect(emitEvent).not.toHaveBeenCalled();
+  });
+
+  it('skips old unsigned tasks below a raised minimum but recovers their saved signed intents', async () => {
+    mockClient.accountsReceivable.mockResolvedValue([{ hash: 'old-dust', amount: '1' }]);
+    await orchestrator.enqueueReceivables(accountAddress, 42);
+    const [task] = [...receiveTaskStore.tasks.values()];
+    const intents = createInMemoryReceiveBlockIntentStore();
+    orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent, undefined, intents, 10n);
+    await orchestrator.processNext();
+    expect(custodyEngine.signReceive).not.toHaveBeenCalled();
+    expect(mockClient.process).not.toHaveBeenCalled();
+
+    await intents.createIfAbsent({
+      taskId: task!.id,
+      blockHash: 'published-hash',
+      blockJson: JSON.stringify({ type: 'state', work: 'saved-work' }),
+      frontier: 'saved-frontier',
+      resultingBalanceRaw: '1',
+      createdAt: new Date().toISOString(),
+    });
+    await orchestrator.processNext();
+    expect(mockClient.process).toHaveBeenCalledOnce();
+    expect(custodyEngine.signReceive).not.toHaveBeenCalled();
+    expect(await receiveTaskStore.store.get(task!.id)).toMatchObject({ status: 'published' });
+    await orchestrator.handleConfirmedReceiveBlock('published-hash');
+    expect(await receiveTaskStore.store.get(task!.id)).toMatchObject({ status: 'confirmed' });
   });
 
   describe('enqueueReceivables', () => {
@@ -266,7 +309,55 @@ describe('ReceiveOrchestrator', () => {
       expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'pending', retryCount: 1 });
     });
 
-    it("on failure, increments retryCount and keeps status 'pending' (retry < 3)", async () => {
+    it('reuses the persisted receive block after an ambiguous timeout and restart', async () => {
+      const task = await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'restart-source-hash',
+        amountRaw: '123',
+        status: 'pending',
+        publishedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+      const intentStore = createInMemoryReceiveBlockIntentStore();
+      let firstBlockJson: string | undefined;
+      const firstClient = {
+        ...createMockRpcClient(),
+        process: vi.fn((blockJson: string) => {
+          firstBlockJson = blockJson;
+          return Promise.reject(new Error('request timed out'));
+        }),
+      };
+      rpcPool = createMockRpcPool(firstClient);
+      orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent, undefined, intentStore, 1n);
+
+      await orchestrator.processNext();
+      expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'processing' });
+
+      let replayedBlockJson: string | undefined;
+      const secondClient = {
+        ...createMockRpcClient(),
+        process: vi.fn((blockJson: string) => {
+          replayedBlockJson = blockJson;
+          return Promise.reject(new Error('Old block'));
+        }),
+        blockInfo: vi.fn().mockResolvedValue({ confirmed: false }),
+      };
+      rpcPool = createMockRpcPool(secondClient);
+      orchestrator = new ReceiveOrchestrator(receiveTaskStore.store, custodyEngine, rpcPool, emitEvent, undefined, intentStore, 1n);
+
+      await orchestrator.processNext();
+
+      expect(secondClient.accountInfo).not.toHaveBeenCalled();
+      expect(custodyEngine.signReceive).toHaveBeenCalledTimes(1);
+      expect(replayedBlockJson).toBe(firstBlockJson);
+      expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'published', receiveBlockHash: 'published-hash' });
+    });
+
+    it('keeps an ambiguous process result recoverable with its processing lease and exact intent', async () => {
       const task = await receiveTaskStore.store.create({
         accountAddress,
         derivationIndex: 7,
@@ -285,12 +376,12 @@ describe('ReceiveOrchestrator', () => {
       await orchestrator.processNext();
 
       const updated = await receiveTaskStore.store.get(task.id);
-      expect(updated?.status).toBe('pending');
-      expect(updated?.retryCount).toBe(1);
+      expect(updated?.status).toBe('processing');
+      expect(updated?.retryCount).toBe(0);
       expect(emitEvent).not.toHaveBeenCalled();
     });
 
-    it("on 3rd failure, marks status 'failed' and calls emitEvent with 'receive.failed'", async () => {
+    it('does not terminally fail a receive after an ambiguous process error', async () => {
       const task = await receiveTaskStore.store.create({
         accountAddress,
         derivationIndex: 7,
@@ -309,11 +400,10 @@ describe('ReceiveOrchestrator', () => {
       await orchestrator.processNext();
 
       const updated = await receiveTaskStore.store.get(task.id);
-      expect(updated?.status).toBe('failed');
-      expect(updated?.retryCount).toBe(3);
-      expect(updated?.failedAt).toBeTruthy();
-      expect(updated?.failReason).toContain('process failed hard');
-      expect(emitEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'receive.failed' }));
+      expect(updated?.status).toBe('processing');
+      expect(updated?.retryCount).toBe(2);
+      expect(updated?.failedAt).toBeNull();
+      expect(emitEvent).not.toHaveBeenCalled();
     });
 
     it('does not process concurrently (processing flag guard)', async () => {
@@ -346,19 +436,68 @@ describe('ReceiveOrchestrator', () => {
 
       await Promise.all([p1, p2]);
 
-      expect(listSpy).toHaveBeenCalledTimes(1);
+      expect(listSpy).toHaveBeenCalledTimes(2);
+      expect(listSpy).toHaveBeenCalledWith('pending');
+      expect(listSpy).toHaveBeenCalledWith('processing');
       expect(mockClient.process).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips an account held by another worker so a different account can progress', async () => {
+      await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'held-account-source',
+        amountRaw: '10',
+        status: 'pending',
+        publishedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+      const otherAddress = 'another-account-address';
+      const otherTask = await receiveTaskStore.store.create({
+        accountAddress: otherAddress,
+        derivationIndex: 8,
+        pendingBlockHash: 'other-account-source',
+        amountRaw: '20',
+        status: 'pending',
+        publishedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+      const leaseStore = createInMemoryAccountOperationLeaseStore();
+      const now = new Date().toISOString();
+      await leaseStore.acquire(accountAddress, 'another-worker', now, new Date(Date.now() + 60_000).toISOString());
+      orchestrator = new ReceiveOrchestrator(
+        receiveTaskStore.store,
+        custodyEngine,
+        rpcPool,
+        emitEvent,
+        new AccountOperationExecutor(leaseStore),
+        undefined,
+        1n,
+      );
+
+      await orchestrator.processNext();
+
+      expect(mockClient.process).toHaveBeenCalledTimes(1);
+      expect(await receiveTaskStore.store.getByPendingBlockHash('held-account-source')).toMatchObject({ status: 'pending' });
+      expect(await receiveTaskStore.store.get(otherTask.id)).toMatchObject({ status: 'published' });
     });
   });
 
   describe('handleConfirmedReceive', () => {
-    it("updates a 'published' task to 'confirmed'", async () => {
+    it("confirms by RaiFlow's receive block hash", async () => {
       const task = await receiveTaskStore.store.create({
         accountAddress,
         derivationIndex: 7,
-        pendingBlockHash: 'publish-hash',
+        pendingBlockHash: 'source-send-hash',
         amountRaw: '123',
         status: 'published',
+        receiveBlockHash: 'publish-hash',
         publishedAt: new Date().toISOString(),
         confirmedAt: null,
         failedAt: null,
@@ -371,6 +510,26 @@ describe('ReceiveOrchestrator', () => {
       const updated = await receiveTaskStore.store.get(task.id);
       expect(updated?.status).toBe('confirmed');
       expect(updated?.confirmedAt).toBeTruthy();
+    });
+
+    it('does not confuse source-send finality with receive-block finality', async () => {
+      const task = await receiveTaskStore.store.create({
+        accountAddress,
+        derivationIndex: 7,
+        pendingBlockHash: 'source-send-hash',
+        amountRaw: '123',
+        status: 'published',
+        receiveBlockHash: 'own-receive-hash',
+        publishedAt: new Date().toISOString(),
+        confirmedAt: null,
+        failedAt: null,
+        failReason: null,
+        retryCount: 0,
+      });
+
+      await orchestrator.handleConfirmedReceive('source-send-hash');
+
+      expect(await receiveTaskStore.store.get(task.id)).toMatchObject({ status: 'published', confirmedAt: null });
     });
 
     it('is a no-op for unknown hash', async () => {
