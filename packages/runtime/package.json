@@ -19,7 +19,7 @@
     "build": "tsc && node scripts/write-version.mjs",
     "dev": "node ./scripts/dev.mjs",
     "start": "node dist/main.js",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
