@@ -421,7 +421,13 @@ Typical release steps:
 pnpm changeset
 ```
 
-2. Apply the version bumps, create a release commit, and create one tag per bumped package:
+2. Push the changeset to `main`. The Release workflow builds and tests, applies
+   the version bumps, publishes eligible packages through npm Trusted
+   Publishing, then pushes the release commit and package tags directly to
+   `main`.
+
+The manual escape hatch applies the version bumps, creates a release commit,
+and creates one tag per bumped package:
 
 ```bash
 pnpm release:version
@@ -433,4 +439,4 @@ pnpm release:version
 git push && git push --tags
 ```
 
-GitHub Actions then builds, tests, and publishes tagged packages from `.github/workflows/release.yml` using npm Trusted Publisher.
+The workflow publishes with OIDC; it does not open a version PR.

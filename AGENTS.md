@@ -66,7 +66,7 @@ pnpm --filter @openrai/runtime test
 pnpm --filter @openrai/runtime build
 
 pnpm changeset # add a changeset file
-pnpm release:version  # bump versions, commit, tag (after merge to main)
+pnpm release:version  # manual release escape hatch; main publishes automatically
 ```
 
 **Order matters before committing:** `pnpm build` then `pnpm test`. Lint runs in CI on the main branch — not as a pre-commit step locally.
@@ -77,10 +77,10 @@ pnpm release:version  # bump versions, commit, tag (after merge to main)
 
 ## Release Process
 
-The Release workflow uses `changesets/action@v1` with npm Trusted Publishing (OIDC). On push to main:
+The Release workflow uses Changesets and npm Trusted Publishing (OIDC). On push to main:
 
-- Changesets present → creates a "Version Packages" PR
-- PR merged → runs `pnpm release` (`changeset publish --provenance`) → publishes all packages via OIDC → creates `@openrai/*@X.Y.Z` tags
+- Build and tests pass → Changesets versions the packages
+- Packages publish through OIDC → the version commit and `@openrai/*@X.Y.Z` tags are pushed directly to main
 
 ### Developer flow
 
@@ -89,20 +89,19 @@ pnpm changeset  # add a changeset file
 git add . && git commit -m "chore: add changeset" && git push
 ```
 
-1. Push to main
-2. CI creates a "Version Packages" PR
-3. Merge the PR
-4. CI publishes automatically (OIDC, no tokens)
+1. Add a changeset with the feature or fix
+2. Push the change to main
+3. CI builds, tests, versions, and publishes eligible packages directly (OIDC, no tokens)
 
 ### Manual escape hatch
 
 ```bash
-# If the automated flow is unavailable:
-pnpm release:version  # runs changeset version, commits, tags all public packages
-git push && git push --tags
+# If the automated flow is unavailable, version and tag locally, then push:
+pnpm release:version
+git push origin HEAD:main --atomic --tags
 ```
 
-The `scripts/release-version.mjs` script is retained for manual releases, but the primary flow should be through `changesets/action`.
+The `scripts/release-version.mjs` script is retained as the manual escape hatch. The primary flow versions and publishes directly from the main-branch workflow.
 
 **CRITICAL — No legacy token auth:** This project uses npm Trusted Publishers with OIDC via GitHub Actions. The workflow has `id-token: write` and publishes directly to npm. **Never suggest, ask about, or attempt to add a GitHub secret `NPM_TOKEN`.** Token-based npm auth is not acceptable in 2026. If OIDC publish fails, fix the OIDC/Trusted Publishers configuration (registry URL, workflow path, permissions, or npm-side publisher setup) — do not fall back to long-lived tokens.
 

@@ -9,7 +9,6 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write
-  pull-requests: write
   id-token: write
 
 jobs:
@@ -46,10 +45,16 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Create Release Pull Request or Publish to npm
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          publish: pnpm release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply changesets
+        run: pnpm release:version
+
+      - name: Publish packages through npm Trusted Publishing
+        run: pnpm release
+
+      - name: Push release commit and tags to main
+        run: git push --atomic origin HEAD:refs/heads/main --tags

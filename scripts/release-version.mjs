@@ -81,5 +81,5 @@ for (const name of publishedPackages) {
 }
 
 console.log(`\n[release:version] Commit and tags created for: ${summary}`);
-console.log('[release:version] Run: git push && git push --tags\n');
-console.log('Trusted Publishers will detect the tags and publish to npm automatically.\n');
+console.log('[release:version] Run: git push origin HEAD:main --atomic --tags\n');
+console.log('The main-branch Release workflow publishes through npm Trusted Publishing.\n');
