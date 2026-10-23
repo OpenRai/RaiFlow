@@ -12,10 +12,11 @@ This does not affect `@openrai/nano-core`, which lives in a separate repo and ve
 Typical flow:
 
 1. Create a changeset with `pnpm changeset`
-2. Apply version bumps, create a commit, and create package tags with `pnpm release:version`
-3. Push the commit and tags with `git push && git push --tags`
-4. GitHub Actions publishes the tagged public packages via npm Trusted Publisher
+2. Push the changeset to `main`
+3. The Release workflow builds and tests, applies versions, publishes through npm Trusted Publisher, then pushes the version commit and package tags directly to `main`
 
 Each release commit should therefore produce matching package tags for all three published packages at the same version.
+
+`pnpm release:version` remains available as a manual escape hatch when the automated workflow is unavailable.
 
 Local development stays on `workspace:*` links so examples and packages continue to use in-repo sources without requiring prereleases.

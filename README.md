@@ -436,7 +436,7 @@ pnpm release:version
 3. Push the commit and tags:
 
 ```bash
-git push && git push --tags
+git push origin HEAD:main --atomic --tags
 ```
 
 The workflow publishes with OIDC; it does not open a version PR.

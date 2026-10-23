@@ -43,7 +43,7 @@ jobs:
         run: pnpm build
 
       - name: Test
-        run: pnpm test
+        run: pnpm -r --workspace-concurrency=1 test
 
       - name: Configure git identity
         run: |
