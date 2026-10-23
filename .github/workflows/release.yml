@@ -27,8 +27,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm for Trusted Publishing
+        run: npm install --global npm@11.15.0
 
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install stable
